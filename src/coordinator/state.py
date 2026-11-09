@@ -11,4 +11,5 @@ class ReleaseGraphState(TypedDict):
     static_dependents: list[str]
     runtime_metrics: dict[str, object]
     risk_score: float
+    deployment_sequence: list[str]
     evidence_report: str
