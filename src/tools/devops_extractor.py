@@ -1,8 +1,134 @@
-"""Read-only interfaces for extracting repository and pipeline data."""
+"""Read-only clients for extracting Azure DevOps repository and pipeline data."""
+
+import logging
+import os
+import re
+from typing import Any
+
+from azure.devops.connection import Connection
+from azure.identity import DefaultAzureCredential
+from msrest.authentication import BasicTokenAuthentication
+
+
+logger = logging.getLogger(__name__)
+_AZURE_DEVOPS_SCOPE = "499b84ac-1321-427f-aa17-267ca6975798/.default"
+_TEXT_FILE_SUFFIXES = {
+    ".cfg",
+    ".conf",
+    ".cs",
+    ".env",
+    ".go",
+    ".html",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".md",
+    ".php",
+    ".properties",
+    ".py",
+    ".rb",
+    ".sh",
+    ".toml",
+    ".ts",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+_ENDPOINT_PATTERN = re.compile(r"""https?://[^\s"'<>)}\]]+""", re.IGNORECASE)
 
 
 class DevOpsExtractor:
     """Read-only client boundary for DevOps pipeline and repository data."""
+
+    def __init__(self) -> None:
+        self._credential = DefaultAzureCredential()
+        self._organization_url = os.getenv("AZURE_DEVOPS_ORG_URL")
+        self._project = os.getenv("AZURE_DEVOPS_PROJECT")
+
+    def _get_clients(self) -> tuple[Any, Any, str]:
+        if not self._organization_url or not self._project:
+            raise ValueError(
+                "AZURE_DEVOPS_ORG_URL and AZURE_DEVOPS_PROJECT must be configured"
+            )
+
+        access_token = self._credential.get_token(_AZURE_DEVOPS_SCOPE)
+        credentials = BasicTokenAuthentication({"access_token": access_token.token})
+        connection = Connection(base_url=self._organization_url, creds=credentials)
+        return (
+            connection.clients.get_build_client(),
+            connection.clients.get_git_client(),
+            self._project,
+        )
+
+    @staticmethod
+    def _read_item_content(
+        git_client: Any, repository_id: str, path: str, project: str
+    ) -> str:
+        content = git_client.get_item_content(repository_id, path, project=project)
+        if isinstance(content, (bytes, bytearray)):
+            return bytes(content).decode("utf-8", errors="replace")
+        return b"".join(content).decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _parse_yaml_variables(content: str) -> dict[str, str]:
+        variables: dict[str, str] = {}
+        lines = content.splitlines()
+        section_start = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if re.match(r"^variables\s*:", line)
+            ),
+            None,
+        )
+        if section_start is None:
+            return variables
+
+        pending_name: str | None = None
+        for line in lines[section_start + 1 :]:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent == 0:
+                break
+
+            list_entry = re.match(r"^\s*-\s*name\s*:\s*(.+?)\s*$", line)
+            if list_entry:
+                pending_name = list_entry.group(1).strip("\"'")
+                continue
+
+            value_entry = re.match(r"^\s+value\s*:\s*(.*?)\s*$", line)
+            if pending_name and value_entry:
+                value = value_entry.group(1).strip()
+                variables[pending_name] = value.strip("\"'")
+                pending_name = None
+                continue
+
+            mapping_entry = re.match(
+                r"^\s*(?:-\s*)?([A-Za-z_][\w.-]*)\s*:\s*(.*?)\s*$", line
+            )
+            if mapping_entry and mapping_entry.group(1) not in {
+                "name",
+                "value",
+                "group",
+            }:
+                key, value = mapping_entry.groups()
+                variables[key] = value.strip().strip("\"'")
+                pending_name = None
+
+        return variables
+
+    @staticmethod
+    def _find_repository(git_client: Any, project: str, repo_name: str) -> Any:
+        return next(
+            (
+                repository
+                for repository in git_client.get_repositories(project)
+                if repository.name == repo_name
+            ),
+            None,
+        )
 
     def get_pipeline_variables(self, repo_name: str) -> dict[str, str]:
         """Return the configured variables for a repository's pipeline.
@@ -15,11 +141,62 @@ class DevOpsExtractor:
 
         Returns:
             A mapping of pipeline variable names to their string values.
-
-        Raises:
-            NotImplementedError: Until the Azure DevOps SDK integration is added.
         """
-        raise NotImplementedError("Azure SDK integration pending")
+        try:
+            build_client, git_client, project = self._get_clients()
+            source_repository = self._find_repository(
+                git_client, project, repo_name
+            )
+            if source_repository is None:
+                logger.warning(
+                    "Azure DevOps repository %s was not found", repo_name
+                )
+                return {}
+
+            definitions = build_client.get_definitions(
+                project=project,
+                repository_id=source_repository.id,
+                repository_type=getattr(source_repository, "type", "TfsGit"),
+            )
+            if not definitions:
+                logger.warning(
+                    "No Azure DevOps pipeline definitions found for repository %s",
+                    repo_name,
+                )
+                return {}
+
+            variables: dict[str, str] = {}
+            for definition_summary in definitions:
+                definition = build_client.get_definition(
+                    definition_id=definition_summary.id, project=project
+                )
+                process = getattr(definition, "process", None)
+                yaml_filename = getattr(process, "yaml_filename", None)
+                if yaml_filename:
+                    definition_repository = getattr(
+                        definition, "repository", None
+                    )
+                    repository_id = (
+                        getattr(definition_repository, "id", None)
+                        or source_repository.id
+                    )
+                    if repository_id:
+                        yaml_content = self._read_item_content(
+                            git_client, repository_id, yaml_filename, project
+                        )
+                        variables.update(self._parse_yaml_variables(yaml_content))
+
+                definition_variables = getattr(definition, "variables", None) or {}
+                for name, variable in definition_variables.items():
+                    value = getattr(variable, "value", None)
+                    if value is not None and not getattr(variable, "is_secret", False):
+                        variables[name] = str(value)
+            return variables
+        except Exception:
+            logger.exception(
+                "Failed to read pipeline variables for repository %s", repo_name
+            )
+            return {}
 
     def scan_repository_for_endpoints(self, repo_name: str) -> list[str]:
         """Find endpoint references in a repository without modifying it.
@@ -33,8 +210,36 @@ class DevOpsExtractor:
 
         Returns:
             Endpoint references discovered in the repository.
-
-        Raises:
-            NotImplementedError: Until the Azure DevOps SDK integration is added.
         """
-        raise NotImplementedError("Azure SDK integration pending")
+        try:
+            _, git_client, project = self._get_clients()
+            repository = self._find_repository(git_client, project, repo_name)
+            if repository is None:
+                logger.warning("Azure DevOps repository %s was not found", repo_name)
+                return []
+
+            items = git_client.get_items(
+                repository.id, project=project, recursion_level="Full"
+            )
+            endpoints: list[str] = []
+            seen: set[str] = set()
+            for item in items:
+                if getattr(item, "is_folder", False):
+                    continue
+                path = getattr(item, "path", "")
+                if os.path.splitext(path)[1].lower() not in _TEXT_FILE_SUFFIXES:
+                    continue
+                content = self._read_item_content(
+                    git_client, repository.id, path, project
+                )
+                for match in _ENDPOINT_PATTERN.findall(content):
+                    endpoint = match.rstrip(".,;:")
+                    if endpoint not in seen:
+                        seen.add(endpoint)
+                        endpoints.append(endpoint)
+            return endpoints
+        except Exception:
+            logger.exception(
+                "Failed to scan repository %s for endpoints", repo_name
+            )
+            return []
