@@ -1,0 +1,76 @@
+{
+  "AppDependencies": [
+    {
+      "AppRoleName": "checkout-service",
+      "Target": "payment-service",
+      "TimeGenerated": "2026-11-11T09:00:00Z",
+      "Success": false
+    },
+    {
+      "AppRoleName": "checkout-service",
+      "Target": "payment-service",
+      "TimeGenerated": "2026-11-11T09:01:00Z",
+      "Success": false
+    },
+    {
+      "AppRoleName": "checkout-service",
+      "Target": "payment-service",
+      "TimeGenerated": "2026-11-11T09:02:00Z",
+      "Success": true
+    },
+    {
+      "AppRoleName": "checkout-service",
+      "Target": "inventory-service",
+      "TimeGenerated": "2026-11-11T09:03:00Z",
+      "Success": false
+    },
+    {
+      "AppRoleName": "checkout-service",
+      "Target": "inventory-service",
+      "TimeGenerated": "2026-11-11T09:04:00Z",
+      "Success": false
+    },
+    {
+      "AppRoleName": "checkout-service",
+      "Target": "inventory-service",
+      "TimeGenerated": "2026-11-11T09:05:00Z",
+      "Success": false
+    },
+    {
+      "AppRoleName": "checkout-service",
+      "Target": "inventory-service",
+      "TimeGenerated": "2026-11-11T09:06:00Z",
+      "Success": true
+    },
+    {
+      "AppRoleName": "checkout-service",
+      "Target": "promotion-service",
+      "TimeGenerated": "2026-11-11T09:07:00Z",
+      "Success": false
+    },
+    {
+      "AppRoleName": "checkout-service",
+      "Target": "promotion-service",
+      "TimeGenerated": "2026-11-11T09:08:00Z",
+      "Success": false
+    },
+    {
+      "AppRoleName": "checkout-service",
+      "Target": "promotion-service",
+      "TimeGenerated": "2026-11-11T09:09:00Z",
+      "Success": false
+    },
+    {
+      "AppRoleName": "cart-service",
+      "Target": "checkout-service",
+      "TimeGenerated": "2026-11-11T09:10:00Z",
+      "Success": true
+    },
+    {
+      "AppRoleName": "api-gateway",
+      "Target": "cart-service",
+      "TimeGenerated": "2026-11-11T09:11:00Z",
+      "Success": true
+    }
+  ]
+}

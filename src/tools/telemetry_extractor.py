@@ -1,24 +1,47 @@
 """Read-only client for extracting service dependency telemetry."""
 
+import json
 import logging
 import os
+from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import TypeAlias
 
 from azure.identity import DefaultAzureCredential
 from azure.monitor.query import LogsQueryClient
+from pydantic import BaseModel, Field, ValidationError
 
 from src.core.models import DependencyEdge, DiscoveryMethod
 
 
 logger = logging.getLogger(__name__)
+RuntimeMetrics: TypeAlias = dict[str, dict[str, int | float]]
+
+
+class _MockDependencyRecord(BaseModel):
+    """Validated shape of one AppDependencies query result row."""
+
+    source: str = Field(alias="AppRoleName", min_length=1)
+    target: str = Field(alias="Target", min_length=1)
+    time_generated: datetime = Field(alias="TimeGenerated")
+    success: bool = Field(alias="Success")
 
 
 class TelemetryExtractor:
     """Read-only client boundary for telemetry-derived dependencies."""
 
     def __init__(self) -> None:
-        self._credential = DefaultAzureCredential()
-        self._client = LogsQueryClient(self._credential)
+        self._source = os.getenv("TELEMETRY_SOURCE", "mock").lower()
+        if self._source not in {"mock", "azure"}:
+            raise ValueError("TELEMETRY_SOURCE must be either 'mock' or 'azure'")
+
+        self._runtime_metrics: RuntimeMetrics = {}
+        self._credential: DefaultAzureCredential | None = None
+        self._client: LogsQueryClient | None = None
+        if self._source == "azure":
+            self._credential = DefaultAzureCredential()
+            self._client = LogsQueryClient(self._credential)
         self._resource_id = os.getenv("APPLICATIONINSIGHTS_RESOURCE_ID")
         self._workspace_id = (
             os.getenv("LOG_ANALYTICS_WORKSPACE_ID")
@@ -30,21 +53,96 @@ class TelemetryExtractor:
     ) -> list[DependencyEdge]:
         """Return active dependency edges observed within a lookback period.
 
-        This method is intended to query telemetry for observed service
-        interactions only. It must not emit telemetry, change monitoring
-        configuration, or otherwise mutate the source system.
-
-        Args:
-            days_back: Number of preceding days of telemetry to inspect.
-
-        Returns:
-            Dependency edges observed during the requested period.
+        The local source reads AppDependencies-shaped records from the root
+        mock_telemetry.json fixture. Set TELEMETRY_SOURCE=azure to use Azure.
         """
+        if days_back <= 0:
+            raise ValueError("days_back must be a positive integer")
+        if self._source == "mock":
+            return self._get_active_dependencies_from_mock()
+        return self._get_active_dependencies_from_azure(days_back)
+
+    def get_runtime_metrics(self) -> RuntimeMetrics:
+        """Return metrics derived from the most recently loaded mock records."""
+        return {
+            service: metrics.copy()
+            for service, metrics in self._runtime_metrics.items()
+        }
+
+    def _get_active_dependencies_from_mock(self) -> list[DependencyEdge]:
+        mock_path = Path(__file__).resolve().parents[2] / "mock_telemetry.json"
+        try:
+            with mock_path.open(encoding="utf-8") as mock_file:
+                payload = json.load(mock_file)
+            if not isinstance(payload, dict):
+                raise ValueError("mock_telemetry.json must contain a JSON object")
+            raw_records = payload.get("AppDependencies")
+            if not isinstance(raw_records, list):
+                raise ValueError(
+                    "mock_telemetry.json must contain an AppDependencies list"
+                )
+
+            records: list[_MockDependencyRecord] = []
+            for raw_record in raw_records:
+                try:
+                    record = _MockDependencyRecord.parse_obj(raw_record)
+                except (ValidationError, TypeError) as error:
+                    logger.warning(
+                        "Skipping invalid mock dependency record: %s", error
+                    )
+                    continue
+                if not record.source.strip() or not record.target.strip():
+                    logger.warning(
+                        "Skipping mock dependency with an empty service name"
+                    )
+                    continue
+                records.append(record)
+
+            latest_observations: dict[tuple[str, str], datetime] = {}
+            request_counts: dict[str, int] = defaultdict(int)
+            failure_counts: dict[str, int] = defaultdict(int)
+            for record in records:
+                edge_key = (record.source, record.target)
+                latest_observations[edge_key] = max(
+                    latest_observations.get(edge_key, record.time_generated),
+                    record.time_generated,
+                )
+                request_counts[record.source] += 1
+                if not record.success:
+                    failure_counts[record.source] += 1
+
+            edges = [
+                DependencyEdge(
+                    source_service_id=source,
+                    target_service_id=target,
+                    discovery_methods=[DiscoveryMethod.RUNTIME_TELEMETRY],
+                    confidence_score=1.0,
+                    last_observed_at=observed_at,
+                )
+                for (source, target), observed_at in latest_observations.items()
+            ]
+            self._runtime_metrics = {
+                service: {
+                    "error_rate": failure_counts[service] / count,
+                    "request_count": count,
+                }
+                for service, count in request_counts.items()
+            }
+            return edges
+        except (OSError, json.JSONDecodeError, ValueError):
+            self._runtime_metrics = {}
+            logger.exception(
+                "Failed to load mock application dependencies from %s", mock_path
+            )
+            return []
+
+    def _get_active_dependencies_from_azure(
+        self, days_back: int
+    ) -> list[DependencyEdge]:
+        """Query Azure Monitor for observed dependency edges."""
         try:
             resource_id = self._resource_id
             workspace_id = self._workspace_id
-            if days_back <= 0:
-                raise ValueError("days_back must be a positive integer")
             if not resource_id and not workspace_id:
                 raise ValueError(
                     "Set APPLICATIONINSIGHTS_RESOURCE_ID or "
@@ -59,6 +157,8 @@ class TelemetryExtractor:
                     by Source=AppRoleName, Target
                 | project Source, Target, LastObservedAt
             """
+            if self._client is None:
+                raise RuntimeError("Azure telemetry client was not initialized")
             if resource_id:
                 response = self._client.query_resource(
                     resource_id,

@@ -8,7 +8,7 @@ from src.tools.telemetry_extractor import TelemetryExtractor
 
 def extract_trigger_node(state: ReleaseGraphState) -> dict[str, object]:
     """Extract the target services from the triggering release event."""
-    return {"target_services": ["payment-service"]}
+    return {"target_services": state.get("target_services") or ["payment-service"]}
 
 
 def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
@@ -19,15 +19,14 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
 def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, object]:
     """Validate runtime telemetry for dependencies in the release radius."""
     extractor = TelemetryExtractor()
-    extractor.get_active_dependencies(days_back=7)
-    return {
-        "runtime_metrics": {
-            "payment-service": {
-                "error_rate": 0.05,
-                "active_connections": 120,
-            }
-        }
+    dependencies = extractor.get_active_dependencies(days_back=7)
+    active_sources = {edge.source_service_id for edge in dependencies}
+    runtime_metrics = {
+        service: metrics
+        for service, metrics in extractor.get_runtime_metrics().items()
+        if service in active_sources
     }
+    return {"runtime_metrics": runtime_metrics}
 
 
 def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]:
