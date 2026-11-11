@@ -48,6 +48,42 @@ class TelemetryExtractor:
             or os.getenv("APPLICATIONINSIGHTS_WORKSPACE_ID")
         )
 
+    def verify_access(self) -> tuple[bool, str]:
+        """Confirm query access with a trivial KQL statement that scans no data.
+
+        In mock mode no Azure access is required, so the check passes.
+
+        Returns:
+            (True, "Success") when the query succeeds, otherwise
+            (False, <error message>).
+        """
+        if self._source == "mock":
+            return True, "Success"
+        try:
+            if self._client is None:
+                raise RuntimeError("Azure telemetry client was not initialized")
+            query = "print ok=1"
+            timespan = timedelta(minutes=5)
+            if self._resource_id:
+                response = self._client.query_resource(
+                    self._resource_id, query, timespan=timespan
+                )
+            elif self._workspace_id:
+                response = self._client.query_workspace(
+                    self._workspace_id, query, timespan=timespan
+                )
+            else:
+                raise ValueError(
+                    "Set APPLICATIONINSIGHTS_RESOURCE_ID or "
+                    "LOG_ANALYTICS_WORKSPACE_ID to query telemetry"
+                )
+            if not hasattr(response, "tables"):
+                raise RuntimeError(str(getattr(response, "error", response)))
+            return True, "Success"
+        except Exception as error:
+            logger.warning("Telemetry access verification failed: %s", error)
+            return False, str(error)
+
     def get_active_dependencies(
         self, days_back: int = 30
     ) -> list[DependencyEdge]:

@@ -46,7 +46,7 @@ class DevOpsExtractor:
         self._organization_url = os.getenv("AZURE_DEVOPS_ORG_URL")
         self._project = os.getenv("AZURE_DEVOPS_PROJECT")
 
-    def _get_clients(self) -> tuple[Any, Any, str]:
+    def _get_connection(self) -> Connection:
         if not self._organization_url or not self._project:
             raise ValueError(
                 "AZURE_DEVOPS_ORG_URL and AZURE_DEVOPS_PROJECT must be configured"
@@ -54,12 +54,30 @@ class DevOpsExtractor:
 
         access_token = self._credential.get_token(_AZURE_DEVOPS_SCOPE)
         credentials = BasicTokenAuthentication({"access_token": access_token.token})
-        connection = Connection(base_url=self._organization_url, creds=credentials)
+        return Connection(base_url=self._organization_url, creds=credentials)
+
+    def _get_clients(self) -> tuple[Any, Any, str]:
+        connection = self._get_connection()
         return (
             connection.clients.get_build_client(),
             connection.clients.get_git_client(),
-            self._project,
+            self._project or "",
         )
+
+    def verify_access(self) -> tuple[bool, str]:
+        """Confirm read access by fetching the configured project's metadata.
+
+        Returns:
+            (True, "Success") when the project is readable, otherwise
+            (False, <error message>).
+        """
+        try:
+            connection = self._get_connection()
+            connection.clients.get_core_client().get_project(self._project)
+            return True, "Success"
+        except Exception as error:
+            logger.warning("Azure DevOps access verification failed: %s", error)
+            return False, str(error)
 
     @staticmethod
     def _read_item_content(

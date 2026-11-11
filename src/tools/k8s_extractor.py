@@ -26,6 +26,29 @@ class KubernetesExtractor:
                 return
         self._core_v1_api = client.CoreV1Api()
 
+    def verify_access(self, namespace: str) -> tuple[bool, str]:
+        """Confirm read access by listing at most one service in a namespace.
+
+        The check is namespaced because the required RBAC is a namespaced
+        Role; a cluster-wide list would fail for correctly scoped identities.
+
+        Returns:
+            (True, "Success") when services are listable, otherwise
+            (False, <error message>).
+        """
+        if self._core_v1_api is None:
+            return False, "Kubernetes client configuration could not be loaded"
+        try:
+            self._core_v1_api.list_namespaced_service(namespace, limit=1)
+            return True, "Success"
+        except Exception as error:
+            logger.warning(
+                "Kubernetes access verification failed for namespace %s: %s",
+                namespace,
+                error,
+            )
+            return False, str(error)
+
     def get_namespace_services(self, namespace: str) -> list[ServiceNode]:
         """Return service nodes observed in a Kubernetes namespace.
 

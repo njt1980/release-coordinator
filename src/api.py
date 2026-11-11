@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field
 
 from src.discovery_engine.graph import discovery_app
 from src.discovery_engine.state import DiscoveryGraphState
+from src.tools.devops_extractor import DevOpsExtractor
+from src.tools.k8s_extractor import KubernetesExtractor
+from src.tools.telemetry_extractor import TelemetryExtractor
 
 
 app = FastAPI(title="Release Coordinator API")
@@ -27,6 +30,58 @@ class OnboardingResponse(BaseModel):
     message: str
     job_id: str
     workspace_id: str
+
+
+class SystemVerification(BaseModel):
+    """Outcome of a read-only access check against one integration."""
+
+    status: bool
+    message: str
+
+
+class VerificationResponse(BaseModel):
+    """Pre-flight access results keyed by integration."""
+
+    devops: SystemVerification
+    kubernetes: SystemVerification
+    telemetry: SystemVerification
+
+
+def _to_verification(result: tuple[bool, str]) -> SystemVerification:
+    status_ok, message = result
+    return SystemVerification(status=status_ok, message=message)
+
+
+def verify_devops() -> SystemVerification:
+    """Run the Azure DevOps read-only access check."""
+    try:
+        return _to_verification(DevOpsExtractor().verify_access())
+    except Exception as error:
+        return SystemVerification(status=False, message=str(error))
+
+
+def verify_kubernetes(namespaces: list[str]) -> SystemVerification:
+    """Run the Kubernetes access check in every requested namespace."""
+    try:
+        extractor = KubernetesExtractor()
+        failures: list[str] = []
+        for namespace in namespaces:
+            ok, message = extractor.verify_access(namespace)
+            if not ok:
+                failures.append(f"{namespace}: {message}")
+        if failures:
+            return SystemVerification(status=False, message="; ".join(failures))
+        return SystemVerification(status=True, message="Success")
+    except Exception as error:
+        return SystemVerification(status=False, message=str(error))
+
+
+def verify_telemetry() -> SystemVerification:
+    """Run the telemetry read-only query check."""
+    try:
+        return _to_verification(TelemetryExtractor().verify_access())
+    except Exception as error:
+        return SystemVerification(status=False, message=str(error))
 
 
 def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
@@ -57,4 +112,14 @@ def onboard(
         message="Discovery engine run scheduled.",
         job_id=str(uuid4()),
         workspace_id=payload.workspace_id,
+    )
+
+
+@app.post("/api/verify", response_model=VerificationResponse)
+def verify(payload: OnboardingPayload) -> VerificationResponse:
+    """Run pre-flight read-only access checks against every integration."""
+    return VerificationResponse(
+        devops=verify_devops(),
+        kubernetes=verify_kubernetes(list(payload.target_namespaces)),
+        telemetry=verify_telemetry(),
     )
