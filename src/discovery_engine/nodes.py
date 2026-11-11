@@ -1,13 +1,17 @@
 """Batch-processing nodes for the Day-Zero discovery workflow."""
 
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
 
-from src.core.models import DependencyEdge, DiscoveryMethod
+from src.core.models import DependencyEdge, DiscoveryMethod, ServiceNode
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.telemetry_extractor import TelemetryExtractor
+
+KNOWLEDGE_GRAPH_PATH = Path(__file__).resolve().parents[2] / "knowledge_graph.json"
 
 
 def initialize_scan_scope(state: DiscoveryGraphState) -> dict[str, object]:
@@ -145,11 +149,18 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
 
 
 def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
-    """Persist the reconciled Day-Zero graph to the graph database.
+    """Persist the reconciled Day-Zero graph to the local JSON repository.
 
-    As the final stage of the initial ecosystem-wide batch, this node will
-    write the reconciled service and dependency graph to durable storage.
-    Database connection and persistence logic are intentionally not
-    implemented yet; this stub preserves the incoming state.
+    The reconciled services and dependency edges are serialized from their
+    Pydantic models and written to ``knowledge_graph.json`` in the project
+    root, where the Release Coordinator reads them back.
     """
+    reconciled_graph = state.get("reconciled_graph") or {}
+    services: list[ServiceNode] = list(reconciled_graph.get("services", []))
+    edges: list[DependencyEdge] = list(reconciled_graph.get("edges", []))
+    payload = {
+        "services": [service.model_dump(mode="json") for service in services],
+        "edges": [edge.model_dump(mode="json") for edge in edges],
+    }
+    KNOWLEDGE_GRAPH_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return {}

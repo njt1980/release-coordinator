@@ -1,9 +1,18 @@
 """Node functions for the release orchestration graph."""
 
+import json
+import logging
+from pathlib import Path
+
 from src.coordinator.state import ReleaseGraphState
+from src.core.models import DependencyEdge
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.telemetry_extractor import TelemetryExtractor
+
+logger = logging.getLogger(__name__)
+
+KNOWLEDGE_GRAPH_PATH = Path(__file__).resolve().parents[2] / "knowledge_graph.json"
 
 
 def extract_trigger_node(state: ReleaseGraphState) -> dict[str, object]:
@@ -12,8 +21,34 @@ def extract_trigger_node(state: ReleaseGraphState) -> dict[str, object]:
 
 
 def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Calculate the static dependency radius of the target services."""
-    return {"static_dependents": ["api-gateway", "order-service"]}
+    """Calculate the static dependency radius of the target services.
+
+    Edges persisted by the discovery engine in ``knowledge_graph.json`` are
+    scanned for any relationship touching a target service; the service on
+    the other end of each such edge is a static dependent.
+    """
+    try:
+        raw_graph = json.loads(KNOWLEDGE_GRAPH_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        logger.warning(
+            "Knowledge graph not found at %s; returning no static dependents.",
+            KNOWLEDGE_GRAPH_PATH,
+        )
+        return {"static_dependents": []}
+
+    edges = [DependencyEdge.model_validate(edge) for edge in raw_graph.get("edges", [])]
+    targets = set(state.get("target_services", []))
+    static_dependents: list[str] = []
+    for edge in edges:
+        connected: list[str] = []
+        if edge.source_service_id in targets:
+            connected.append(edge.target_service_id)
+        if edge.target_service_id in targets:
+            connected.append(edge.source_service_id)
+        for service_id in connected:
+            if service_id not in targets and service_id not in static_dependents:
+                static_dependents.append(service_id)
+    return {"static_dependents": static_dependents}
 
 
 def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, object]:
