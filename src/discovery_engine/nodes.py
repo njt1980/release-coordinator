@@ -5,13 +5,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from src.core import config
 from src.core.models import DependencyEdge, DiscoveryMethod, ServiceNode
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.telemetry_extractor import TelemetryExtractor
 
-KNOWLEDGE_GRAPH_PATH = Path(__file__).resolve().parents[2] / "knowledge_graph.json"
+KNOWLEDGE_GRAPH_PATH = Path(__file__).resolve().parents[2] / config.KNOWLEDGE_GRAPH_PATH
 
 
 def initialize_scan_scope(state: DiscoveryGraphState) -> dict[str, object]:

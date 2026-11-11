@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 from src.coordinator.state import ReleaseGraphState
+from src.core import config
 from src.core.models import DependencyEdge
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
@@ -12,7 +13,7 @@ from src.tools.telemetry_extractor import TelemetryExtractor
 
 logger = logging.getLogger(__name__)
 
-KNOWLEDGE_GRAPH_PATH = Path(__file__).resolve().parents[2] / "knowledge_graph.json"
+KNOWLEDGE_GRAPH_PATH = Path(__file__).resolve().parents[2] / config.KNOWLEDGE_GRAPH_PATH
 
 
 def extract_trigger_node(state: ReleaseGraphState) -> dict[str, object]:

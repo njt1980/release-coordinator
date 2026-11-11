@@ -29,3 +29,4 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
+knowledge_graph.json
