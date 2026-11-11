@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import BackgroundTasks, FastAPI, status
 from pydantic import BaseModel, Field
 
 from src.discovery_engine.graph import discovery_app
@@ -21,7 +21,7 @@ class OnboardingPayload(BaseModel):
 
 
 class OnboardingResponse(BaseModel):
-    """Acknowledgement returned once the discovery graph has run."""
+    """Acknowledgement returned once a discovery run has been scheduled."""
 
     status: str
     message: str
@@ -32,6 +32,7 @@ class OnboardingResponse(BaseModel):
 def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
     """Map an onboarding payload onto the initial discovery graph state."""
     return {
+        "workspace_id": payload.workspace_id,
         "target_repositories": list(payload.target_repositories),
         "target_namespaces": list(payload.target_namespaces),
         "discovered_services": [],
@@ -41,13 +42,19 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
     }
 
 
-@app.post("/api/onboard", response_model=OnboardingResponse)
-def onboard(payload: OnboardingPayload) -> OnboardingResponse:
-    """Run the discovery graph for the requested scope and return a mock job ID."""
-    discovery_app.invoke(build_discovery_state(payload))
+@app.post(
+    "/api/onboard",
+    response_model=OnboardingResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def onboard(
+    payload: OnboardingPayload, background_tasks: BackgroundTasks
+) -> OnboardingResponse:
+    """Schedule a discovery graph run for the requested scope and return at once."""
+    background_tasks.add_task(discovery_app.invoke, build_discovery_state(payload))
     return OnboardingResponse(
-        status="success",
-        message="Discovery engine run completed.",
-        job_id=f"job-{uuid4()}",
+        status="accepted",
+        message="Discovery engine run scheduled.",
+        job_id=str(uuid4()),
         workspace_id=payload.workspace_id,
     )

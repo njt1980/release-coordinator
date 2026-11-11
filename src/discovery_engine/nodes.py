@@ -14,9 +14,19 @@ def initialize_scan_scope(state: DiscoveryGraphState) -> dict[str, object]:
     """Establish the repository and Kubernetes namespace scope for the initial
     ecosystem-wide deep dive.
 
-    These temporary targets establish repository and namespace scope before
-    discovery begins.
+    Scope supplied in the incoming state (for example, from the onboarding
+    API) is returned unchanged. The temporary mock targets are used only when
+    no repository or namespace scope was provided at all.
     """
+    target_repositories = state.get("target_repositories") or []
+    target_namespaces = state.get("target_namespaces") or []
+
+    if target_repositories or target_namespaces:
+        return {
+            "target_repositories": list(target_repositories),
+            "target_namespaces": list(target_namespaces),
+        }
+
     return {
         "target_repositories": ["repo-a", "repo-b"],
         "target_namespaces": ["default", "prod"],

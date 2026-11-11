@@ -8,6 +8,7 @@ from src.core.models import DependencyEdge, ServiceNode
 class DiscoveryGraphState(TypedDict):
     """Data passed between nodes in the discovery engine graph."""
 
+    workspace_id: str
     target_repositories: list[str]
     target_namespaces: list[str]
     discovered_services: list[ServiceNode]
