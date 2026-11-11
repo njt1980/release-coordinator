@@ -6,3 +6,5 @@ azure-cosmos
 azure-devops
 azure-monitor-query
 kubernetes
+fastapi
+uvicorn
