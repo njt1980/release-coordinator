@@ -49,7 +49,15 @@ const splitList = (value) =>
     .map((item) => item.trim())
     .filter(Boolean);
 
+const buildDevopsScope = (config) => ({
+  devops_org_url: config.devopsOrgUrl.trim(),
+  devops_project: config.devopsProject.trim(),
+  target_repositories: splitList(config.devopsRepos),
+});
+
 const buildPayload = (config) => ({
+  devops_org_url: config.devopsOrgUrl.trim(),
+  devops_project: config.devopsProject.trim(),
   target_repositories: splitList(config.devopsRepos),
   target_namespaces: splitList(config.k8sNamespaces),
   workspace_id: config.telemetryWorkspaceId.trim(),
@@ -122,7 +130,14 @@ export default function App() {
     }
   };
 
-  const testDevops = () => runTest("devops", () => postJson("/api/verify/devops"));
+  const testDevops = () =>
+    runTest("devops", () => {
+      const scope = buildDevopsScope(config);
+      if (!scope.devops_org_url || !scope.devops_project) {
+        throw new Error("Enter the organization URL and project to test.");
+      }
+      return postJson("/api/verify/devops", scope);
+    });
 
   const testKubernetes = () =>
     runTest("kubernetes", () => {

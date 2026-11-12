@@ -47,17 +47,27 @@ _ENDPOINT_PATTERN = re.compile(r"""https?://[^\s"'<>)}\]]+""", re.IGNORECASE)
 class DevOpsExtractor:
     """Read-only client boundary for DevOps pipeline and repository data."""
 
-    def __init__(self) -> None:
+    def __init__(self, org_url: str, project: str, repositories: list[str]) -> None:
+        """Bind the extractor to an explicit Azure DevOps scope.
+
+        Args:
+            org_url: Azure DevOps organization URL, e.g. https://dev.azure.com/org.
+            project: Azure DevOps project name.
+            repositories: Repository names in scope for this extractor.
+
+        Raises:
+            ValueError: If org_url or project is blank.
+        """
+        if not org_url or not org_url.strip():
+            raise ValueError("org_url is required")
+        if not project or not project.strip():
+            raise ValueError("project is required")
         self._credential = DefaultAzureCredential()
-        self._organization_url = os.getenv("AZURE_DEVOPS_ORG_URL")
-        self._project = os.getenv("AZURE_DEVOPS_PROJECT")
+        self._organization_url = org_url.strip()
+        self._project = project.strip()
+        self._repositories = list(repositories)
 
     def _get_connection(self) -> Connection:
-        if not self._organization_url or not self._project:
-            raise ValueError(
-                "AZURE_DEVOPS_ORG_URL and AZURE_DEVOPS_PROJECT must be configured"
-            )
-
         access_token = self._credential.get_token(_AZURE_DEVOPS_SCOPE)
         credentials = BasicTokenAuthentication({"access_token": access_token.token})
         return Connection(base_url=self._organization_url, creds=credentials)
@@ -67,7 +77,7 @@ class DevOpsExtractor:
         return (
             connection.clients.get_build_client(),
             connection.clients.get_git_client(),
-            self._project or "",
+            self._project,
         )
 
     def verify_access(self) -> tuple[bool, str]:

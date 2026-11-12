@@ -7,7 +7,12 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from src import api
-from src.api import KubernetesVerificationRequest, SystemVerification
+from src.api import (
+    DevOpsVerificationRequest,
+    KubernetesVerificationRequest,
+    OnboardingPayload,
+    SystemVerification,
+)
 from src.tools import _timeout
 from src.tools._timeout import TIMEOUT_MESSAGE
 from src.tools.devops_extractor import DevOpsExtractor
@@ -63,12 +68,39 @@ class DevOpsVerifyAccessTests(unittest.TestCase):
             "proj"
         )
 
-    def test_missing_configuration_fails(self) -> None:
+    def test_constructor_binds_explicit_scope(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"AZURE_DEVOPS_ORG_URL": "https://env", "AZURE_DEVOPS_PROJECT": "env"},
+        ), patch("src.tools.devops_extractor.DefaultAzureCredential"):
+            extractor = DevOpsExtractor(
+                org_url=" https://dev.azure.com/org ",
+                project="proj",
+                repositories=["repo-a"],
+            )
+        self.assertEqual(extractor._organization_url, "https://dev.azure.com/org")
+        self.assertEqual(extractor._project, "proj")
+        self.assertEqual(extractor._repositories, ["repo-a"])
+
+    def test_constructor_rejects_blank_scope(self) -> None:
+        with patch("src.tools.devops_extractor.DefaultAzureCredential"):
+            with self.assertRaises(ValueError):
+                DevOpsExtractor(org_url=" ", project="proj", repositories=[])
+            with self.assertRaises(ValueError):
+                DevOpsExtractor(
+                    org_url="https://dev.azure.com/org", project="", repositories=[]
+                )
+
+    def test_connection_uses_constructor_org_url(self) -> None:
+        from src.tools import devops_extractor
+
         extractor = self._extractor()
-        extractor._project = None
-        ok, message = extractor.verify_access()
-        self.assertFalse(ok)
-        self.assertIn("AZURE_DEVOPS_PROJECT", message)
+        extractor._credential.get_token.return_value = MagicMock(token="t")
+        with patch.object(devops_extractor, "Connection") as connection_cls:
+            extractor._get_connection()
+        self.assertEqual(
+            connection_cls.call_args.kwargs["base_url"], "https://dev.azure.com/org"
+        )
 
     def test_hanging_token_request_times_out(self) -> None:
         from src.tools import devops_extractor
@@ -157,10 +189,40 @@ class TelemetryVerifyAccessTests(unittest.TestCase):
 
 class VerifyEndpointTests(unittest.TestCase):
     def test_devops_endpoint_maps_result(self) -> None:
+        payload = DevOpsVerificationRequest(
+            devops_org_url="https://dev.azure.com/org",
+            devops_project="proj",
+            target_repositories=["repo-a"],
+        )
         with patch.object(api, "DevOpsExtractor") as devops_cls:
             devops_cls.return_value.verify_access.return_value = (True, "Success")
-            response = api.verify_devops_endpoint()
+            response = api.verify_devops_endpoint(payload)
         self.assertEqual(response, SystemVerification(status=True, message="Success"))
+        devops_cls.assert_called_once_with(
+            org_url="https://dev.azure.com/org",
+            project="proj",
+            repositories=["repo-a"],
+        )
+
+    def test_devops_endpoint_rejects_missing_scope(self) -> None:
+        from pydantic import ValidationError
+
+        with self.assertRaises(ValidationError):
+            DevOpsVerificationRequest.model_validate({})
+        with self.assertRaises(ValidationError):
+            DevOpsVerificationRequest(devops_org_url="", devops_project="proj")
+
+    def test_onboarding_state_carries_devops_scope(self) -> None:
+        payload = OnboardingPayload(
+            devops_org_url="https://dev.azure.com/org",
+            devops_project="proj",
+            target_repositories=["repo-a"],
+            target_namespaces=["default"],
+            workspace_id="ws-1",
+        )
+        state = api.build_discovery_state(payload)
+        self.assertEqual(state["devops_org_url"], "https://dev.azure.com/org")
+        self.assertEqual(state["devops_project"], "proj")
 
     def test_kubernetes_endpoint_reports_failing_namespaces(self) -> None:
         payload = KubernetesVerificationRequest(target_namespaces=["ns-a", "ns-b"])

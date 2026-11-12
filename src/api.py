@@ -18,6 +18,8 @@ app = FastAPI(title="Release Coordinator API")
 class OnboardingPayload(BaseModel):
     """Frontend request to onboard a workspace into the discovery engine."""
 
+    devops_org_url: str = Field(min_length=1)
+    devops_project: str = Field(min_length=1)
     target_repositories: list[str] = Field(min_length=1)
     target_namespaces: list[str] = Field(min_length=1)
     workspace_id: str = Field(min_length=1)
@@ -39,6 +41,14 @@ class SystemVerification(BaseModel):
     message: str
 
 
+class DevOpsVerificationRequest(BaseModel):
+    """Azure DevOps scope whose read access should be checked."""
+
+    devops_org_url: str = Field(min_length=1)
+    devops_project: str = Field(min_length=1)
+    target_repositories: list[str] = Field(default_factory=list)
+
+
 class KubernetesVerificationRequest(BaseModel):
     """Namespaces whose read access should be checked."""
 
@@ -50,10 +60,15 @@ def _to_verification(result: tuple[bool, str]) -> SystemVerification:
     return SystemVerification(status=status_ok, message=message)
 
 
-def verify_devops() -> SystemVerification:
-    """Run the Azure DevOps read-only access check."""
+def verify_devops(payload: DevOpsVerificationRequest) -> SystemVerification:
+    """Run the Azure DevOps read-only access check for the requested scope."""
     try:
-        return _to_verification(DevOpsExtractor().verify_access())
+        extractor = DevOpsExtractor(
+            org_url=payload.devops_org_url,
+            project=payload.devops_project,
+            repositories=list(payload.target_repositories),
+        )
+        return _to_verification(extractor.verify_access())
     except Exception as error:
         return SystemVerification(status=False, message=str(error))
 
@@ -86,6 +101,8 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
     """Map an onboarding payload onto the initial discovery graph state."""
     return {
         "workspace_id": payload.workspace_id,
+        "devops_org_url": payload.devops_org_url,
+        "devops_project": payload.devops_project,
         "target_repositories": list(payload.target_repositories),
         "target_namespaces": list(payload.target_namespaces),
         "discovered_services": [],
@@ -114,9 +131,9 @@ def onboard(
 
 
 @app.post("/api/verify/devops", response_model=SystemVerification)
-def verify_devops_endpoint() -> SystemVerification:
+def verify_devops_endpoint(payload: DevOpsVerificationRequest) -> SystemVerification:
     """Run the pre-flight read-only access check for Azure DevOps."""
-    return verify_devops()
+    return verify_devops(payload)
 
 
 @app.post("/api/verify/kubernetes", response_model=SystemVerification)

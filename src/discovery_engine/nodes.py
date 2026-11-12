@@ -45,7 +45,11 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     microservices and code-declared dependencies. Endpoint URLs are reduced to
     their hostnames before being stored as dependency targets.
     """
-    extractor = DevOpsExtractor()
+    extractor = DevOpsExtractor(
+        org_url=state["devops_org_url"],
+        project=state["devops_project"],
+        repositories=list(state["target_repositories"]),
+    )
     static_edges = list(state.get("static_edges", []))
 
     for repo_name in state["target_repositories"]:

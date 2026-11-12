@@ -9,6 +9,8 @@ class DiscoveryGraphState(TypedDict):
     """Data passed between nodes in the discovery engine graph."""
 
     workspace_id: str
+    devops_org_url: str
+    devops_project: str
     target_repositories: list[str]
     target_namespaces: list[str]
     discovered_services: list[ServiceNode]
