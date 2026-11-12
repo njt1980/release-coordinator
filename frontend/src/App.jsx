@@ -55,12 +55,16 @@ const buildDevopsScope = (config) => ({
   target_repositories: splitList(config.devopsRepos),
 });
 
-const buildPayload = (config) => ({
-  devops_org_url: config.devopsOrgUrl.trim(),
-  devops_project: config.devopsProject.trim(),
-  target_repositories: splitList(config.devopsRepos),
-  target_namespaces: splitList(config.k8sNamespaces),
-  workspace_id: config.telemetryWorkspaceId.trim(),
+// Only integrations whose access test succeeded contribute scope to the crawl;
+// untested or failed form data is never sent.
+const buildPayload = (config, tests) => ({
+  ...(tests.devops.status === "success" ? buildDevopsScope(config) : {}),
+  ...(tests.kubernetes.status === "success"
+    ? { target_namespaces: splitList(config.k8sNamespaces) }
+    : {}),
+  ...(tests.telemetry.status === "success"
+    ? { workspace_id: config.telemetryWorkspaceId.trim() }
+    : {}),
 });
 
 async function postJson(url, body) {
@@ -149,14 +153,20 @@ export default function App() {
     });
 
   const testTelemetry = () =>
-    runTest("telemetry", () => postJson("/api/verify/telemetry"));
+    runTest("telemetry", () => {
+      const workspaceId = config.telemetryWorkspaceId.trim();
+      if (!workspaceId) {
+        throw new Error("Enter the Log Analytics workspace ID to test.");
+      }
+      return postJson("/api/verify/telemetry", { workspace_id: workspaceId });
+    });
 
   const startCrawl = async () => {
     if (!isVerified) return;
     setIsCrawling(true);
     setCrawlMessage(null);
     try {
-      const response = await postJson("/api/onboard", buildPayload(config));
+      const response = await postJson("/api/onboard", buildPayload(config, tests));
       setCrawlMessage({ ok: true, text: `${response.message} Job ID: ${response.job_id}` });
     } catch (error) {
       setCrawlMessage({ ok: false, text: error.message });

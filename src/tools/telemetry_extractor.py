@@ -36,7 +36,19 @@ class _MockDependencyRecord(BaseModel):
 class TelemetryExtractor:
     """Read-only client boundary for telemetry-derived dependencies."""
 
-    def __init__(self) -> None:
+    def __init__(self, workspace_id: str) -> None:
+        """Bind the extractor to an explicit Log Analytics workspace.
+
+        Args:
+            workspace_id: Log Analytics workspace ID that every query targets.
+
+        Raises:
+            ValueError: If workspace_id is blank or TELEMETRY_SOURCE is invalid.
+        """
+        if not workspace_id or not workspace_id.strip():
+            raise ValueError("workspace_id is required")
+        self._workspace_id = workspace_id.strip()
+
         self._source = os.getenv("TELEMETRY_SOURCE", "mock").lower()
         if self._source not in {"mock", "azure"}:
             raise ValueError("TELEMETRY_SOURCE must be either 'mock' or 'azure'")
@@ -47,11 +59,6 @@ class TelemetryExtractor:
         if self._source == "azure":
             self._credential = DefaultAzureCredential()
             self._client = LogsQueryClient(self._credential)
-        self._resource_id = os.getenv("APPLICATIONINSIGHTS_RESOURCE_ID")
-        self._workspace_id = (
-            os.getenv("LOG_ANALYTICS_WORKSPACE_ID")
-            or os.getenv("APPLICATIONINSIGHTS_WORKSPACE_ID")
-        )
 
     def verify_access(self) -> tuple[bool, str]:
         """Confirm query access with a trivial KQL statement that scans no data.
@@ -72,27 +79,13 @@ class TelemetryExtractor:
                 raise RuntimeError("Azure telemetry client was not initialized")
             query = "print ok=1"
             timespan = timedelta(minutes=5)
-            resource_id = self._resource_id
             workspace_id = self._workspace_id
-            if resource_id:
-                response = run_with_timeout(
-                    lambda: client.query_resource(
-                        resource_id, query, timespan=timespan
-                    ),
-                    VERIFY_TIMEOUT_SECONDS,
-                )
-            elif workspace_id:
-                response = run_with_timeout(
-                    lambda: client.query_workspace(
-                        workspace_id, query, timespan=timespan
-                    ),
-                    VERIFY_TIMEOUT_SECONDS,
-                )
-            else:
-                raise ValueError(
-                    "Set APPLICATIONINSIGHTS_RESOURCE_ID or "
-                    "LOG_ANALYTICS_WORKSPACE_ID to query telemetry"
-                )
+            response = run_with_timeout(
+                lambda: client.query_workspace(
+                    workspace_id, query, timespan=timespan
+                ),
+                VERIFY_TIMEOUT_SECONDS,
+            )
             if not hasattr(response, "tables"):
                 raise RuntimeError(str(getattr(response, "error", response)))
             return True, "Success"
@@ -196,14 +189,6 @@ class TelemetryExtractor:
     ) -> list[DependencyEdge]:
         """Query Azure Monitor for observed dependency edges."""
         try:
-            resource_id = self._resource_id
-            workspace_id = self._workspace_id
-            if not resource_id and not workspace_id:
-                raise ValueError(
-                    "Set APPLICATIONINSIGHTS_RESOURCE_ID or "
-                    "LOG_ANALYTICS_WORKSPACE_ID to query telemetry"
-                )
-
             query = f"""
                 AppDependencies
                 | where TimeGenerated >= ago({days_back}d)
@@ -214,23 +199,11 @@ class TelemetryExtractor:
             """
             if self._client is None:
                 raise RuntimeError("Azure telemetry client was not initialized")
-            if resource_id:
-                response = self._client.query_resource(
-                    resource_id,
-                    query,
-                    timespan=timedelta(days=days_back),
-                )
-            elif workspace_id:
-                response = self._client.query_workspace(
-                    workspace_id,
-                    query,
-                    timespan=timedelta(days=days_back),
-                )
-            else:
-                raise ValueError(
-                    "Set APPLICATIONINSIGHTS_RESOURCE_ID or "
-                    "LOG_ANALYTICS_WORKSPACE_ID to query telemetry"
-                )
+            response = self._client.query_workspace(
+                self._workspace_id,
+                query,
+                timespan=timedelta(days=days_back),
+            )
 
             if not hasattr(response, "tables"):
                 logger.error(

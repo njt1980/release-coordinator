@@ -20,21 +20,12 @@ def initialize_scan_scope(state: DiscoveryGraphState) -> dict[str, object]:
     ecosystem-wide deep dive.
 
     Scope supplied in the incoming state (for example, from the onboarding
-    API) is returned unchanged. The temporary mock targets are used only when
-    no repository or namespace scope was provided at all.
+    API) is returned unchanged. An empty scope stays empty, so the extraction
+    stages for unconfigured integrations are skipped.
     """
-    target_repositories = state.get("target_repositories") or []
-    target_namespaces = state.get("target_namespaces") or []
-
-    if target_repositories or target_namespaces:
-        return {
-            "target_repositories": list(target_repositories),
-            "target_namespaces": list(target_namespaces),
-        }
-
     return {
-        "target_repositories": ["repo-a", "repo-b"],
-        "target_namespaces": ["default", "prod"],
+        "target_repositories": list(state.get("target_repositories") or []),
+        "target_namespaces": list(state.get("target_namespaces") or []),
     }
 
 
@@ -43,8 +34,12 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
 
     The Day-Zero static pass will inspect the scoped repositories to identify
     microservices and code-declared dependencies. Endpoint URLs are reduced to
-    their hostnames before being stored as dependency targets.
+    their hostnames before being stored as dependency targets. The stage is
+    skipped when no Azure DevOps organization URL or project is configured.
     """
+    if not state.get("devops_org_url") or not state.get("devops_project"):
+        return {}
+
     extractor = DevOpsExtractor(
         org_url=state["devops_org_url"],
         project=state["devops_project"],
@@ -86,8 +81,12 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
 
     During the initial deep dive, this stage will inspect manifests and
     deployment configuration in the selected namespaces to find deployed
-    services and topology-based relationships.
+    services and topology-based relationships. The stage is skipped when no
+    namespaces are configured.
     """
+    if not state.get("target_namespaces"):
+        return {}
+
     extractor = KubernetesExtractor()
     discovered_services = list(state.get("discovered_services", []))
     for namespace in state["target_namespaces"]:
@@ -99,9 +98,14 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
     """Collect observed service-to-service relationships from runtime data.
 
     This Day-Zero batch stage will establish a runtime dependency baseline and
-    place its evidence-backed relationships in ``runtime_edges``.
+    place its evidence-backed relationships in ``runtime_edges``. The stage is
+    skipped when no telemetry workspace ID is configured.
     """
-    extractor = TelemetryExtractor()
+    workspace_id = (state.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return {}
+
+    extractor = TelemetryExtractor(workspace_id=workspace_id)
     runtime_edges = extractor.get_active_dependencies(days_back=30)
     return {"runtime_edges": runtime_edges}
 

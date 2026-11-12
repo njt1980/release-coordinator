@@ -54,7 +54,7 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
 
 def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, object]:
     """Validate runtime telemetry for dependencies in the release radius."""
-    extractor = TelemetryExtractor()
+    extractor = TelemetryExtractor(workspace_id=state["workspace_id"])
     dependencies = extractor.get_active_dependencies(days_back=7)
     active_sources = {edge.source_service_id for edge in dependencies}
     runtime_metrics = {

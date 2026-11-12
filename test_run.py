@@ -7,6 +7,7 @@ from src.coordinator.state import ReleaseGraphState
 if __name__ == "__main__":
     initial_state: ReleaseGraphState = {
         "trigger_event": "PR-1024",
+        "workspace_id": "local-mock-workspace",
         "target_services": ["checkout-service"],
         "static_dependents": [],
         "runtime_metrics": {},

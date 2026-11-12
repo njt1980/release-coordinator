@@ -6,13 +6,18 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+from pydantic import ValidationError
+
 from src import api
 from src.api import (
     DevOpsVerificationRequest,
     KubernetesVerificationRequest,
     OnboardingPayload,
     SystemVerification,
+    TelemetryVerificationRequest,
 )
+from src.discovery_engine import nodes as discovery_nodes
+from src.discovery_engine.state import DiscoveryGraphState
 from src.tools import _timeout
 from src.tools._timeout import TIMEOUT_MESSAGE
 from src.tools.devops_extractor import DevOpsExtractor
@@ -155,9 +160,24 @@ class TelemetryVerifyAccessTests(unittest.TestCase):
         extractor = TelemetryExtractor.__new__(TelemetryExtractor)
         extractor._source = source
         extractor._client = MagicMock()
-        extractor._resource_id = None
         extractor._workspace_id = "ws-1"
         return extractor
+
+    def test_constructor_binds_explicit_workspace(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"TELEMETRY_SOURCE": "mock", "LOG_ANALYTICS_WORKSPACE_ID": "env-ws"},
+        ):
+            extractor = TelemetryExtractor(workspace_id=" ws-1 ")
+        self.assertEqual(extractor._workspace_id, "ws-1")
+
+    def test_constructor_rejects_blank_workspace(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"TELEMETRY_SOURCE": "mock", "LOG_ANALYTICS_WORKSPACE_ID": "env-ws"},
+        ):
+            with self.assertRaises(ValueError):
+                TelemetryExtractor(workspace_id="  ")
 
     def test_mock_source_succeeds_without_query(self) -> None:
         extractor = self._extractor("mock")
@@ -205,8 +225,6 @@ class VerifyEndpointTests(unittest.TestCase):
         )
 
     def test_devops_endpoint_rejects_missing_scope(self) -> None:
-        from pydantic import ValidationError
-
         with self.assertRaises(ValidationError):
             DevOpsVerificationRequest.model_validate({})
         with self.assertRaises(ValidationError):
@@ -234,11 +252,24 @@ class VerifyEndpointTests(unittest.TestCase):
         self.assertEqual(response.message, "ns-b: Forbidden")
 
     def test_telemetry_endpoint_reports_construction_errors(self) -> None:
+        payload = TelemetryVerificationRequest(workspace_id="ws-1")
         with patch.object(api, "TelemetryExtractor") as telemetry_cls:
             telemetry_cls.side_effect = ValueError("bad TELEMETRY_SOURCE")
-            response = api.verify_telemetry_endpoint()
+            response = api.verify_telemetry_endpoint(payload)
         self.assertFalse(response.status)
         self.assertEqual(response.message, "bad TELEMETRY_SOURCE")
+
+    def test_telemetry_endpoint_binds_workspace(self) -> None:
+        payload = TelemetryVerificationRequest(workspace_id=" ws-1 ")
+        with patch.object(api, "TelemetryExtractor") as telemetry_cls:
+            telemetry_cls.return_value.verify_access.return_value = (True, "Success")
+            response = api.verify_telemetry_endpoint(payload)
+        self.assertTrue(response.status)
+        telemetry_cls.assert_called_once_with(workspace_id="ws-1")
+
+    def test_telemetry_endpoint_rejects_blank_workspace(self) -> None:
+        with self.assertRaises(ValidationError):
+            TelemetryVerificationRequest(workspace_id="   ")
 
     def test_routes_are_registered(self) -> None:
         paths = {route.path for route in api.app.routes}
@@ -250,6 +281,133 @@ class VerifyEndpointTests(unittest.TestCase):
             }.issubset(paths)
         )
         self.assertNotIn("/api/verify", paths)
+
+
+class OnboardingPayloadTests(unittest.TestCase):
+    def test_accepts_devops_only(self) -> None:
+        payload = OnboardingPayload(
+            devops_org_url=" https://dev.azure.com/org ",
+            devops_project="proj",
+            target_repositories=["repo-a", " ", ""],
+        )
+        self.assertEqual(payload.devops_org_url, "https://dev.azure.com/org")
+        self.assertEqual(payload.target_repositories, ["repo-a"])
+        self.assertEqual(payload.target_namespaces, [])
+        self.assertEqual(payload.workspace_id, "")
+
+    def test_accepts_kubernetes_only(self) -> None:
+        payload = OnboardingPayload(target_namespaces=[" default ", ""])
+        self.assertEqual(payload.target_namespaces, ["default"])
+        self.assertFalse(payload.has_devops)
+
+    def test_accepts_telemetry_only(self) -> None:
+        payload = OnboardingPayload.model_validate({"workspace_id": " ws-1 "})
+        self.assertEqual(payload.workspace_id, "ws-1")
+
+    def test_rejects_empty_payload(self) -> None:
+        with self.assertRaises(ValidationError):
+            OnboardingPayload.model_validate({})
+        with self.assertRaises(ValidationError):
+            OnboardingPayload(
+                devops_org_url=" ",
+                target_namespaces=[" "],
+                workspace_id="  ",
+            )
+
+    def test_rejects_org_url_without_project(self) -> None:
+        with self.assertRaises(ValidationError):
+            OnboardingPayload(
+                devops_org_url="https://dev.azure.com/org",
+                workspace_id="ws-1",
+            )
+
+    def test_rejects_project_without_org_url(self) -> None:
+        with self.assertRaises(ValidationError):
+            OnboardingPayload(devops_project="proj", workspace_id="ws-1")
+
+    def test_rejects_repositories_without_devops_scope(self) -> None:
+        with self.assertRaises(ValidationError):
+            OnboardingPayload(target_repositories=["repo-a"], workspace_id="ws-1")
+
+
+def _discovery_state(**overrides: object) -> DiscoveryGraphState:
+    state: DiscoveryGraphState = {
+        "workspace_id": "",
+        "devops_org_url": "",
+        "devops_project": "",
+        "target_repositories": [],
+        "target_namespaces": [],
+        "discovered_services": [],
+        "static_edges": [],
+        "runtime_edges": [],
+        "reconciled_graph": {},
+    }
+    state.update(overrides)  # type: ignore[typeddict-item]
+    return state
+
+
+class DiscoveryNodeSkipTests(unittest.TestCase):
+    def test_empty_scope_stays_empty(self) -> None:
+        self.assertEqual(
+            discovery_nodes.initialize_scan_scope(_discovery_state()),
+            {"target_repositories": [], "target_namespaces": []},
+        )
+
+    def test_supplied_scope_is_preserved(self) -> None:
+        state = _discovery_state(
+            target_repositories=["repo-a"], target_namespaces=["prod"]
+        )
+        self.assertEqual(
+            discovery_nodes.initialize_scan_scope(state),
+            {"target_repositories": ["repo-a"], "target_namespaces": ["prod"]},
+        )
+
+    def test_static_scan_skipped_without_devops_scope(self) -> None:
+        with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
+            result = discovery_nodes.extract_static_code_baseline(
+                _discovery_state(devops_org_url="https://dev.azure.com/org")
+            )
+        self.assertEqual(result, {})
+        devops_cls.assert_not_called()
+
+    def test_static_scan_runs_with_devops_scope(self) -> None:
+        with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
+            devops_cls.return_value.scan_repository_for_endpoints.return_value = []
+            discovery_nodes.extract_static_code_baseline(
+                _discovery_state(
+                    devops_org_url="https://dev.azure.com/org",
+                    devops_project="proj",
+                    target_repositories=["repo-a"],
+                )
+            )
+        devops_cls.assert_called_once_with(
+            org_url="https://dev.azure.com/org",
+            project="proj",
+            repositories=["repo-a"],
+        )
+
+    def test_k8s_skipped_without_namespaces(self) -> None:
+        with patch.object(discovery_nodes, "KubernetesExtractor") as k8s_cls:
+            result = discovery_nodes.extract_k8s_topology(_discovery_state())
+        self.assertEqual(result, {})
+        k8s_cls.assert_not_called()
+
+    def test_telemetry_skipped_without_workspace(self) -> None:
+        with patch.object(discovery_nodes, "TelemetryExtractor") as telemetry_cls:
+            result = discovery_nodes.extract_runtime_telemetry(
+                _discovery_state(workspace_id="  ")
+            )
+        self.assertEqual(result, {})
+        telemetry_cls.assert_not_called()
+
+    def test_telemetry_binds_workspace(self) -> None:
+        with patch.object(discovery_nodes, "TelemetryExtractor") as telemetry_cls:
+            telemetry_cls.return_value.get_active_dependencies.return_value = []
+            result = discovery_nodes.extract_runtime_telemetry(
+                _discovery_state(workspace_id="ws-1")
+            )
+        self.assertEqual(result, {"runtime_edges": []})
+        telemetry_cls.assert_called_once_with(workspace_id="ws-1")
 
 
 if __name__ == "__main__":

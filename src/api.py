@@ -1,9 +1,10 @@
 """FastAPI boundary that lets a frontend trigger the Day-Zero discovery engine."""
 
+from typing import Self
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, FastAPI, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.discovery_engine.graph import discovery_app
 from src.discovery_engine.state import DiscoveryGraphState
@@ -16,13 +17,51 @@ app = FastAPI(title="Release Coordinator API")
 
 
 class OnboardingPayload(BaseModel):
-    """Frontend request to onboard a workspace into the discovery engine."""
+    """Frontend request to onboard a workspace into the discovery engine.
 
-    devops_org_url: str = Field(min_length=1)
-    devops_project: str = Field(min_length=1)
-    target_repositories: list[str] = Field(min_length=1)
-    target_namespaces: list[str] = Field(min_length=1)
-    workspace_id: str = Field(min_length=1)
+    Every integration is optional, but at least one must be configured.
+    Azure DevOps is configured when both the organization URL and project are
+    given, Kubernetes when at least one namespace is given, and telemetry when
+    a workspace ID is given.
+    """
+
+    devops_org_url: str = ""
+    devops_project: str = ""
+    target_repositories: list[str] = Field(default_factory=list)
+    target_namespaces: list[str] = Field(default_factory=list)
+    workspace_id: str = ""
+
+    @field_validator("devops_org_url", "devops_project", "workspace_id")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("target_repositories", "target_namespaces")
+    @classmethod
+    def _drop_blank_entries(cls, values: list[str]) -> list[str]:
+        return [value.strip() for value in values if value.strip()]
+
+    @property
+    def has_devops(self) -> bool:
+        """Whether a complete Azure DevOps scope was supplied."""
+        return bool(self.devops_org_url and self.devops_project)
+
+    @model_validator(mode="after")
+    def _require_coherent_scope(self) -> Self:
+        if bool(self.devops_org_url) != bool(self.devops_project):
+            raise ValueError(
+                "Azure DevOps requires both an organization URL and a project"
+            )
+        if self.target_repositories and not self.has_devops:
+            raise ValueError(
+                "Repositories require an Azure DevOps organization URL and project"
+            )
+        if not (self.has_devops or self.target_namespaces or self.workspace_id):
+            raise ValueError(
+                "Configure at least one integration: Azure DevOps, "
+                "Kubernetes, or Telemetry"
+            )
+        return self
 
 
 class OnboardingResponse(BaseModel):
@@ -53,6 +92,20 @@ class KubernetesVerificationRequest(BaseModel):
     """Namespaces whose read access should be checked."""
 
     target_namespaces: list[str] = Field(min_length=1)
+
+
+class TelemetryVerificationRequest(BaseModel):
+    """Log Analytics workspace whose query access should be checked."""
+
+    workspace_id: str = Field(min_length=1)
+
+    @field_validator("workspace_id")
+    @classmethod
+    def _strip_workspace_id(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("workspace_id must not be blank")
+        return stripped
 
 
 def _to_verification(result: tuple[bool, str]) -> SystemVerification:
@@ -89,10 +142,11 @@ def verify_kubernetes(namespaces: list[str]) -> SystemVerification:
         return SystemVerification(status=False, message=str(error))
 
 
-def verify_telemetry() -> SystemVerification:
-    """Run the telemetry read-only query check."""
+def verify_telemetry(workspace_id: str) -> SystemVerification:
+    """Run the telemetry read-only query check against one workspace."""
     try:
-        return _to_verification(TelemetryExtractor().verify_access())
+        extractor = TelemetryExtractor(workspace_id=workspace_id)
+        return _to_verification(extractor.verify_access())
     except Exception as error:
         return SystemVerification(status=False, message=str(error))
 
@@ -145,6 +199,8 @@ def verify_kubernetes_endpoint(
 
 
 @app.post("/api/verify/telemetry", response_model=SystemVerification)
-def verify_telemetry_endpoint() -> SystemVerification:
+def verify_telemetry_endpoint(
+    payload: TelemetryVerificationRequest,
+) -> SystemVerification:
     """Run the pre-flight read-only access check for telemetry."""
-    return verify_telemetry()
+    return verify_telemetry(payload.workspace_id)
