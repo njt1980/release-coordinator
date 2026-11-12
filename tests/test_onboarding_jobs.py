@@ -12,7 +12,24 @@ from fastapi import BackgroundTasks, HTTPException
 
 from src import api
 from src.api import CrawlResults, JobRecord, OnboardingPayload
-from src.core.models import DependencyEdge, DiscoveryMethod, ServiceNode
+from src.discovery_engine import nodes as discovery_nodes
+from src.core.models import (
+    DependencyEdge,
+    DiscoveryMethod,
+    DiscoveryStageReport,
+    DiscoveryStatus,
+    ServiceNode,
+)
+
+
+REPORTS = [
+    DiscoveryStageReport(source=method, status=status)
+    for method, status in [
+        (DiscoveryMethod.STATIC_CODE, DiscoveryStatus.SKIPPED),
+        (DiscoveryMethod.K8S_MANIFEST, DiscoveryStatus.SUCCESS),
+        (DiscoveryMethod.RUNTIME_TELEMETRY, DiscoveryStatus.SKIPPED),
+    ]
+]
 
 
 class OnboardingJobTests(unittest.TestCase):
@@ -67,6 +84,7 @@ class OnboardingJobTests(unittest.TestCase):
                 {
                     "services": [s.model_dump(mode="json") for s in services],
                     "edges": [e.model_dump(mode="json") for e in edges],
+                    "discovery": [r.model_dump(mode="json") for r in REPORTS],
                 }
             )
             return {}
@@ -81,10 +99,48 @@ class OnboardingJobTests(unittest.TestCase):
                 job_id="job-1",
                 status="completed",
                 results=CrawlResults(
-                    service_count=3, edge_count=1, services=services, edges=edges
+                    service_count=3,
+                    edge_count=1,
+                    services=services,
+                    edges=edges,
+                    discovery=REPORTS,
                 ),
             ),
         )
+
+    def test_wrapper_fails_when_discovery_refuses_baseline(self) -> None:
+        error = discovery_nodes.DiscoveryIncompleteError(
+            ["RUNTIME_TELEMETRY FAILED: query timed out"]
+        )
+        failing = MagicMock(invoke=MagicMock(side_effect=error))
+        with patch.object(api, "discovery_app", failing):
+            asyncio.run(api.run_discovery_job("job-7", self._state()))
+
+        record = api._jobs["job-7"]
+        self.assertEqual(record.status, "failed")
+        self.assertIsNone(record.results)
+        assert record.error_message is not None
+        self.assertIn("Baseline not established", record.error_message)
+        self.assertIn("RUNTIME_TELEMETRY FAILED", record.error_message)
+
+    def test_wrapper_fails_when_graph_lacks_complete_discovery(self) -> None:
+        incomplete = [
+            REPORTS[0],
+            REPORTS[1].model_copy(
+                update={"status": DiscoveryStatus.PARTIAL, "errors": ["ns-b: 403"]}
+            ),
+            REPORTS[2],
+        ]
+        for job_id, discovery in [("job-8", None), ("job-9", incomplete)]:
+            with self.subTest(job_id=job_id):
+                graph: dict[str, object] = {"services": [], "edges": []}
+                if discovery is not None:
+                    graph["discovery"] = [r.model_dump(mode="json") for r in discovery]
+                self._write_graph(graph)
+                with patch.object(api, "discovery_app", MagicMock()):
+                    asyncio.run(api.run_discovery_job(job_id, self._state()))
+                self.assertEqual(api._jobs[job_id].status, "failed")
+                self.assertIsNone(api._jobs[job_id].results)
 
     def test_wrapper_fails_when_graph_entries_invalid(self) -> None:
         self._write_graph({"services": [{"id": "a"}], "edges": []})

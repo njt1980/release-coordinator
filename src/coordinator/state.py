@@ -16,6 +16,8 @@ class ReleaseGraphState(TypedDict, total=False):
     ``trigger_event`` is the raw pull-request payload; it is validated into
     ``pull_request`` by the first node. A blank ``workspace_id`` means no live
     telemetry is queried and runtime evidence comes from the knowledge graph.
+    ``discovery_issues`` lists every reason the dependency evidence may be
+    incomplete; any entry forces ``approved`` to False.
     """
 
     trigger_event: Required[dict[str, object]]
@@ -26,6 +28,7 @@ class ReleaseGraphState(TypedDict, total=False):
     downstream_services: list[str]
     matched_edges: list[DependencyEdge]
     telemetry_status: TelemetryStatus
+    discovery_issues: list[str]
     risk_score: float
     approved: bool
     deployment_sequence: list[str]

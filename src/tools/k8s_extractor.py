@@ -5,7 +5,7 @@ import logging
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
-from src.core.models import ServiceNode
+from src.core.models import DiscoveryResult, ServiceNode
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
     VERIFY_TIMEOUT_SECONDS,
@@ -69,7 +69,7 @@ class KubernetesExtractor:
             )
             return False, str(error)
 
-    def get_namespace_services(self, namespace: str) -> list[ServiceNode]:
+    def get_namespace_services(self, namespace: str) -> DiscoveryResult[ServiceNode]:
         """Return service nodes observed in a Kubernetes namespace.
 
         This method is intended to read service metadata from the specified
@@ -80,29 +80,43 @@ class KubernetesExtractor:
             namespace: Kubernetes namespace whose services to inspect.
 
         Returns:
-            Service nodes representing services in the namespace.
+            SUCCESS with the namespace's services, PARTIAL when some service
+            objects were unusable, or FAILED when the namespace could not be
+            listed.
         """
         if self._core_v1_api is None:
             logger.error("Kubernetes API client is unavailable")
-            return []
+            return DiscoveryResult[ServiceNode].failed(
+                f"{namespace}: Kubernetes client configuration could not be loaded"
+            )
 
         try:
             response = self._core_v1_api.list_namespaced_service(namespace)
-            services: list[ServiceNode] = []
-            for service in response.items:
-                metadata = service.metadata
-                if not metadata or not metadata.name:
-                    logger.warning("Skipping Kubernetes service without a name")
-                    continue
-                services.append(
-                    ServiceNode(
-                        service_id=f"{namespace}/{metadata.name}",
-                        name=metadata.name,
-                    )
-                )
-            return services
-        except Exception:
+        except Exception as error:
             logger.exception(
                 "Failed to list Kubernetes services in namespace %s", namespace
             )
-            return []
+            return DiscoveryResult[ServiceNode].failed(
+                f"{namespace}: failed to list services: {error}"
+            )
+
+        services: list[ServiceNode] = []
+        skipped = 0
+        for service in response.items:
+            metadata = service.metadata
+            if not metadata or not metadata.name:
+                logger.warning("Skipping Kubernetes service without a name")
+                skipped += 1
+                continue
+            services.append(
+                ServiceNode(
+                    service_id=f"{namespace}/{metadata.name}",
+                    name=metadata.name,
+                )
+            )
+        errors = (
+            [f"{namespace}: skipped {skipped} service(s) without a name"]
+            if skipped
+            else []
+        )
+        return DiscoveryResult[ServiceNode].from_items(services, errors)

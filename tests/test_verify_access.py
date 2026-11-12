@@ -16,6 +16,12 @@ from src.api import (
     SystemVerification,
     TelemetryVerificationRequest,
 )
+from src.core.models import (
+    DiscoveryMethod,
+    DiscoveryResult,
+    DiscoveryStageReport,
+    DiscoveryStatus,
+)
 from src.discovery_engine import nodes as discovery_nodes
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools import _timeout
@@ -340,10 +346,19 @@ def _discovery_state(**overrides: object) -> DiscoveryGraphState:
         "discovered_services": [],
         "static_edges": [],
         "runtime_edges": [],
+        "discovery_reports": [],
         "reconciled_graph": {},
     }
     state.update(overrides)  # type: ignore[typeddict-item]
     return state
+
+
+def _skipped(source: DiscoveryMethod) -> dict[str, object]:
+    return {
+        "discovery_reports": [
+            DiscoveryStageReport(source=source, status=DiscoveryStatus.SKIPPED)
+        ]
+    }
 
 
 class DiscoveryNodeSkipTests(unittest.TestCase):
@@ -367,12 +382,14 @@ class DiscoveryNodeSkipTests(unittest.TestCase):
             result = discovery_nodes.extract_static_code_baseline(
                 _discovery_state(devops_org_url="https://dev.azure.com/org")
             )
-        self.assertEqual(result, {})
+        self.assertEqual(result, _skipped(DiscoveryMethod.STATIC_CODE))
         devops_cls.assert_not_called()
 
     def test_static_scan_runs_with_devops_scope(self) -> None:
         with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
-            devops_cls.return_value.scan_repository_for_endpoints.return_value = []
+            devops_cls.return_value.scan_repository_for_endpoints.return_value = (
+                DiscoveryResult.success([])
+            )
             discovery_nodes.extract_static_code_baseline(
                 _discovery_state(
                     devops_org_url="https://dev.azure.com/org",
@@ -389,7 +406,7 @@ class DiscoveryNodeSkipTests(unittest.TestCase):
     def test_k8s_skipped_without_namespaces(self) -> None:
         with patch.object(discovery_nodes, "KubernetesExtractor") as k8s_cls:
             result = discovery_nodes.extract_k8s_topology(_discovery_state())
-        self.assertEqual(result, {})
+        self.assertEqual(result, _skipped(DiscoveryMethod.K8S_MANIFEST))
         k8s_cls.assert_not_called()
 
     def test_telemetry_skipped_without_workspace(self) -> None:
@@ -397,16 +414,29 @@ class DiscoveryNodeSkipTests(unittest.TestCase):
             result = discovery_nodes.extract_runtime_telemetry(
                 _discovery_state(workspace_id="  ")
             )
-        self.assertEqual(result, {})
+        self.assertEqual(result, _skipped(DiscoveryMethod.RUNTIME_TELEMETRY))
         telemetry_cls.assert_not_called()
 
     def test_telemetry_binds_workspace(self) -> None:
         with patch.object(discovery_nodes, "TelemetryExtractor") as telemetry_cls:
-            telemetry_cls.return_value.get_active_dependencies.return_value = []
+            telemetry_cls.return_value.get_active_dependencies.return_value = (
+                DiscoveryResult.success([])
+            )
             result = discovery_nodes.extract_runtime_telemetry(
                 _discovery_state(workspace_id="ws-1")
             )
-        self.assertEqual(result, {"runtime_edges": []})
+        self.assertEqual(
+            result,
+            {
+                "runtime_edges": [],
+                "discovery_reports": [
+                    DiscoveryStageReport(
+                        source=DiscoveryMethod.RUNTIME_TELEMETRY,
+                        status=DiscoveryStatus.SUCCESS,
+                    )
+                ],
+            },
+        )
         telemetry_cls.assert_called_once_with(workspace_id="ws-1")
 
 

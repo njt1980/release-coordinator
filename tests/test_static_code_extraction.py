@@ -2,7 +2,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from src.core.models import ServiceNode
+from src.core.models import (
+    DiscoveryMethod,
+    DiscoveryResult,
+    DiscoveryStageReport,
+    DiscoveryStatus,
+    ServiceNode,
+)
 from src.discovery_engine import nodes as discovery_nodes
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools import devops_extractor
@@ -124,20 +130,31 @@ class ScanRepositoryTests(unittest.TestCase):
             }
         )
 
-        references = extractor.scan_repository_for_endpoints("repo-a")
+        result = extractor.scan_repository_for_endpoints("repo-a")
 
-        assert references is not None
+        self.assertEqual(result.status, DiscoveryStatus.SUCCESS)
         self.assertEqual(
-            [(r.service_name, r.endpoint) for r in references],
+            [(r.service_name, r.endpoint) for r in result.items],
             [
                 ("store-front", "http://order-service:3000/order"),
                 ("store-front", "http://product-service:3002/"),
             ],
         )
 
-    def test_missing_repository_returns_none(self) -> None:
+    def test_missing_repository_is_failed_not_empty(self) -> None:
         extractor = _extractor_with_files({})
-        self.assertIsNone(extractor.scan_repository_for_endpoints("missing"))
+        result = extractor.scan_repository_for_endpoints("missing")
+        self.assertEqual(result.status, DiscoveryStatus.FAILED)
+        self.assertEqual(result.items, [])
+        self.assertIn("missing", result.errors[0])
+
+    def test_scan_exception_is_failed(self) -> None:
+        extractor = _extractor_with_files({"/src/a/x.js": "http://b:1"})
+        extractor._get_clients.side_effect = RuntimeError("401")  # type: ignore[attr-defined]
+        with self.assertLogs(devops_extractor.logger, level="ERROR"):
+            result = extractor.scan_repository_for_endpoints("repo-a")
+        self.assertEqual(result.status, DiscoveryStatus.FAILED)
+        self.assertIn("401", result.errors[0])
 
 
 def _devops_state() -> DiscoveryGraphState:
@@ -150,6 +167,7 @@ def _devops_state() -> DiscoveryGraphState:
         "discovered_services": [],
         "static_edges": [],
         "runtime_edges": [],
+        "discovery_reports": [],
         "reconciled_graph": {},
     }
 
@@ -164,12 +182,14 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
     def test_edges_originate_from_microservices_not_repositories(self) -> None:
         with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
             devops_cls.return_value.scan_repository_for_endpoints.side_effect = [
-                [
-                    _reference("store-front", "http://order-service:3000/order"),
-                    _reference("store-front", "http://product-service:3002/"),
-                    _reference("order-service", "http://rabbitmq:5672"),
-                ],
-                None,
+                DiscoveryResult[EndpointReference].success(
+                    [
+                        _reference("store-front", "http://order-service:3000/order"),
+                        _reference("store-front", "http://product-service:3002/"),
+                        _reference("order-service", "http://rabbitmq:5672"),
+                    ]
+                ),
+                DiscoveryResult[EndpointReference].failed("repo-b: not found"),
             ]
             result = discovery_nodes.extract_static_code_baseline(_devops_state())
 
@@ -198,6 +218,18 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
                 ("store-front", "order-service"),
                 ("store-front", "product-service"),
                 ("order-service", "rabbitmq"),
+            ],
+        )
+        # repo-b failed, so the stage is PARTIAL rather than a clean SUCCESS.
+        self.assertEqual(
+            result["discovery_reports"],
+            [
+                DiscoveryStageReport(
+                    source=DiscoveryMethod.STATIC_CODE,
+                    status=DiscoveryStatus.PARTIAL,
+                    item_count=3,
+                    errors=["repo-b: not found"],
+                )
             ],
         )
 

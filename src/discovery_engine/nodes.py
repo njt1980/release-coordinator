@@ -6,7 +6,16 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from src.core import config
-from src.core.models import DependencyEdge, DiscoveryMethod, ServiceNode
+from src.core.models import (
+    DependencyEdge,
+    DiscoveryMethod,
+    DiscoveryStageReport,
+    DiscoveryStatus,
+    KnowledgeGraph,
+    ServiceNode,
+    baseline_problems,
+    combine_statuses,
+)
 from src.core.service_ids import build_name_index, canonical_service_id
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools.devops_extractor import DevOpsExtractor
@@ -14,6 +23,29 @@ from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.telemetry_extractor import TelemetryExtractor
 
 KNOWLEDGE_GRAPH_PATH = Path(__file__).resolve().parents[2] / config.KNOWLEDGE_GRAPH_PATH
+
+
+class DiscoveryIncompleteError(RuntimeError):
+    """Raised when discovery evidence is too incomplete to become a baseline."""
+
+    def __init__(self, problems: list[str]) -> None:
+        super().__init__(
+            "Baseline not established; discovery is incomplete: "
+            + "; ".join(problems)
+        )
+        self.problems = problems
+
+
+def _append_report(
+    state: DiscoveryGraphState, report: DiscoveryStageReport
+) -> list[DiscoveryStageReport]:
+    """Return the state's stage reports with ``report`` added."""
+    return [*state.get("discovery_reports", []), report]
+
+
+def _skipped(state: DiscoveryGraphState, source: DiscoveryMethod) -> dict[str, object]:
+    report = DiscoveryStageReport(source=source, status=DiscoveryStatus.SKIPPED)
+    return {"discovery_reports": _append_report(state, report)}
 
 
 def initialize_scan_scope(state: DiscoveryGraphState) -> dict[str, object]:
@@ -40,10 +72,12 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     Endpoint URLs are reduced to their hostnames before being stored as
     dependency targets; IDs are made canonical later during reconciliation.
     The stage is skipped when no Azure DevOps organization URL or project is
-    configured.
+    configured. A repository that cannot be scanned makes the stage PARTIAL
+    (or FAILED if no repository could be scanned) instead of silently
+    contributing no edges.
     """
     if not state.get("devops_org_url") or not state.get("devops_project"):
-        return {}
+        return _skipped(state, DiscoveryMethod.STATIC_CODE)
 
     extractor = DevOpsExtractor(
         org_url=state["devops_org_url"],
@@ -53,13 +87,16 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     static_edges = list(state.get("static_edges", []))
     discovered_services = list(state.get("discovered_services", []))
     registered = {service.service_id for service in discovered_services}
+    statuses: list[DiscoveryStatus] = []
+    errors: list[str] = []
+    edge_count = 0
 
     for repo_name in state["target_repositories"]:
         extractor.get_pipeline_variables(repo_name)
-        references = extractor.scan_repository_for_endpoints(repo_name)
-        if references is None:
-            continue
-        for reference in references:
+        result = extractor.scan_repository_for_endpoints(repo_name)
+        statuses.append(result.status)
+        errors.extend(result.errors)
+        for reference in result.items:
             target_service_id = urlsplit(reference.endpoint).hostname
             if not target_service_id:
                 continue
@@ -85,8 +122,20 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
                     last_observed_at=datetime.now(timezone.utc),
                 )
             )
+            edge_count += 1
 
-    return {"static_edges": static_edges, "discovered_services": discovered_services}
+    report = DiscoveryStageReport(
+        source=DiscoveryMethod.STATIC_CODE,
+        # Configured DevOps scope with no repositories still ran: nothing to scan.
+        status=combine_statuses(statuses) if statuses else DiscoveryStatus.SUCCESS,
+        item_count=edge_count,
+        errors=errors,
+    )
+    return {
+        "static_edges": static_edges,
+        "discovered_services": discovered_services,
+        "discovery_reports": _append_report(state, report),
+    }
 
 
 def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
@@ -98,13 +147,29 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
     namespaces are configured.
     """
     if not state.get("target_namespaces"):
-        return {}
+        return _skipped(state, DiscoveryMethod.K8S_MANIFEST)
 
     extractor = KubernetesExtractor()
     discovered_services = list(state.get("discovered_services", []))
+    statuses: list[DiscoveryStatus] = []
+    errors: list[str] = []
+    service_count = 0
     for namespace in state["target_namespaces"]:
-        discovered_services.extend(extractor.get_namespace_services(namespace))
-    return {"discovered_services": discovered_services}
+        result = extractor.get_namespace_services(namespace)
+        statuses.append(result.status)
+        errors.extend(result.errors)
+        discovered_services.extend(result.items)
+        service_count += len(result.items)
+    report = DiscoveryStageReport(
+        source=DiscoveryMethod.K8S_MANIFEST,
+        status=combine_statuses(statuses),
+        item_count=service_count,
+        errors=errors,
+    )
+    return {
+        "discovered_services": discovered_services,
+        "discovery_reports": _append_report(state, report),
+    }
 
 
 def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
@@ -116,11 +181,20 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
     """
     workspace_id = (state.get("workspace_id") or "").strip()
     if not workspace_id:
-        return {}
+        return _skipped(state, DiscoveryMethod.RUNTIME_TELEMETRY)
 
     extractor = TelemetryExtractor(workspace_id=workspace_id)
-    runtime_edges = extractor.get_active_dependencies(days_back=30)
-    return {"runtime_edges": runtime_edges}
+    result = extractor.get_active_dependencies(days_back=30)
+    report = DiscoveryStageReport(
+        source=DiscoveryMethod.RUNTIME_TELEMETRY,
+        status=result.status,
+        item_count=len(result.items),
+        errors=result.errors,
+    )
+    return {
+        "runtime_edges": list(result.items),
+        "discovery_reports": _append_report(state, report),
+    }
 
 
 def _canonicalize_services(
@@ -226,16 +300,26 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
 def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
     """Persist the reconciled Day-Zero graph to the local JSON repository.
 
-    The reconciled services and dependency edges are serialized from their
-    Pydantic models and written to ``knowledge_graph.json`` in the project
-    root, where the Release Coordinator reads them back.
+    The reconciled services, dependency edges and per-stage discovery reports
+    are serialized from their Pydantic models and written to
+    ``knowledge_graph.json`` in the project root, where the Release
+    Coordinator reads them back.
+
+    Raises:
+        DiscoveryIncompleteError: if any stage FAILED, was PARTIAL, or did not
+            report. The existing knowledge graph is left untouched, so an
+            incomplete crawl never replaces the baseline.
     """
+    reports = list(state.get("discovery_reports", []))
+    problems = baseline_problems(reports)
+    if problems:
+        raise DiscoveryIncompleteError(problems)
+
     reconciled_graph = state.get("reconciled_graph") or {}
     services: list[ServiceNode] = list(reconciled_graph.get("services", []))
     edges: list[DependencyEdge] = list(reconciled_graph.get("edges", []))
-    payload = {
-        "services": [service.model_dump(mode="json") for service in services],
-        "edges": [edge.model_dump(mode="json") for edge in edges],
-    }
-    KNOWLEDGE_GRAPH_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    graph = KnowledgeGraph(services=services, edges=edges, discovery=reports)
+    KNOWLEDGE_GRAPH_PATH.write_text(
+        json.dumps(graph.model_dump(mode="json"), indent=2), encoding="utf-8"
+    )
     return {}

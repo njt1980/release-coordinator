@@ -2,11 +2,16 @@
 
 from typing import TypedDict
 
-from src.core.models import DependencyEdge, ServiceNode
+from src.core.models import DependencyEdge, DiscoveryStageReport, ServiceNode
 
 
 class DiscoveryGraphState(TypedDict):
-    """Data passed between nodes in the discovery engine graph."""
+    """Data passed between nodes in the discovery engine graph.
+
+    ``discovery_reports`` holds one report per extraction stage, including
+    SKIPPED stages, so persistence can tell a complete baseline from one
+    built on failed or partial extraction.
+    """
 
     workspace_id: str
     devops_org_url: str
@@ -16,4 +21,5 @@ class DiscoveryGraphState(TypedDict):
     discovered_services: list[ServiceNode]
     static_edges: list[DependencyEdge]
     runtime_edges: list[DependencyEdge]
+    discovery_reports: list[DiscoveryStageReport]
     reconciled_graph: dict[str, object]

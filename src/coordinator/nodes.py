@@ -9,9 +9,11 @@ from src.core import config
 from src.core.models import (
     DependencyEdge,
     DiscoveryMethod,
+    KnowledgeGraph,
     PullRequestPayload,
     ReleaseAssessment,
     TelemetryStatus,
+    baseline_problems,
 )
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
 from src.tools.telemetry_extractor import TelemetryExtractor
@@ -57,12 +59,11 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     An edge ``A -> B`` in ``knowledge_graph.json`` means A depends on (calls)
     B. For a target T, ``A -> T`` makes A upstream (a consumer of T) and
     ``T -> B`` makes B downstream (a dependency of T).
+
+    A missing graph, or one whose discovery was not recorded as complete, is
+    reported in ``discovery_issues`` so the release cannot be approved on an
+    empty or partial radius.
     """
-    empty: dict[str, object] = {
-        "upstream_services": [],
-        "downstream_services": [],
-        "matched_edges": [],
-    }
     try:
         raw_graph = json.loads(KNOWLEDGE_GRAPH_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -70,9 +71,26 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
             "Knowledge graph not found at %s; returning no static dependents.",
             KNOWLEDGE_GRAPH_PATH,
         )
-        return empty
+        return {
+            "upstream_services": [],
+            "downstream_services": [],
+            "matched_edges": [],
+            "discovery_issues": [
+                "Knowledge graph not found; no discovery baseline exists."
+            ],
+        }
 
-    edges = [DependencyEdge.model_validate(edge) for edge in raw_graph.get("edges", [])]
+    graph = KnowledgeGraph.model_validate(raw_graph)
+    if graph.discovery is None:
+        issues = [
+            "Knowledge graph does not record discovery outcomes; re-run discovery."
+        ]
+    else:
+        issues = [
+            f"Discovery baseline is incomplete: {problem}"
+            for problem in baseline_problems(graph.discovery)
+        ]
+    edges = graph.edges
     targets = set(state.get("target_services", []))
     upstream: list[str] = []
     downstream: list[str] = []
@@ -90,6 +108,7 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         "upstream_services": upstream,
         "downstream_services": downstream,
         "matched_edges": matched,
+        "discovery_issues": issues,
     }
 
 
@@ -99,7 +118,8 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     With a blank ``workspace_id`` only the knowledge graph is used: runtime
     evidence is the matched edges that carry RUNTIME_TELEMETRY. Otherwise the
     telemetry workspace is queried live and its metrics are filtered to the
-    services in the radius.
+    services in the radius. A FAILED or PARTIAL live query is added to
+    ``discovery_issues``.
     """
     observed_edges = [
         f"{edge.source_service_id} -> {edge.target_service_id}"
@@ -122,7 +142,12 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         ]
     }
     extractor = TelemetryExtractor(workspace_id=workspace_id)
-    extractor.get_active_dependencies(days_back=7)
+    result = extractor.get_active_dependencies(days_back=7)
+    issues = list(state.get("discovery_issues", []))
+    if result.status.is_incomplete:
+        issues.append(
+            f"Live telemetry {result.status.value}: {'; '.join(result.errors)}"
+        )
     runtime_metrics = {
         service: {name: float(value) for name, value in metrics.items()}
         for service, metrics in extractor.get_runtime_metrics().items()
@@ -133,11 +158,16 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         runtime_observed_edges=observed_edges,
         runtime_metrics=runtime_metrics,
     )
-    return {"telemetry_status": status}
+    return {"telemetry_status": status, "discovery_issues": issues}
 
 
 def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Ask the LLM reasoner for a risk score, deployment order and rationale."""
+    """Ask the LLM reasoner for a risk score, deployment order and rationale.
+
+    The LLM's approval is overridden to False whenever ``discovery_issues``
+    is non-empty: a verdict over incomplete dependency evidence is not safe
+    to act on, however low the reasoner scores the risk.
+    """
     targets = list(state.get("target_services", []))
     upstream = list(state.get("upstream_services", []))
     downstream = list(state.get("downstream_services", []))
@@ -154,11 +184,18 @@ def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]
         or TelemetryStatus(source="knowledge_graph"),
     )
     assessment = RiskReasoner().assess(request)
+    issues = list(state.get("discovery_issues", []))
+    justification = assessment.justification
+    if issues:
+        justification += (
+            " Approval withheld because discovery evidence is incomplete: "
+            + " ".join(issues)
+        )
     return {
         "risk_score": assessment.risk_score,
-        "approved": assessment.approved,
+        "approved": assessment.approved and not issues,
         "deployment_sequence": assessment.deployment_order,
-        "justification": assessment.justification,
+        "justification": justification,
     }
 
 
@@ -198,6 +235,7 @@ def compile_evidence_node(state: ReleaseGraphState) -> dict[str, object]:
         f"{_list(state.get('downstream_services', []))}\n\n"
         f"**Risk Score:** {state.get('risk_score', 0.0):.2f}\n\n"
         f"**Approved:** {'Yes' if state.get('approved') else 'No'}\n\n"
+        f"**Discovery Gaps:** {_list(state.get('discovery_issues', []))}\n\n"
         f"**Recommended Sequence:** {' -> '.join(sequence) or 'Not determined'}\n\n"
         f"**Justification:** {state.get('justification') or 'Not provided'}"
     )

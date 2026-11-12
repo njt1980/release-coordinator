@@ -12,6 +12,7 @@ from azure.identity import DefaultAzureCredential
 from msrest.authentication import BasicTokenAuthentication
 from pydantic import BaseModel, Field
 
+from src.core.models import DiscoveryResult
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
     VERIFY_TIMEOUT_SECONDS,
@@ -361,7 +362,7 @@ class DevOpsExtractor:
 
     def scan_repository_for_endpoints(
         self, repo_name: str
-    ) -> list[EndpointReference] | None:
+    ) -> DiscoveryResult[EndpointReference]:
         """Find internal service endpoints referenced by each microservice.
 
         Only application and configuration files under a microservice
@@ -373,15 +374,17 @@ class DevOpsExtractor:
             repo_name: Name of the repository to inspect.
 
         Returns:
-            Unique (service, endpoint) references in discovery order, or None
-            if the repository could not be found or scanned.
+            SUCCESS with unique (service, endpoint) references in discovery
+            order, or FAILED if the repository could not be found or scanned.
         """
         try:
             _, git_client, project = self._get_clients()
             repository = self._find_repository(git_client, project, repo_name)
             if repository is None:
                 logger.warning("Azure DevOps repository %s was not found", repo_name)
-                return None
+                return DiscoveryResult[EndpointReference].failed(
+                    f"{repo_name}: repository was not found"
+                )
 
             items = git_client.get_items(
                 repository.id, project=project, recursion_level="Full"
@@ -414,9 +417,11 @@ class DevOpsExtractor:
                                 file_path=path,
                             )
                         )
-            return references
-        except Exception:
+            return DiscoveryResult[EndpointReference].success(references)
+        except Exception as error:
             logger.exception(
                 "Failed to scan repository %s for endpoints", repo_name
             )
-            return None
+            return DiscoveryResult[EndpointReference].failed(
+                f"{repo_name}: endpoint scan failed: {error}"
+            )

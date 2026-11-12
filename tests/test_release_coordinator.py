@@ -10,6 +10,7 @@ from src.coordinator import nodes as coordinator_nodes
 from src.core.models import (
     DependencyEdge,
     DiscoveryMethod,
+    DiscoveryResult,
     PullRequestPayload,
     ReleaseAssessment,
     RiskAssessment,
@@ -194,6 +195,51 @@ class CoordinatorNodeTests(unittest.TestCase):
                 "deployment_sequence": [TARGET, "default/store-front"],
                 "justification": "why",
             },
+        )
+
+    def test_assess_node_withholds_approval_when_discovery_incomplete(self) -> None:
+        state: Any = {
+            "pull_request": PR,
+            "target_services": [TARGET],
+            "upstream_services": [],
+            "downstream_services": [],
+            "matched_edges": [],
+            "telemetry_status": TelemetryStatus(source="live"),
+            "discovery_issues": ["Live telemetry FAILED: query timed out"],
+        }
+        verdict = RiskAssessment(
+            risk_score=0.1,
+            approved=True,
+            deployment_order=[TARGET],
+            justification="Low risk.",
+        )
+        with patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls:
+            reasoner_cls.return_value.assess.return_value = verdict
+            result = coordinator_nodes.assess_risk_and_sequence_node(state)
+
+        self.assertFalse(result["approved"])
+        justification = result["justification"]
+        assert isinstance(justification, str)
+        self.assertIn("Approval withheld", justification)
+        self.assertIn("Live telemetry FAILED: query timed out", justification)
+
+    def test_live_telemetry_failure_becomes_discovery_issue(self) -> None:
+        state: Any = {
+            "workspace_id": "ws-1",
+            "target_services": [TARGET],
+            "discovery_issues": ["existing issue"],
+        }
+        with patch.object(coordinator_nodes, "TelemetryExtractor") as extractor_cls:
+            extractor = extractor_cls.return_value
+            extractor.get_active_dependencies.return_value = DiscoveryResult.failed(
+                "query timed out"
+            )
+            extractor.get_runtime_metrics.return_value = {}
+            result = coordinator_nodes.validate_runtime_telemetry_node(state)
+
+        self.assertEqual(
+            result["discovery_issues"],
+            ["existing issue", "Live telemetry FAILED: query timed out"],
         )
 
     def test_compile_node_emits_typed_release_assessment(self) -> None:

@@ -8,9 +8,15 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
-from src.core.models import DependencyEdge, ServiceNode
+from src.core.models import (
+    DependencyEdge,
+    DiscoveryStageReport,
+    KnowledgeGraph,
+    ServiceNode,
+    baseline_problems,
+)
 from src.discovery_engine.graph import discovery_app
-from src.discovery_engine.nodes import KNOWLEDGE_GRAPH_PATH
+from src.discovery_engine.nodes import KNOWLEDGE_GRAPH_PATH, DiscoveryIncompleteError
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
@@ -84,20 +90,15 @@ class CrawlResults(BaseModel):
     """Knowledge graph produced by a completed discovery run.
 
     Carries the discovered services and dependency edges alongside their
-    counts so the frontend can show what was extracted.
+    counts so the frontend can show what was extracted, plus the outcome of
+    each discovery stage.
     """
 
     service_count: int = Field(ge=0)
     edge_count: int = Field(ge=0)
     services: list[ServiceNode]
     edges: list[DependencyEdge]
-
-
-class PersistedGraph(BaseModel):
-    """Shape of ``knowledge_graph.json`` needed to report a run's results."""
-
-    services: list[ServiceNode]
-    edges: list[DependencyEdge]
+    discovery: list[DiscoveryStageReport]
 
 
 class JobRecord(BaseModel):
@@ -203,6 +204,7 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
         "discovered_services": [],
         "static_edges": [],
         "runtime_edges": [],
+        "discovery_reports": [],
         "reconciled_graph": {},
     }
 
@@ -210,17 +212,25 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
 def summarize_knowledge_graph() -> CrawlResults:
     """Load the services and dependency edges from the persisted knowledge graph.
 
-    Raises if the file is missing or does not contain valid ``services`` and
-    ``edges`` lists, so a run without a readable graph is not reported as
-    completed.
+    Raises if the file is missing, does not contain valid ``services`` and
+    ``edges`` lists, or does not record a complete discovery, so a run without
+    a trustworthy baseline is not reported as completed.
     """
     raw_graph = json.loads(KNOWLEDGE_GRAPH_PATH.read_text(encoding="utf-8"))
-    graph = PersistedGraph.model_validate(raw_graph)
+    graph = KnowledgeGraph.model_validate(raw_graph)
+    if graph.discovery is None:
+        raise DiscoveryIncompleteError(
+            ["knowledge graph does not record discovery outcomes"]
+        )
+    problems = baseline_problems(graph.discovery)
+    if problems:
+        raise DiscoveryIncompleteError(problems)
     return CrawlResults(
         service_count=len(graph.services),
         edge_count=len(graph.edges),
         services=graph.services,
         edges=graph.edges,
+        discovery=graph.discovery,
     )
 
 
