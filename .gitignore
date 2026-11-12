@@ -29,3 +29,17 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
+knowledge_graph.json
+# Versioned discovery baselines (baselines/{tenant}/{project_id}/*.json)
+baselines/
+
+# Local dev server pid files and logs (start-app skill)
+.run/
+
+# Claude Code local workspace
+.claude/
+
+# Local secrets and environment overrides (copy .env.example to .env)
+.env
+.env.*
+!.env.example

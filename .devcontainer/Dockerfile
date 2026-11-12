@@ -21,7 +21,7 @@ RUN apt-get update \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ bookworm main" \
         > /etc/apt/sources.list.d/azure-cli.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends gh azure-cli \
+    && apt-get install -y --no-install-recommends gh azure-cli nodejs npm \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

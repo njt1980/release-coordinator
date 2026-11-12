@@ -14,5 +14,12 @@
       ]
     }
   },
+  "forwardPorts": [5173],
+  "portsAttributes": {
+    "5173": {
+      "label": "Frontend (Vite)",
+      "onAutoForward": "openBrowser"
+    }
+  },
   "remoteUser": "root"
 }
