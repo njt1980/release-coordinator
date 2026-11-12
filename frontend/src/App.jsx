@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ScopeInputCard from "./components/ScopeInputCard.jsx";
 
 function TextField({ id, label, value, onChange, placeholder, hint }) {
@@ -83,6 +83,42 @@ async function postJson(url, body) {
   return data;
 }
 
+async function getJson(url) {
+  const response = await fetch(url);
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(data?.detail || `Request failed with status ${response.status}`);
+  }
+  return data;
+}
+
+const POLL_INTERVAL_MS = 2000;
+
+const BANNER_STYLES = {
+  info: "bg-indigo-50 text-indigo-800",
+  success: "bg-green-50 text-green-800",
+  error: "bg-red-50 text-red-700",
+};
+
+// Maps a polled job record onto the footer banner.
+const jobBanner = (job) => {
+  switch (job.status) {
+    case "completed":
+      return { tone: "success", text: `Discovery run completed. Job ID: ${job.job_id}` };
+    case "failed":
+      return {
+        tone: "error",
+        text: `Discovery run failed: ${job.error_message || "Unknown error"}. Job ID: ${job.job_id}`,
+      };
+    case "running":
+      return { tone: "info", busy: true, text: `Discovery run in progress… Job ID: ${job.job_id}` };
+    default:
+      return { tone: "info", busy: true, text: `Discovery run queued. Job ID: ${job.job_id}` };
+  }
+};
+
+const isTerminal = (status) => status === "completed" || status === "failed";
+
 function Spinner() {
   return (
     <span
@@ -100,6 +136,19 @@ export default function App() {
   // Bumped whenever a system's scope changes or a new test starts, so a
   // response from an outdated request is discarded.
   const testGenerations = useRef(Object.fromEntries(SYSTEMS.map((system) => [system, 0])));
+  const pollTimer = useRef(null);
+
+  const stopPolling = () => {
+    clearInterval(pollTimer.current);
+    pollTimer.current = null;
+  };
+
+  useEffect(() => stopPolling, []);
+
+  // While a job is being polled its banner stays visible.
+  const clearCrawlMessage = () => {
+    if (!pollTimer.current) setCrawlMessage(null);
+  };
 
   const setTest = (system, testState) =>
     setTests((previous) => ({ ...previous, [system]: testState }));
@@ -110,7 +159,7 @@ export default function App() {
     const system = FIELD_SYSTEM[field];
     testGenerations.current[system] += 1;
     setTest(system, IDLE_TEST);
-    setCrawlMessage(null);
+    clearCrawlMessage();
   };
 
   const isVerified = SYSTEMS.some((system) => tests[system].status === "success");
@@ -118,7 +167,7 @@ export default function App() {
   const runTest = async (system, request) => {
     const generation = ++testGenerations.current[system];
     setTest(system, { status: "loading", message: "" });
-    setCrawlMessage(null);
+    clearCrawlMessage();
     let next;
     try {
       const result = await request();
@@ -161,17 +210,46 @@ export default function App() {
       return postJson("/api/verify/telemetry", { workspace_id: workspaceId });
     });
 
+  const finishCrawl = (banner) => {
+    stopPolling();
+    setCrawlMessage(banner);
+    setIsCrawling(false);
+  };
+
+  const pollJob = (jobId) => {
+    let inFlight = false;
+    pollTimer.current = setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const job = await getJson(`/api/onboard/${encodeURIComponent(jobId)}`);
+        if (isTerminal(job.status)) {
+          finishCrawl(jobBanner(job));
+        } else {
+          setCrawlMessage(jobBanner(job));
+        }
+      } catch (error) {
+        finishCrawl({
+          tone: "error",
+          text: `Could not read discovery run status: ${error.message}. Job ID: ${jobId}`,
+        });
+      } finally {
+        inFlight = false;
+      }
+    }, POLL_INTERVAL_MS);
+  };
+
   const startCrawl = async () => {
-    if (!isVerified) return;
+    if (!isVerified || isCrawling) return;
+    stopPolling();
     setIsCrawling(true);
     setCrawlMessage(null);
     try {
       const response = await postJson("/api/onboard", buildPayload(config, tests));
-      setCrawlMessage({ ok: true, text: `${response.message} Job ID: ${response.job_id}` });
+      setCrawlMessage(jobBanner({ job_id: response.job_id, status: "queued" }));
+      pollJob(response.job_id);
     } catch (error) {
-      setCrawlMessage({ ok: false, text: error.message });
-    } finally {
-      setIsCrawling(false);
+      finishCrawl({ tone: "error", text: error.message });
     }
   };
 
@@ -264,11 +342,12 @@ export default function App() {
           <div aria-live="polite" className="max-h-48 space-y-2 overflow-y-auto">
             {crawlMessage && (
               <p
-                role={crawlMessage.ok ? "status" : "alert"}
-                className={`rounded-md px-3 py-2 text-sm ${
-                  crawlMessage.ok ? "bg-green-50 text-green-800" : "bg-red-50 text-red-700"
+                role={crawlMessage.tone === "error" ? "alert" : "status"}
+                className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ${
+                  BANNER_STYLES[crawlMessage.tone]
                 }`}
               >
+                {crawlMessage.busy && <Spinner />}
                 {crawlMessage.text}
               </p>
             )}

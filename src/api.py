@@ -1,10 +1,11 @@
 """FastAPI boundary that lets a frontend trigger the Day-Zero discovery engine."""
 
-from typing import Self
+from typing import Literal, Self
 from uuid import uuid4
 
-from fastapi import BackgroundTasks, FastAPI, status
+from fastapi import BackgroundTasks, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
+from starlette.concurrency import run_in_threadpool
 
 from src.discovery_engine.graph import discovery_app
 from src.discovery_engine.state import DiscoveryGraphState
@@ -71,6 +72,22 @@ class OnboardingResponse(BaseModel):
     message: str
     job_id: str
     workspace_id: str
+
+
+JobStatus = Literal["queued", "running", "completed", "failed"]
+
+
+class JobRecord(BaseModel):
+    """Current state of one scheduled discovery run."""
+
+    job_id: str
+    status: JobStatus
+    error_message: str | None = None
+
+
+# In-memory job registry. Records are lost when the server restarts. Only
+# mutated from the event loop, so no locking is needed.
+_jobs: dict[str, JobRecord] = {}
 
 
 class SystemVerification(BaseModel):
@@ -166,6 +183,23 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
     }
 
 
+async def run_discovery_job(job_id: str, state: DiscoveryGraphState) -> None:
+    """Run the discovery graph for one job and record its outcome.
+
+    The synchronous graph runs in the thread pool so the event loop stays free
+    to answer status polls while the crawl is in progress.
+    """
+    _jobs[job_id] = JobRecord(job_id=job_id, status="running")
+    try:
+        await run_in_threadpool(discovery_app.invoke, state)
+    except Exception as error:
+        _jobs[job_id] = JobRecord(
+            job_id=job_id, status="failed", error_message=str(error) or repr(error)
+        )
+    else:
+        _jobs[job_id] = JobRecord(job_id=job_id, status="completed")
+
+
 @app.post(
     "/api/onboard",
     response_model=OnboardingResponse,
@@ -175,13 +209,28 @@ def onboard(
     payload: OnboardingPayload, background_tasks: BackgroundTasks
 ) -> OnboardingResponse:
     """Schedule a discovery graph run for the requested scope and return at once."""
-    background_tasks.add_task(discovery_app.invoke, build_discovery_state(payload))
+    job_id = str(uuid4())
+    _jobs[job_id] = JobRecord(job_id=job_id, status="queued")
+    background_tasks.add_task(
+        run_discovery_job, job_id, build_discovery_state(payload)
+    )
     return OnboardingResponse(
         status="accepted",
         message="Discovery engine run scheduled.",
-        job_id=str(uuid4()),
+        job_id=job_id,
         workspace_id=payload.workspace_id,
     )
+
+
+@app.get("/api/onboard/{job_id}", response_model=JobRecord)
+def get_onboarding_job(job_id: str) -> JobRecord:
+    """Return the current status of a scheduled discovery run."""
+    record = _jobs.get(job_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Unknown job ID"
+        )
+    return record
 
 
 @app.post("/api/verify/devops", response_model=SystemVerification)
