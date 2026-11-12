@@ -53,7 +53,7 @@ class KnowledgeGraphPersistenceTests(unittest.TestCase):
             _edge("api-gateway", "payment-service"),
         )
 
-    def test_static_radius_collects_both_directions_without_duplicates(self) -> None:
+    def test_static_radius_splits_upstream_and_downstream(self) -> None:
         self._persist(
             [
                 _edge("api-gateway", "payment-service"),
@@ -67,10 +67,11 @@ class KnowledgeGraphPersistenceTests(unittest.TestCase):
 
         result = coordinator_nodes.calculate_static_radius_node(state)
 
-        self.assertEqual(
-            result,
-            {"static_dependents": ["api-gateway", "ledger-service", "order-service"]},
-        )
+        self.assertEqual(result["upstream_services"], ["api-gateway", "order-service"])
+        self.assertEqual(result["downstream_services"], ["ledger-service"])
+        matched = result["matched_edges"]
+        assert isinstance(matched, list)
+        self.assertEqual(len(matched), 4)
 
     def test_static_radius_missing_file_warns_and_returns_empty(self) -> None:
         state: Any = {"target_services": ["payment-service"]}
@@ -78,7 +79,10 @@ class KnowledgeGraphPersistenceTests(unittest.TestCase):
         with self.assertLogs(coordinator_nodes.logger, level="WARNING"):
             result = coordinator_nodes.calculate_static_radius_node(state)
 
-        self.assertEqual(result, {"static_dependents": []})
+        self.assertEqual(
+            result,
+            {"upstream_services": [], "downstream_services": [], "matched_edges": []},
+        )
 
 
 if __name__ == "__main__":

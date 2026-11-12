@@ -6,7 +6,7 @@ from src.core.models import ServiceNode
 from src.discovery_engine import nodes as discovery_nodes
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools import devops_extractor
-from src.tools.devops_extractor import DevOpsExtractor
+from src.tools.devops_extractor import DevOpsExtractor, EndpointReference
 
 
 class ScannablePathTests(unittest.TestCase):
@@ -30,9 +30,30 @@ class ScannablePathTests(unittest.TestCase):
             "/docs/setup.yaml",
             "/service/Docs/config.json",
             "/LICENSE",
+            "/src/store-front/node_modules/vite/index.js",
+            "/src/store-front/package-lock.json",
+            "/vendor/lib/client.go",
         ]:
             with self.subTest(path=path):
                 self.assertFalse(devops_extractor._is_scannable_path(path))
+
+
+class ServiceNameFromPathTests(unittest.TestCase):
+    def test_files_under_a_service_directory_map_to_that_service(self) -> None:
+        for path, expected in [
+            ("/src/order-service/routes/root.js", "order-service"),
+            ("/services/Payments/app.py", "payments"),
+            ("/src/makeline-service/main.go", "makeline-service"),
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    devops_extractor._service_name_from_path(path), expected
+                )
+
+    def test_files_outside_service_directories_have_no_service(self) -> None:
+        for path in ["/config.yaml", "/charts/values.yaml", "/src/app.py"]:
+            with self.subTest(path=path):
+                self.assertIsNone(devops_extractor._service_name_from_path(path))
 
 
 class NoiseEndpointTests(unittest.TestCase):
@@ -40,20 +61,26 @@ class NoiseEndpointTests(unittest.TestCase):
         for url in [
             "http://localhost:8080/api",
             "http://127.0.0.1:5000",
+            "http://x.x.x.x:3000",
+            "http://10.0.0.12:8080",
             "http://${storefrontip",
             "https://schemas.xmlsoap.org/soap",
-            "https://opensource.microsoft.com/codeofconduct",
-            "https://www.mongodb.org/static/pgp",
-            "http://www.w3.org/2001/XMLSchema",
-            "https://json.schemastore.org/package",
+            "https://github.com/Azure-Samples/aks-store-demo",
+            "https://paypal.me/someone",
+            "https://eslint.org/docs/rules",
+            "https://payments.internal.example.com/v1",
+            "https://kubernetes.default.svc/api",
+            "ftp://order-service/file",
         ]:
             with self.subTest(url=url):
                 self.assertTrue(devops_extractor._is_noise_endpoint(url))
 
-    def test_service_urls_are_kept(self) -> None:
+    def test_internal_service_urls_are_kept(self) -> None:
         for url in [
-            "https://payments.internal.example.com/v1",
             "http://inventory-service:8080",
+            "http://order-service:3000/order",
+            "http://product-service.default.svc.cluster.local:3002",
+            "http://makeline-service.default.svc",
         ]:
             with self.subTest(url=url):
                 self.assertFalse(devops_extractor._is_noise_endpoint(url))
@@ -81,21 +108,31 @@ def _extractor_with_files(files: dict[str, str]) -> DevOpsExtractor:
 
 
 class ScanRepositoryTests(unittest.TestCase):
-    def test_scan_skips_noise_files_and_urls(self) -> None:
+    def test_scan_attributes_internal_endpoints_to_owning_service(self) -> None:
         extractor = _extractor_with_files(
             {
-                "/README.md": "https://orders.example.com",
-                "/docs/api.yaml": "https://docs-only.example.com",
-                "/config.yaml": (
-                    "url: https://payments.example.com/v1\n"
-                    "local: http://localhost:3000\n"
-                    "schema: https://json.schemastore.org/x\n"
+                "/README.md": "http://order-service:3000",
+                "/docs/api.yaml": "http://order-service:3000",
+                "/config.yaml": "url: http://order-service:3000\n",
+                "/src/store-front/src/api.js": (
+                    "const a = 'http://order-service:3000/order'\n"
+                    "const b = 'http://product-service:3002/'\n"
+                    "const c = 'https://github.com/x'\n"
                 ),
+                "/src/store-front/node_modules/x/index.js": "http://evil:1/",
+                "/src/order-service/app.js": "http://x.x.x.x:5672",
             }
         )
+
+        references = extractor.scan_repository_for_endpoints("repo-a")
+
+        assert references is not None
         self.assertEqual(
-            extractor.scan_repository_for_endpoints("repo-a"),
-            ["https://payments.example.com/v1"],
+            [(r.service_name, r.endpoint) for r in references],
+            [
+                ("store-front", "http://order-service:3000/order"),
+                ("store-front", "http://product-service:3002/"),
+            ],
         )
 
     def test_missing_repository_returns_none(self) -> None:
@@ -117,11 +154,21 @@ def _devops_state() -> DiscoveryGraphState:
     }
 
 
+def _reference(service: str, endpoint: str) -> EndpointReference:
+    return EndpointReference(
+        service_name=service, endpoint=endpoint, file_path=f"/src/{service}/a.js"
+    )
+
+
 class StaticBaselineServiceRegistrationTests(unittest.TestCase):
-    def test_scanned_repositories_are_registered_as_services(self) -> None:
+    def test_edges_originate_from_microservices_not_repositories(self) -> None:
         with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
             devops_cls.return_value.scan_repository_for_endpoints.side_effect = [
-                ["https://payments.example.com/v1"],
+                [
+                    _reference("store-front", "http://order-service:3000/order"),
+                    _reference("store-front", "http://product-service:3002/"),
+                    _reference("order-service", "http://rabbitmq:5672"),
+                ],
                 None,
             ]
             result = discovery_nodes.extract_static_code_baseline(_devops_state())
@@ -132,17 +179,26 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
             services,
             [
                 ServiceNode(
-                    service_id="repo-a",
-                    name="repo-a",
-                    metadata={"source": "STATIC_CODE", "devops_project": "proj"},
+                    service_id=name,
+                    name=name,
+                    metadata={
+                        "source": "STATIC_CODE",
+                        "devops_project": "proj",
+                        "repository": "repo-a",
+                    },
                 )
+                for name in ["store-front", "order-service"]
             ],
         )
         edges = result["static_edges"]
         assert isinstance(edges, list)
         self.assertEqual(
             [(e.source_service_id, e.target_service_id) for e in edges],
-            [("repo-a", "payments.example.com")],
+            [
+                ("store-front", "order-service"),
+                ("store-front", "product-service"),
+                ("order-service", "rabbitmq"),
+            ],
         )
 
 

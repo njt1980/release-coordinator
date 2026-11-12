@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from src.core import config
 from src.core.models import DependencyEdge, DiscoveryMethod, ServiceNode
+from src.core.service_ids import build_name_index, canonical_service_id
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
@@ -33,10 +34,13 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     """Build the initial service inventory and static dependency baseline.
 
     The Day-Zero static pass inspects the scoped repositories to identify
-    microservices and code-declared dependencies. Each successfully scanned
-    repository is registered as a service node. Endpoint URLs are reduced to
-    their hostnames before being stored as dependency targets. The stage is
-    skipped when no Azure DevOps organization URL or project is configured.
+    microservices and code-declared dependencies. Each microservice directory
+    that references an internal endpoint is registered as a service node, and
+    its edges originate from that microservice, not from the repository.
+    Endpoint URLs are reduced to their hostnames before being stored as
+    dependency targets; IDs are made canonical later during reconciliation.
+    The stage is skipped when no Azure DevOps organization URL or project is
+    configured.
     """
     if not state.get("devops_org_url") or not state.get("devops_project"):
         return {}
@@ -48,38 +52,33 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     )
     static_edges = list(state.get("static_edges", []))
     discovered_services = list(state.get("discovered_services", []))
+    registered = {service.service_id for service in discovered_services}
 
     for repo_name in state["target_repositories"]:
         extractor.get_pipeline_variables(repo_name)
-        endpoints = extractor.scan_repository_for_endpoints(repo_name)
-        if endpoints is None:
+        references = extractor.scan_repository_for_endpoints(repo_name)
+        if references is None:
             continue
-        discovered_services.append(
-            ServiceNode(
-                service_id=repo_name,
-                name=repo_name,
-                metadata={
-                    "source": DiscoveryMethod.STATIC_CODE.value,
-                    "devops_project": state["devops_project"],
-                },
-            )
-        )
-        for endpoint in endpoints:
-            try:
-                parsed_endpoint = urlsplit(endpoint)
-                target_service_id = parsed_endpoint.hostname
-            except ValueError:
+        for reference in references:
+            target_service_id = urlsplit(reference.endpoint).hostname
+            if not target_service_id:
                 continue
-
-            if (
-                parsed_endpoint.scheme.lower() not in {"http", "https"}
-                or not target_service_id
-            ):
-                continue
-
+            if reference.service_name not in registered:
+                registered.add(reference.service_name)
+                discovered_services.append(
+                    ServiceNode(
+                        service_id=reference.service_name,
+                        name=reference.service_name,
+                        metadata={
+                            "source": DiscoveryMethod.STATIC_CODE.value,
+                            "devops_project": state["devops_project"],
+                            "repository": repo_name,
+                        },
+                    )
+                )
             static_edges.append(
                 DependencyEdge(
-                    source_service_id=repo_name,
+                    source_service_id=reference.service_name,
                     target_service_id=target_service_id,
                     discovery_methods=[DiscoveryMethod.STATIC_CODE],
                     confidence_score=0.7,
@@ -124,48 +123,101 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
     return {"runtime_edges": runtime_edges}
 
 
+def _canonicalize_services(
+    services: list[ServiceNode],
+    name_index: dict[str, str],
+    default_namespace: str | None,
+) -> list[ServiceNode]:
+    """Rename services to canonical IDs and merge duplicates by ID.
+
+    A repository-derived service (``order-service``) and its Kubernetes
+    counterpart (``default/order-service``) collapse into a single node whose
+    metadata combines both sources.
+    """
+    merged: dict[str, ServiceNode] = {}
+    for service in services:
+        service_id = canonical_service_id(
+            service.service_id, name_index, default_namespace
+        )
+        existing = merged.get(service_id)
+        if existing is None:
+            merged[service_id] = service.model_copy(
+                update={"service_id": service_id}
+            )
+            continue
+        merged[service_id] = existing.model_copy(
+            update={
+                "repository_url": existing.repository_url or service.repository_url,
+                "metadata": {**service.metadata, **existing.metadata},
+            }
+        )
+    return list(merged.values())
+
+
+def _merge_edge(existing_edge: DependencyEdge, edge: DependencyEdge) -> DependencyEdge:
+    """Combine the evidence of two edges between the same services."""
+    discovery_methods = list(existing_edge.discovery_methods)
+    for method in edge.discovery_methods:
+        if method not in discovery_methods:
+            discovery_methods.append(method)
+    existing_observed_at = existing_edge.last_observed_at
+    edge_observed_at = edge.last_observed_at
+    if existing_observed_at.utcoffset() is None:
+        existing_observed_at = existing_observed_at.replace(tzinfo=timezone.utc)
+    if edge_observed_at.utcoffset() is None:
+        edge_observed_at = edge_observed_at.replace(tzinfo=timezone.utc)
+    return DependencyEdge(
+        source_service_id=existing_edge.source_service_id,
+        target_service_id=existing_edge.target_service_id,
+        discovery_methods=discovery_methods,
+        confidence_score=max(existing_edge.confidence_score, edge.confidence_score),
+        last_observed_at=max(existing_observed_at, edge_observed_at),
+    )
+
+
 def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
     """Reconcile static, Kubernetes, and runtime evidence into one graph.
 
-    This stage combines discovered services and dependency evidence, merging
-    duplicate relationships into ``reconciled_graph`` for downstream
-    persistence.
+    Service and edge endpoints are rewritten to the canonical
+    ``<namespace>/<name>`` form (see ``src.core.service_ids``) so that edges
+    join to service nodes. Bare names resolve against the discovered
+    Kubernetes services, falling back to the scanned namespace when exactly
+    one was configured. Duplicate services and relationships are merged and
+    self-referencing edges are dropped.
     """
+    services = list(state.get("discovered_services", []))
+    namespaces = list(state.get("target_namespaces") or [])
+    default_namespace = namespaces[0] if len(namespaces) == 1 else None
+    name_index = build_name_index(service.service_id for service in services)
+
     merged_edges: dict[tuple[str, str], DependencyEdge] = {}
     for edge in [
         *state.get("static_edges", []),
         *state.get("runtime_edges", []),
     ]:
-        edge_key = (edge.source_service_id, edge.target_service_id)
-        existing_edge = merged_edges.get(edge_key)
-        if existing_edge is None:
-            merged_edges[edge_key] = edge
+        source = canonical_service_id(
+            edge.source_service_id, name_index, default_namespace
+        )
+        target = canonical_service_id(
+            edge.target_service_id, name_index, default_namespace
+        )
+        if source == target:
             continue
-
-        discovery_methods = list(existing_edge.discovery_methods)
-        for method in edge.discovery_methods:
-            if method not in discovery_methods:
-                discovery_methods.append(method)
-        existing_observed_at = existing_edge.last_observed_at
-        edge_observed_at = edge.last_observed_at
-        if existing_observed_at.utcoffset() is None:
-            existing_observed_at = existing_observed_at.replace(tzinfo=timezone.utc)
-        if edge_observed_at.utcoffset() is None:
-            edge_observed_at = edge_observed_at.replace(tzinfo=timezone.utc)
-        merged_edges[edge_key] = DependencyEdge(
-            source_service_id=edge.source_service_id,
-            target_service_id=edge.target_service_id,
-            discovery_methods=discovery_methods,
-            confidence_score=max(
-                existing_edge.confidence_score, edge.confidence_score
-            ),
-            last_observed_at=max(existing_observed_at, edge_observed_at),
+        edge = edge.model_copy(
+            update={"source_service_id": source, "target_service_id": target}
+        )
+        edge_key = (source, target)
+        existing_edge = merged_edges.get(edge_key)
+        merged_edges[edge_key] = (
+            edge if existing_edge is None else _merge_edge(existing_edge, edge)
         )
 
     # Zombie service identification will be added here.
     return {
         "reconciled_graph": {
-            "services": list(state.get("discovered_services", [])),
+            "services": _canonicalize_services(
+                services, name_index, default_namespace
+            ),
             "edges": list(merged_edges.values()),
         }
     }

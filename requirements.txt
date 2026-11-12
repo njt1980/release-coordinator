@@ -8,3 +8,4 @@ azure-monitor-query
 kubernetes
 fastapi
 uvicorn
+anthropic>=2.8.0

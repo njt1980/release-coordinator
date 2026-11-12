@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -42,3 +42,36 @@ class DependencyEdge(BaseModel):
     discovery_methods: List[DiscoveryMethod]
     confidence_score: float = Field(ge=0.0, le=1.0)
     last_observed_at: datetime
+
+
+class PullRequestPayload(BaseModel):
+    """A pull request that triggers a release impact assessment."""
+
+    pr_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    target_service: str = Field(min_length=1)
+    source_branch: str = ""
+    target_branch: str = "main"
+    description: str = ""
+    diff: str = Field(min_length=1)
+
+
+class TelemetryStatus(BaseModel):
+    """Runtime evidence available for the services in a release radius.
+
+    ``source`` is ``knowledge_graph`` when the evidence comes only from the
+    RUNTIME_TELEMETRY edges persisted by discovery, or ``live`` when a
+    telemetry workspace was queried for this assessment.
+    """
+
+    source: Literal["knowledge_graph", "live"]
+    runtime_observed_edges: List[str] = Field(default_factory=list)
+    runtime_metrics: Dict[str, Dict[str, float]] = Field(default_factory=dict)
+
+
+class RiskAssessment(BaseModel):
+    """LLM-produced release risk verdict for a pull request."""
+
+    risk_score: float = Field(ge=0.0, le=1.0)
+    deployment_order: List[str] = Field(min_length=1)
+    justification: str = Field(min_length=1)

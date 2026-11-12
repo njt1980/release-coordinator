@@ -6,9 +6,13 @@ from pathlib import Path
 
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
-from src.core.models import DependencyEdge
-from src.tools.devops_extractor import DevOpsExtractor
-from src.tools.k8s_extractor import KubernetesExtractor
+from src.core.models import (
+    DependencyEdge,
+    DiscoveryMethod,
+    PullRequestPayload,
+    TelemetryStatus,
+)
+from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
 from src.tools.telemetry_extractor import TelemetryExtractor
 
 logger = logging.getLogger(__name__)
@@ -16,18 +20,46 @@ logger = logging.getLogger(__name__)
 KNOWLEDGE_GRAPH_PATH = Path(__file__).resolve().parents[2] / config.KNOWLEDGE_GRAPH_PATH
 
 
+def _service_name(service_id: str) -> str:
+    """Return the bare service name of a ``<namespace>/<name>`` ID."""
+    return service_id.rsplit("/", 1)[-1]
+
+
+def baseline_deployment_order(
+    targets: list[str], upstream: list[str], downstream: list[str]
+) -> list[str]:
+    """Return a dependency-safe order: providers first, consumers last.
+
+    Downstream services (called by the target) go first so the target's new
+    code finds compatible dependencies, then the target, then upstream
+    consumers that may need to adopt the target's changes.
+    """
+    order: list[str] = []
+    for service in [*downstream, *targets, *upstream]:
+        if service not in order:
+            order.append(service)
+    return order
+
+
 def extract_trigger_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Extract the target services from the triggering release event."""
-    return {"target_services": state.get("target_services") or ["payment-service"]}
+    """Validate the pull-request payload and resolve the target services."""
+    pull_request = PullRequestPayload.model_validate(state["trigger_event"])
+    targets = list(state.get("target_services") or [pull_request.target_service])
+    return {"pull_request": pull_request, "target_services": targets}
 
 
 def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Calculate the static dependency radius of the target services.
+    """Split the target's graph neighbours into upstream and downstream.
 
-    Edges persisted by the discovery engine in ``knowledge_graph.json`` are
-    scanned for any relationship touching a target service; the service on
-    the other end of each such edge is a static dependent.
+    An edge ``A -> B`` in ``knowledge_graph.json`` means A depends on (calls)
+    B. For a target T, ``A -> T`` makes A upstream (a consumer of T) and
+    ``T -> B`` makes B downstream (a dependency of T).
     """
+    empty: dict[str, object] = {
+        "upstream_services": [],
+        "downstream_services": [],
+        "matched_edges": [],
+    }
     try:
         raw_graph = json.loads(KNOWLEDGE_GRAPH_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -35,76 +67,119 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
             "Knowledge graph not found at %s; returning no static dependents.",
             KNOWLEDGE_GRAPH_PATH,
         )
-        return {"static_dependents": []}
+        return empty
 
     edges = [DependencyEdge.model_validate(edge) for edge in raw_graph.get("edges", [])]
     targets = set(state.get("target_services", []))
-    static_dependents: list[str] = []
+    upstream: list[str] = []
+    downstream: list[str] = []
+    matched: list[DependencyEdge] = []
     for edge in edges:
-        connected: list[str] = []
-        if edge.source_service_id in targets:
-            connected.append(edge.target_service_id)
-        if edge.target_service_id in targets:
-            connected.append(edge.source_service_id)
-        for service_id in connected:
-            if service_id not in targets and service_id not in static_dependents:
-                static_dependents.append(service_id)
-    return {"static_dependents": static_dependents}
+        source, target = edge.source_service_id, edge.target_service_id
+        if source not in targets and target not in targets:
+            continue
+        matched.append(edge)
+        if target in targets and source not in targets and source not in upstream:
+            upstream.append(source)
+        if source in targets and target not in targets and target not in downstream:
+            downstream.append(target)
+    return {
+        "upstream_services": upstream,
+        "downstream_services": downstream,
+        "matched_edges": matched,
+    }
 
 
 def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Validate runtime telemetry for dependencies in the release radius."""
-    extractor = TelemetryExtractor(workspace_id=state["workspace_id"])
-    dependencies = extractor.get_active_dependencies(days_back=7)
-    active_sources = {edge.source_service_id for edge in dependencies}
-    runtime_metrics = {
-        service: metrics
-        for service, metrics in extractor.get_runtime_metrics().items()
-        if service in active_sources
+    """Gather runtime evidence for the services in the release radius.
+
+    With a blank ``workspace_id`` only the knowledge graph is used: runtime
+    evidence is the matched edges that carry RUNTIME_TELEMETRY. Otherwise the
+    telemetry workspace is queried live and its metrics are filtered to the
+    services in the radius.
+    """
+    observed_edges = [
+        f"{edge.source_service_id} -> {edge.target_service_id}"
+        for edge in state.get("matched_edges", [])
+        if DiscoveryMethod.RUNTIME_TELEMETRY in edge.discovery_methods
+    ]
+    workspace_id = (state.get("workspace_id") or "").strip()
+    if not workspace_id:
+        status = TelemetryStatus(
+            source="knowledge_graph", runtime_observed_edges=observed_edges
+        )
+        return {"telemetry_status": status}
+
+    radius = {
+        _service_name(service)
+        for service in [
+            *state.get("target_services", []),
+            *state.get("upstream_services", []),
+            *state.get("downstream_services", []),
+        ]
     }
-    return {"runtime_metrics": runtime_metrics}
+    extractor = TelemetryExtractor(workspace_id=workspace_id)
+    extractor.get_active_dependencies(days_back=7)
+    runtime_metrics = {
+        service: {name: float(value) for name, value in metrics.items()}
+        for service, metrics in extractor.get_runtime_metrics().items()
+        if _service_name(service) in radius
+    }
+    status = TelemetryStatus(
+        source="live",
+        runtime_observed_edges=observed_edges,
+        runtime_metrics=runtime_metrics,
+    )
+    return {"telemetry_status": status}
 
 
 def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Assess release risk and determine a safe deployment sequence."""
-    runtime_metrics = state.get("runtime_metrics", {})
-    has_errors = any(
-        isinstance(metrics, dict)
-        and isinstance(metrics.get("error_rate"), (int, float))
-        and metrics["error_rate"] > 0.0
-        for metrics in runtime_metrics.values()
+    """Ask the LLM reasoner for a risk score, deployment order and rationale."""
+    targets = list(state.get("target_services", []))
+    upstream = list(state.get("upstream_services", []))
+    downstream = list(state.get("downstream_services", []))
+    request = RiskAssessmentRequest(
+        pull_request=state["pull_request"],
+        target_services=targets,
+        upstream_services=upstream,
+        downstream_services=downstream,
+        baseline_deployment_order=baseline_deployment_order(
+            targets, upstream, downstream
+        ),
+        matched_edges=list(state.get("matched_edges", [])),
+        telemetry=state.get("telemetry_status")
+        or TelemetryStatus(source="knowledge_graph"),
     )
-    targets = state.get("target_services", [])
-    deployment_sequence = [
-        service
-        for service in state.get("static_dependents", [])
-        if service not in targets
-    ] + targets
+    assessment = RiskReasoner().assess(request)
     return {
-        "risk_score": 0.8 if has_errors else 0.2,
-        "deployment_sequence": deployment_sequence,
+        "risk_score": assessment.risk_score,
+        "deployment_sequence": assessment.deployment_order,
+        "justification": assessment.justification,
     }
 
 
 def compile_evidence_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Compile the dependency and risk results into an evidence report."""
-    targets = state.get("target_services", [])
-    dependents = state.get("static_dependents", [])
-    deployment_sequence = state.get("deployment_sequence", [])
-    target_text = ", ".join(targets) or "None identified"
-    dependent_text = ", ".join(dependents) or "None identified"
-    sequence_text = (
-        " -> ".join(deployment_sequence)
-        if deployment_sequence
-        else "Not determined"
+    """Render the graph evidence and the LLM verdict as a Markdown report."""
+    pull_request = state.get("pull_request")
+    pr_text = (
+        f"{pull_request.pr_id}: {pull_request.title}" if pull_request else "Unknown"
     )
+
+    def _list(services: list[str]) -> str:
+        return ", ".join(services) or "None identified"
+
+    sequence = state.get("deployment_sequence", [])
     evidence_report = (
         "## Release Impact Assessment\n\n"
-        f"**Target Services:** {target_text}\n\n"
-        "**Upstream / Downstream Impacts:**\n"
-        "- **Upstream:** Not identified by the current dependency evidence.\n"
-        f"- **Downstream:** {dependent_text}\n\n"
-        f"**Risk Score:** {state.get('risk_score', 0.0):.1f}\n\n"
-        f"**Recommended Sequence:** {sequence_text}"
+        f"**Pull Request:** {pr_text}\n\n"
+        f"**Target Services:** {_list(state.get('target_services', []))}\n\n"
+        "**Blast Radius:**\n"
+        "- **Upstream (depend on the target):** "
+        f"{_list(state.get('upstream_services', []))}\n"
+        "- **Downstream (called by the target):** "
+        f"{_list(state.get('downstream_services', []))}\n\n"
+        f"**Risk Score:** {state.get('risk_score', 0.0):.2f}\n\n"
+        f"**Recommended Sequence:** {' -> '.join(sequence) or 'Not determined'}\n\n"
+        f"**Justification:** {state.get('justification') or 'Not provided'}"
     )
     return {"evidence_report": evidence_report}
