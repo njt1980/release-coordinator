@@ -4,6 +4,7 @@ import logging
 import os
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from azure.devops.connection import Connection
 from azure.identity import DefaultAzureCredential
@@ -29,7 +30,6 @@ _TEXT_FILE_SUFFIXES = {
     ".java",
     ".js",
     ".json",
-    ".md",
     ".php",
     ".properties",
     ".py",
@@ -42,6 +42,41 @@ _TEXT_FILE_SUFFIXES = {
     ".yml",
 }
 _ENDPOINT_PATTERN = re.compile(r"""https?://[^\s"'<>)}\]]+""", re.IGNORECASE)
+_EXCLUDED_DIRECTORIES = {"docs"}
+_NOISE_HOSTS = {"localhost", "127.0.0.1"}
+_NOISE_DOMAINS = (
+    "microsoft.com",
+    "mongodb.org",
+    "w3.org",
+    "json.schemastore.org",
+)
+
+
+def _is_scannable_path(path: str) -> bool:
+    """Return True for application or configuration files outside docs/."""
+    segments = [segment.lower() for segment in path.split("/") if segment]
+    if not segments or _EXCLUDED_DIRECTORIES.intersection(segments[:-1]):
+        return False
+    filename = segments[-1]
+    if filename == ".env" or filename.startswith(".env."):
+        return True
+    return os.path.splitext(filename)[1] in _TEXT_FILE_SUFFIXES
+
+
+def _is_noise_endpoint(endpoint: str) -> bool:
+    """Return True for local, templated, or schema/documentation URLs."""
+    if "${" in endpoint:
+        return True
+    try:
+        hostname = (urlsplit(endpoint).hostname or "").lower()
+    except ValueError:
+        return True
+    if not hostname or hostname in _NOISE_HOSTS or hostname.startswith("schemas."):
+        return True
+    return any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for domain in _NOISE_DOMAINS
+    )
 
 
 class DevOpsExtractor:
@@ -243,25 +278,27 @@ class DevOpsExtractor:
             )
             return {}
 
-    def scan_repository_for_endpoints(self, repo_name: str) -> list[str]:
+    def scan_repository_for_endpoints(self, repo_name: str) -> list[str] | None:
         """Find endpoint references in a repository without modifying it.
 
-        The implementation is intended to inspect repository contents and
-        return discovered endpoint strings. It must not write to the
-        repository or trigger builds or deployments.
+        Only application and configuration files are read; Markdown, text,
+        and anything under a ``docs/`` directory are skipped. Local,
+        templated, and schema/documentation URLs are dropped as noise. It
+        must not write to the repository or trigger builds or deployments.
 
         Args:
             repo_name: Name of the repository to inspect.
 
         Returns:
-            Endpoint references discovered in the repository.
+            Endpoint references discovered in the repository, or None if the
+            repository could not be found or scanned.
         """
         try:
             _, git_client, project = self._get_clients()
             repository = self._find_repository(git_client, project, repo_name)
             if repository is None:
                 logger.warning("Azure DevOps repository %s was not found", repo_name)
-                return []
+                return None
 
             items = git_client.get_items(
                 repository.id, project=project, recursion_level="Full"
@@ -272,13 +309,15 @@ class DevOpsExtractor:
                 if getattr(item, "is_folder", False):
                     continue
                 path = getattr(item, "path", "")
-                if os.path.splitext(path)[1].lower() not in _TEXT_FILE_SUFFIXES:
+                if not _is_scannable_path(path):
                     continue
                 content = self._read_item_content(
                     git_client, repository.id, path, project
                 )
                 for match in _ENDPOINT_PATTERN.findall(content):
                     endpoint = match.rstrip(".,;:")
+                    if _is_noise_endpoint(endpoint):
+                        continue
                     if endpoint not in seen:
                         seen.add(endpoint)
                         endpoints.append(endpoint)
@@ -287,4 +326,4 @@ class DevOpsExtractor:
             logger.exception(
                 "Failed to scan repository %s for endpoints", repo_name
             )
-            return []
+            return None

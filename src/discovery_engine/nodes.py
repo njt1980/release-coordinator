@@ -32,8 +32,9 @@ def initialize_scan_scope(state: DiscoveryGraphState) -> dict[str, object]:
 def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object]:
     """Build the initial service inventory and static dependency baseline.
 
-    The Day-Zero static pass will inspect the scoped repositories to identify
-    microservices and code-declared dependencies. Endpoint URLs are reduced to
+    The Day-Zero static pass inspects the scoped repositories to identify
+    microservices and code-declared dependencies. Each successfully scanned
+    repository is registered as a service node. Endpoint URLs are reduced to
     their hostnames before being stored as dependency targets. The stage is
     skipped when no Azure DevOps organization URL or project is configured.
     """
@@ -46,10 +47,23 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
         repositories=list(state["target_repositories"]),
     )
     static_edges = list(state.get("static_edges", []))
+    discovered_services = list(state.get("discovered_services", []))
 
     for repo_name in state["target_repositories"]:
         extractor.get_pipeline_variables(repo_name)
         endpoints = extractor.scan_repository_for_endpoints(repo_name)
+        if endpoints is None:
+            continue
+        discovered_services.append(
+            ServiceNode(
+                service_id=repo_name,
+                name=repo_name,
+                metadata={
+                    "source": DiscoveryMethod.STATIC_CODE.value,
+                    "devops_project": state["devops_project"],
+                },
+            )
+        )
         for endpoint in endpoints:
             try:
                 parsed_endpoint = urlsplit(endpoint)
@@ -73,7 +87,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
                 )
             )
 
-    return {"static_edges": static_edges}
+    return {"static_edges": static_edges, "discovered_services": discovered_services}
 
 
 def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:

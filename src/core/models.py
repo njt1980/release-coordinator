@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,7 @@ class ServiceNode(BaseModel):
     name: str
     repository_url: Optional[str] = None
     criticality_tier: int = 3
+    metadata: Dict[str, str] = Field(default_factory=dict)
 
 
 class DeploymentContext(BaseModel):
