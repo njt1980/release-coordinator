@@ -109,7 +109,7 @@ export default function App() {
     setCrawlMessage(null);
   };
 
-  const isVerified = SYSTEMS.every((system) => tests[system].status === "success");
+  const isVerified = SYSTEMS.some((system) => tests[system].status === "success");
 
   const runTest = async (system, request) => {
     const generation = ++testGenerations.current[system];
@@ -269,7 +269,7 @@ export default function App() {
               onClick={startCrawl}
               disabled={!isVerified || isCrawling}
               title={
-                isVerified ? undefined : "Run a successful access test on every integration first"
+                isVerified ? undefined : "Run a successful access test on at least one integration first"
               }
               className="inline-flex items-center justify-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
