@@ -490,6 +490,26 @@ class PullRequestPayload(BaseModel):
         return value
 
 
+class RuntimeEvidenceState(str, Enum):
+    """What runtime evidence backs one assessment.
+
+    LIVE: a telemetry workspace was queried for this assessment and the
+        query completed.
+    LIVE_INCOMPLETE: the live query FAILED or was PARTIAL.
+    MOCK: the live query was answered from the demo fixture.
+    BASELINE: no workspace was queried; the baseline snapshot's
+        RUNTIME_TELEMETRY stage succeeded, so its runtime edges are used.
+    NONE: there is no runtime evidence (no workspace was queried and the
+        baseline has no successful RUNTIME_TELEMETRY stage, or no baseline).
+    """
+
+    LIVE = "live"
+    LIVE_INCOMPLETE = "live_incomplete"
+    MOCK = "mock"
+    BASELINE = "baseline"
+    NONE = "none"
+
+
 class TelemetryStatus(BaseModel):
     """Runtime evidence available for the services in a release radius.
 
@@ -497,9 +517,13 @@ class TelemetryStatus(BaseModel):
     RUNTIME_TELEMETRY edges persisted by discovery, ``live`` when a telemetry
     workspace was queried for this assessment, or ``mock`` when that query
     was answered from the demo fixture instead (its metrics are not real).
+    ``runtime_evidence`` classifies that evidence (see
+    ``RuntimeEvidenceState``); it defaults to NONE so an unclassified status
+    never counts as runtime evidence.
     """
 
     source: Literal["knowledge_graph", "live", "mock"]
+    runtime_evidence: RuntimeEvidenceState = RuntimeEvidenceState.NONE
     runtime_observed_edges: List[str] = Field(default_factory=list)
     runtime_metrics: Dict[str, Dict[str, float]] = Field(default_factory=dict)
 
@@ -529,6 +553,13 @@ class ReasonCode(str, Enum):
     COMPATIBILITY_UNVERIFIED: the deployment order follows the declared
         change type; no contract compatibility evidence proves it safe.
     MODEL_REJECTED: the advisory model assessment did not approve.
+    POLICY_MISSING: the project has no release policy file.
+    POLICY_INVALID: the project's policy file is malformed or names another
+        project.
+    BASELINE_STALE: the baseline snapshot is older than the policy allows.
+    REQUIRED_SOURCE_MISSING: an evidence source the policy requires did not
+        succeed in the baseline, or the runtime evidence is weaker than the
+        policy requires.
 
     Every code except MODEL_REJECTED makes the assessment non-actionable: the
     evidence is insufficient to rely on the verdict, which is different from
@@ -542,6 +573,10 @@ class ReasonCode(str, Enum):
     DEPENDENCY_CYCLE = "DEPENDENCY_CYCLE"
     COMPATIBILITY_UNVERIFIED = "COMPATIBILITY_UNVERIFIED"
     MODEL_REJECTED = "MODEL_REJECTED"
+    POLICY_MISSING = "POLICY_MISSING"
+    POLICY_INVALID = "POLICY_INVALID"
+    BASELINE_STALE = "BASELINE_STALE"
+    REQUIRED_SOURCE_MISSING = "REQUIRED_SOURCE_MISSING"
 
     @property
     def limits_actionability(self) -> bool:
@@ -556,13 +591,31 @@ class EvidenceIssue(BaseModel):
     detail: str = Field(min_length=1)
 
 
+class Exemption(BaseModel):
+    """A changed file or unresolved dependency a project policy exempted.
+
+    ``subject`` is the file path or unresolved entity ID; ``rule`` is the
+    policy pattern or entity ID that matched it, and ``reason`` the policy's
+    justification for the exemption.
+    """
+
+    subject: str = Field(min_length=1)
+    rule: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
 class AssessmentEvidence(BaseModel):
     """The exact inputs one release assessment was computed from.
 
-    ``baseline_snapshot_id`` is None when no snapshot could be loaded.
+    ``baseline_snapshot_id`` is None when no snapshot could be loaded, and
+    ``baseline_created_at`` is when that snapshot was written.
     ``changed_files`` is the full list the caller supplied, including the
-    ``unmapped_files`` no registered service owns. ``demo_mode`` is true
-    when any evidence came from mock fixture data.
+    ``unmapped_files`` no registered service owns and the
+    ``exempted_files`` the project policy excludes from that check.
+    ``exempted_dependencies`` are unresolved dependencies in the radius the
+    policy exempted. ``demo_mode`` is true when any evidence came from mock
+    fixture data. ``policy_version`` and ``policy_sha256`` identify the
+    project policy applied (None when it could not be loaded).
     """
 
     pr_id: str = Field(min_length=1)
@@ -570,9 +623,15 @@ class AssessmentEvidence(BaseModel):
     base_sha: str = ""
     head_sha: str = ""
     baseline_snapshot_id: Optional[str] = None
+    baseline_created_at: Optional[datetime] = None
     changed_files: List[str] = Field(default_factory=list)
     unmapped_files: List[str] = Field(default_factory=list)
+    exempted_files: List[Exemption] = Field(default_factory=list)
+    exempted_dependencies: List[Exemption] = Field(default_factory=list)
     demo_mode: bool = False
+    runtime_evidence: RuntimeEvidenceState = RuntimeEvidenceState.NONE
+    policy_version: Optional[int] = None
+    policy_sha256: Optional[str] = None
 
 
 class ReleaseAssessment(BaseModel):

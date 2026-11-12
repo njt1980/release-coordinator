@@ -7,6 +7,15 @@ from typing import Final
 # single shared ``knowledge_graph.json`` file, which is no longer read.
 BASELINES_DIR: Final[str] = "baselines"
 
+# Directory (relative to the project root) holding per-project release
+# policies as ``{tenant}/{project_id}.yaml``. Policies are checked in; a
+# project without one is never approved.
+POLICIES_DIR: Final[str] = "policies"
+
+# Upper bound on a policy's ``max_baseline_age_hours``: a project may demand
+# fresher baselines, never older ones.
+MAX_BASELINE_AGE_HOURS: Final[int] = 24
+
 # Scope used when a caller does not name a tenant or project.
 DEFAULT_TENANT: Final[str] = "default"
 DEFAULT_PROJECT_ID: Final[str] = "default"

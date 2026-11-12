@@ -23,6 +23,7 @@ from src.core.models import (
     KnowledgeGraph,
     PullRequestPayload,
     ReasonCode,
+    RuntimeEvidenceState,
     ServiceNode,
     UnresolvedEntity,
 )
@@ -572,6 +573,7 @@ class StaticRadiusTests(_StoreTestCase):
                 "upstream_services": [],
                 "downstream_services": [],
                 "matched_edges": [],
+                "baseline_runtime_state": RuntimeEvidenceState.NONE,
                 "discovery_issues": [
                     EvidenceIssue(
                         code=ReasonCode.BASELINE_UNAVAILABLE,

@@ -3,11 +3,20 @@
 import logging
 from collections import deque
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timezone
 from typing import Final, Literal
 
 from pydantic import BaseModel
 
 from src.coordinator.policy import decide_release, needs_model
+from src.coordinator.project_policy import (
+    baseline_freshness_issue,
+    baseline_runtime_state,
+    dependency_exemption,
+    partition_exempt_files,
+    required_source_issues,
+    runtime_evidence_issue,
+)
 from src.coordinator.sequencing import DeploymentPlan, sequence_deployment
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
@@ -17,21 +26,31 @@ from src.core.models import (
     DiscoveryIncompleteError,
     DiscoveryMethod,
     EvidenceIssue,
+    Exemption,
     KnowledgeGraph,
     PullRequestPayload,
     ReasonCode,
     ReleaseAssessment,
+    RuntimeEvidenceState,
     ServiceIdentity,
     TelemetryStatus,
 )
 from src.core.service_ids import IdentityIndex
 from src.tools.baseline_store import BaselineScope, StoredBaseline, default_store
+from src.tools.policy_store import (
+    LoadedPolicy,
+    PolicyInvalidError,
+    PolicyMissingError,
+    ProjectPolicy,
+    default_policy_store,
+)
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
 from src.tools.telemetry_extractor import TelemetryExtractor
 
 logger = logging.getLogger(__name__)
 
 BASELINE_STORE = default_store()
+POLICY_STORE = default_policy_store()
 
 UNRESOLVED_DEPENDENCY_ISSUE: Final[str] = "Unresolved dependency in critical path"
 
@@ -44,8 +63,47 @@ def _service_name(service_id: str) -> str:
         return service_id
 
 
+def utc_now() -> datetime:
+    """Return the current UTC time (patched in tests)."""
+    return datetime.now(timezone.utc)
+
+
 def _gap(detail: str) -> EvidenceIssue:
     return EvidenceIssue(code=ReasonCode.DISCOVERY_GAP, detail=detail)
+
+
+def _scope(state: ReleaseGraphState) -> BaselineScope:
+    return BaselineScope(
+        tenant=state.get("tenant") or config.DEFAULT_TENANT,
+        project_id=state.get("project_id") or config.DEFAULT_PROJECT_ID,
+    )
+
+
+def _policy(state: ReleaseGraphState) -> ProjectPolicy | None:
+    loaded = state.get("project_policy")
+    return loaded.policy if loaded else None
+
+
+def load_policy_node(state: ReleaseGraphState) -> dict[str, object]:
+    """Load the project's release policy.
+
+    A missing or invalid policy adds a POLICY_MISSING or POLICY_INVALID
+    issue and leaves ``project_policy`` None: the run continues so the
+    report is complete, but without exemptions and without approval.
+    """
+    scope = _scope(state)
+    issues = list(state.get("discovery_issues", []))
+    try:
+        return {"project_policy": POLICY_STORE.load(scope), "discovery_issues": issues}
+    except PolicyMissingError as error:
+        code, detail = ReasonCode.POLICY_MISSING, f"{error}; add one to enable approvals."
+    except PolicyInvalidError as error:
+        code, detail = ReasonCode.POLICY_INVALID, f"Release policy is invalid: {error}"
+    logger.warning("Policy for %s/%s unusable: %s", scope.tenant, scope.project_id, detail)
+    return {
+        "project_policy": None,
+        "discovery_issues": [*issues, EvidenceIssue(code=code, detail=detail)],
+    }
 
 
 def unmapped_files_issue(
@@ -68,19 +126,23 @@ def extract_trigger_node(state: ReleaseGraphState) -> dict[str, object]:
     """Validate the pull-request payload and resolve the target services.
 
     Changed files no registered service owns (``unmapped_files``) become an
-    UNMAPPED_FILES issue: their impact was never assessed.
+    UNMAPPED_FILES issue: their impact was never assessed. Files the project
+    policy exempts are moved to ``exempted_files`` instead.
     """
     pull_request = PullRequestPayload.model_validate(state["trigger_event"])
     targets = list(state.get("target_services") or [pull_request.target_service])
     issues = list(state.get("discovery_issues", []))
-    unmapped = unmapped_files_issue(
-        pull_request.repository, list(state.get("unmapped_files", []))
+    remaining, exempted = partition_exempt_files(
+        _policy(state), state.get("unmapped_files", [])
     )
+    unmapped = unmapped_files_issue(pull_request.repository, remaining)
     if unmapped is not None:
         issues.append(unmapped)
     return {
         "pull_request": pull_request,
         "target_services": targets,
+        "unmapped_files": remaining,
+        "exempted_files": exempted,
         "discovery_issues": issues,
     }
 
@@ -89,19 +151,26 @@ Direction = Literal["upstream", "downstream"]
 _Adjacency = Mapping[str, list[tuple[str, int]]]
 
 
+class UnresolvedReach(BaseModel):
+    """An unresolved node reached by the radius traversal, and why it matters."""
+
+    node: str
+    detail: str
+
+
 class BlastRadius(BaseModel):
     """Transitive blast radius of a set of target services.
 
     ``upstream`` and ``downstream`` hold registered services only, in
     breadth-first order (nearest first). ``matched_edges`` are every edge
-    walked in either direction. ``issues`` holds one entry per unresolved
-    node reached.
+    walked in either direction. ``unresolved`` holds one entry per
+    unresolved node reached.
     """
 
     upstream: list[str]
     downstream: list[str]
     matched_edges: list[DependencyEdge]
-    issues: list[str]
+    unresolved: list[UnresolvedReach]
 
 
 def _adjacency(
@@ -179,7 +248,7 @@ def traverse_blast_radius(graph: KnowledgeGraph, targets: list[str]) -> BlastRad
     kinds = {e.entity_id: e.kind.value for e in graph.unresolved_entities}
     walked: set[int] = set()
     radius: dict[Direction, list[str]] = {"upstream": [], "downstream": []}
-    issues: list[str] = []
+    unresolved: list[UnresolvedReach] = []
     reported: set[str] = set()
     for direction in ("downstream", "upstream"):
         reached, edges, paths = _breadth_first(
@@ -192,13 +261,49 @@ def traverse_blast_radius(graph: KnowledgeGraph, targets: list[str]) -> BlastRad
             elif node not in reported:
                 reported.add(node)
                 kind = kinds.get(node, "not in service inventory")
-                issues.append(_unresolved_issue(node, kind, direction, paths[node]))
+                detail = _unresolved_issue(node, kind, direction, paths[node])
+                unresolved.append(UnresolvedReach(node=node, detail=detail))
     return BlastRadius(
         upstream=radius["upstream"],
         downstream=radius["downstream"],
         matched_edges=[graph.edges[position] for position in sorted(walked)],
-        issues=issues,
+        unresolved=unresolved,
     )
+
+
+def unresolved_gaps(
+    policy: ProjectPolicy | None, unresolved: list[UnresolvedReach]
+) -> tuple[list[EvidenceIssue], list[Exemption]]:
+    """Turn unresolved nodes into DISCOVERY_GAP issues unless the policy
+    exempts them; exempted nodes are returned separately."""
+    issues: list[EvidenceIssue] = []
+    exempted: list[Exemption] = []
+    for reach in unresolved:
+        exemption = dependency_exemption(policy, reach.node)
+        if exemption is None:
+            issues.append(_gap(reach.detail))
+        else:
+            exempted.append(exemption)
+    return issues, exempted
+
+
+def policy_baseline_issues(
+    policy: ProjectPolicy | None, baseline: StoredBaseline, now: datetime
+) -> list[EvidenceIssue]:
+    """Return the project policy's freshness and required-source issues.
+
+    Without a policy there are none here: the missing policy is already an
+    issue of its own (see ``load_policy_node``).
+    """
+    if policy is None:
+        return []
+    stale = baseline_freshness_issue(
+        policy, baseline.snapshot_id, baseline.created_at, now
+    )
+    sources = required_source_issues(
+        policy, baseline.snapshot_id, baseline.graph.discovery
+    )
+    return [*([stale] if stale else []), *sources]
 
 
 def resolve_targets(
@@ -276,12 +381,12 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     Every reason the radius cannot be trusted is added to
     ``discovery_issues``, which rejects the release without calling the LLM:
     no usable baseline, a target that does not resolve, an unresolved
-    dependency anywhere in the radius, or a baseline relying on mock data.
+    dependency anywhere in the radius that the project policy does not
+    exempt, a baseline relying on mock data, a baseline older than the
+    policy allows, or a required evidence source that did not succeed.
     """
-    scope = BaselineScope(
-        tenant=state.get("tenant") or config.DEFAULT_TENANT,
-        project_id=state.get("project_id") or config.DEFAULT_PROJECT_ID,
-    )
+    scope = _scope(state)
+    policy = _policy(state)
     issues = list(state.get("discovery_issues", []))
     baseline, problem = load_baseline(scope, state.get("baseline_snapshot_id"))
     if baseline is None:
@@ -291,13 +396,17 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
             "downstream_services": [],
             "matched_edges": [],
             "discovery_issues": [*issues, problem],
+            "baseline_runtime_state": RuntimeEvidenceState.NONE,
         }
 
     targets, target_issues = resolve_targets(
         baseline.graph, list(state.get("target_services", []))
     )
     radius = traverse_blast_radius(baseline.graph, targets)
-    issues.extend(_gap(issue) for issue in [*target_issues, *radius.issues])
+    gaps, exempted = unresolved_gaps(policy, radius.unresolved)
+    issues.extend(_gap(issue) for issue in target_issues)
+    issues.extend(gaps)
+    issues.extend(policy_baseline_issues(policy, baseline, utc_now()))
     if baseline.demo_mode:
         issues.append(
             EvidenceIssue(
@@ -314,8 +423,11 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         "downstream_services": radius.downstream,
         "matched_edges": radius.matched_edges,
         "discovery_issues": issues,
+        "exempted_dependencies": exempted,
         "baseline_snapshot_id": baseline.snapshot_id,
+        "baseline_created_at": baseline.created_at,
         "baseline_demo_mode": baseline.demo_mode,
+        "baseline_runtime_state": baseline_runtime_state(baseline.graph.discovery),
     }
 
 
@@ -328,6 +440,10 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     services in the radius. A FAILED or PARTIAL live query is added to
     ``discovery_issues`` as a DISCOVERY_GAP, and a query answered from the
     mock fixture as DEMO_EVIDENCE (its status ``source`` is then ``mock``).
+
+    The status's ``runtime_evidence`` classifies the result (see
+    ``RuntimeEvidenceState``); when it is weaker than the project policy
+    requires, a REQUIRED_SOURCE_MISSING issue is added.
     """
     observed_edges = [
         f"{edge.source_service_id} -> {edge.target_service_id}"
@@ -337,9 +453,15 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     workspace_id = (state.get("workspace_id") or "").strip()
     if not workspace_id:
         status = TelemetryStatus(
-            source="knowledge_graph", runtime_observed_edges=observed_edges
+            source="knowledge_graph",
+            runtime_evidence=state.get(
+                "baseline_runtime_state", RuntimeEvidenceState.NONE
+            ),
+            runtime_observed_edges=observed_edges,
         )
-        return {"telemetry_status": status}
+        return _apply_runtime_policy(
+            state, status, list(state.get("discovery_issues", []))
+        )
 
     radius = {
         _service_name(service)
@@ -371,9 +493,30 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     }
     status = TelemetryStatus(
         source="mock" if is_mock else "live",
+        runtime_evidence=_live_runtime_state(is_mock, result.status.is_incomplete),
         runtime_observed_edges=observed_edges,
         runtime_metrics=runtime_metrics,
     )
+    return _apply_runtime_policy(state, status, issues)
+
+
+def _live_runtime_state(is_mock: bool, incomplete: bool) -> RuntimeEvidenceState:
+    if is_mock:
+        return RuntimeEvidenceState.MOCK
+    if incomplete:
+        return RuntimeEvidenceState.LIVE_INCOMPLETE
+    return RuntimeEvidenceState.LIVE
+
+
+def _apply_runtime_policy(
+    state: ReleaseGraphState, status: TelemetryStatus, issues: list[EvidenceIssue]
+) -> dict[str, object]:
+    """Return the node update, adding the policy's runtime evidence issue."""
+    policy = _policy(state)
+    if policy is not None:
+        issue = runtime_evidence_issue(policy, status.runtime_evidence)
+        if issue is not None:
+            issues.append(issue)
     return {"telemetry_status": status, "discovery_issues": issues}
 
 
@@ -431,6 +574,7 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
     """Return the exact inputs this run assessed."""
     pull_request: PullRequestPayload = state["pull_request"]
     telemetry = state.get("telemetry_status")
+    loaded = state.get("project_policy")
     return AssessmentEvidence(
         pr_id=pull_request.pr_id,
         repository=pull_request.repository,
@@ -439,8 +583,16 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         baseline_snapshot_id=state.get("baseline_snapshot_id") or None,
         changed_files=list(pull_request.changed_files),
         unmapped_files=list(state.get("unmapped_files", [])),
+        exempted_files=list(state.get("exempted_files", [])),
+        exempted_dependencies=list(state.get("exempted_dependencies", [])),
+        baseline_created_at=state.get("baseline_created_at"),
         demo_mode=bool(state.get("baseline_demo_mode"))
         or (telemetry is not None and telemetry.source == "mock"),
+        runtime_evidence=(
+            telemetry.runtime_evidence if telemetry else RuntimeEvidenceState.NONE
+        ),
+        policy_version=loaded.policy.policy_version if loaded else None,
+        policy_sha256=loaded.sha256 if loaded else None,
     )
 
 
@@ -492,11 +644,29 @@ def _render_report(assessment: ReleaseAssessment, state: ReleaseGraphState) -> s
         else "Not consulted"
     )
     issues = [f"[{issue.code.value}] {issue.detail}" for issue in assessment.issues]
+    policy = (
+        f"version {evidence.policy_version} (sha256 {evidence.policy_sha256[:12]})"
+        if evidence.policy_version is not None and evidence.policy_sha256
+        else "None loaded"
+    )
+    created = (
+        evidence.baseline_created_at.isoformat()
+        if evidence.baseline_created_at
+        else "Unknown"
+    )
+    exemptions = [
+        f"{item.subject} ({item.reason})"
+        for item in [*evidence.exempted_files, *evidence.exempted_dependencies]
+    ]
     return (
         "## Release Impact Assessment\n\n"
         f"**Pull Request:** {pull_request.pr_id}: {pull_request.title}\n\n"
         f"**Revision:** {revision}\n\n"
         f"**Baseline Snapshot:** {snapshot}\n\n"
+        f"**Baseline Created:** {created}\n\n"
+        f"**Release Policy:** {policy}\n\n"
+        f"**Runtime Evidence:** {evidence.runtime_evidence.value}\n\n"
+        f"**Policy Exemptions:** {_list(exemptions)}\n\n"
         f"**Target Services:** {_list(state.get('target_services', []))}\n\n"
         f"**Unmapped Files:** {_list(evidence.unmapped_files)}\n\n"
         "**Blast Radius:**\n"
