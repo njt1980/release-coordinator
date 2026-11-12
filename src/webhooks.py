@@ -2,7 +2,8 @@
 
 ``POST /api/v1/webhooks/pr-assessment`` maps the changed files to registered
 services using the project's newest complete discovery baseline, then
-schedules a release coordinator run for those services and returns at once.
+schedules a release coordinator run for those services, pinned to that same
+snapshot, and returns at once.
 ``GET /api/v1/webhooks/pr-assessment/{job_id}`` reports the run's outcome.
 """
 
@@ -13,7 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
-from src.coordinator.file_mapping import map_changed_files
+from src.coordinator.file_mapping import ChangedFileMapping, map_changed_files
 from src.coordinator.graph import app as coordinator_app
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
@@ -93,22 +94,36 @@ _assessment_jobs: dict[str, PrAssessmentJob] = {}
 
 
 def build_coordinator_state(
-    payload: PullRequestWebhook, target_services: list[str]
+    payload: PullRequestWebhook,
+    snapshot_id: str,
+    mapping: ChangedFileMapping,
 ) -> ReleaseGraphState:
-    """Map a webhook payload and its mapped services onto coordinator state."""
+    """Map a webhook payload and its file mapping onto coordinator state.
+
+    The run is pinned to ``snapshot_id``, the baseline the files were mapped
+    against, so a discovery run finishing meanwhile cannot change the graph
+    being assessed. Revisions, the full changed-file list and the unmapped
+    files are carried through to the assessment.
+    """
     pull_request = PullRequestPayload(
         pr_id=payload.pr_id,
         title=payload.title or f"PR {payload.pr_id}",
-        target_service=target_services[0],
+        target_service=mapping.target_services[0],
         change_type=payload.change_type,
         source_branch=payload.source_branch,
         target_branch=payload.target_branch,
         description=payload.description,
         diff=payload.diff,
+        repository=payload.repository,
+        base_sha=payload.base_sha,
+        head_sha=payload.head_sha,
+        changed_files=list(payload.changed_files),
     )
     return {
         "trigger_event": pull_request.model_dump(mode="json"),
-        "target_services": list(target_services),
+        "target_services": list(mapping.target_services),
+        "unmapped_files": list(mapping.unmapped_files),
+        "baseline_snapshot_id": snapshot_id,
         "workspace_id": payload.workspace_id.strip(),
         "tenant": payload.tenant,
         "project_id": payload.project_id,
@@ -157,7 +172,10 @@ def pr_assessment_webhook(
     """Map the PR's changed files to services and schedule its assessment.
 
     Responds 409 when the project has no complete baseline and 422 when no
-    changed file belongs to a registered service.
+    changed file belongs to a registered service. When only some files map,
+    the assessment is scheduled and the rest are reported as unmapped, which
+    makes the verdict non-actionable. The assessment is pinned to the
+    baseline snapshot the files were mapped against.
     """
     scope = BaselineScope(tenant=payload.tenant, project_id=payload.project_id)
     baseline = BASELINE_STORE.latest(scope)
@@ -192,7 +210,7 @@ def pr_assessment_webhook(
         run_assessment_job,
         job_id,
         payload.pr_id,
-        build_coordinator_state(payload, mapping.target_services),
+        build_coordinator_state(payload, baseline.snapshot_id, mapping),
     )
     return PrAssessmentAccepted(
         job_id=job_id,

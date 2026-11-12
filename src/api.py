@@ -79,6 +79,10 @@ class OnboardingPayload(BaseModel):
             raise ValueError(
                 "Repositories require an Azure DevOps organization URL and project"
             )
+        if self.has_devops and not self.target_repositories:
+            raise ValueError(
+                "Azure DevOps requires at least one repository to scan"
+            )
         if not (self.has_devops or self.target_namespaces or self.workspace_id):
             raise ValueError(
                 "Configure at least one integration: Azure DevOps, "

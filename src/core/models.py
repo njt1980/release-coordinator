@@ -465,7 +465,9 @@ class PullRequestPayload(BaseModel):
     ``target_service`` is a FQURI; segments left ``unknown`` act as
     wildcards when the target is resolved against the baseline inventory.
     ``change_type`` is declared by the caller (for example from a PR label)
-    and decides the deterministic deployment order.
+    and decides the deterministic deployment order. ``repository``,
+    ``base_sha``, ``head_sha`` and ``changed_files`` identify the exact
+    revisions assessed; they are blank when the caller did not supply them.
     """
 
     pr_id: str = Field(min_length=1)
@@ -476,6 +478,10 @@ class PullRequestPayload(BaseModel):
     target_branch: str = "main"
     description: str = ""
     diff: str = Field(min_length=1)
+    repository: str = ""
+    base_sha: str = ""
+    head_sha: str = ""
+    changed_files: List[str] = Field(default_factory=list)
 
     @field_validator("target_service")
     @classmethod
@@ -488,11 +494,12 @@ class TelemetryStatus(BaseModel):
     """Runtime evidence available for the services in a release radius.
 
     ``source`` is ``knowledge_graph`` when the evidence comes only from the
-    RUNTIME_TELEMETRY edges persisted by discovery, or ``live`` when a
-    telemetry workspace was queried for this assessment.
+    RUNTIME_TELEMETRY edges persisted by discovery, ``live`` when a telemetry
+    workspace was queried for this assessment, or ``mock`` when that query
+    was answered from the demo fixture instead (its metrics are not real).
     """
 
-    source: Literal["knowledge_graph", "live"]
+    source: Literal["knowledge_graph", "live", "mock"]
     runtime_observed_edges: List[str] = Field(default_factory=list)
     runtime_metrics: Dict[str, Dict[str, float]] = Field(default_factory=dict)
 
@@ -509,8 +516,77 @@ class RiskAssessment(BaseModel):
     justification: str = Field(min_length=1)
 
 
+class ReasonCode(str, Enum):
+    """Deterministic reason a release assessment is not approved.
+
+    BASELINE_UNAVAILABLE: no usable baseline snapshot (none exists, or the
+        pinned snapshot cannot be read).
+    DISCOVERY_GAP: dependency evidence is incomplete (an unresolved target
+        or dependency in the radius, or a failed or partial telemetry query).
+    UNMAPPED_FILES: a changed file is not owned by any registered service.
+    DEMO_EVIDENCE: the evidence includes mock fixture data.
+    DEPENDENCY_CYCLE: no deployment order satisfies every dependency edge.
+    COMPATIBILITY_UNVERIFIED: the deployment order follows the declared
+        change type; no contract compatibility evidence proves it safe.
+    MODEL_REJECTED: the advisory model assessment did not approve.
+
+    Every code except MODEL_REJECTED makes the assessment non-actionable: the
+    evidence is insufficient to rely on the verdict, which is different from
+    a fully evidenced verdict that the release is too risky.
+    """
+
+    BASELINE_UNAVAILABLE = "BASELINE_UNAVAILABLE"
+    DISCOVERY_GAP = "DISCOVERY_GAP"
+    UNMAPPED_FILES = "UNMAPPED_FILES"
+    DEMO_EVIDENCE = "DEMO_EVIDENCE"
+    DEPENDENCY_CYCLE = "DEPENDENCY_CYCLE"
+    COMPATIBILITY_UNVERIFIED = "COMPATIBILITY_UNVERIFIED"
+    MODEL_REJECTED = "MODEL_REJECTED"
+
+    @property
+    def limits_actionability(self) -> bool:
+        """Whether this reason makes the assessment ineligible for operational use."""
+        return self is not ReasonCode.MODEL_REJECTED
+
+
+class EvidenceIssue(BaseModel):
+    """One reason the evidence behind an assessment is insufficient."""
+
+    code: ReasonCode
+    detail: str = Field(min_length=1)
+
+
+class AssessmentEvidence(BaseModel):
+    """The exact inputs one release assessment was computed from.
+
+    ``baseline_snapshot_id`` is None when no snapshot could be loaded.
+    ``changed_files`` is the full list the caller supplied, including the
+    ``unmapped_files`` no registered service owns. ``demo_mode`` is true
+    when any evidence came from mock fixture data.
+    """
+
+    pr_id: str = Field(min_length=1)
+    repository: str = ""
+    base_sha: str = ""
+    head_sha: str = ""
+    baseline_snapshot_id: Optional[str] = None
+    changed_files: List[str] = Field(default_factory=list)
+    unmapped_files: List[str] = Field(default_factory=list)
+    demo_mode: bool = False
+
+
 class ReleaseAssessment(BaseModel):
     """Machine-readable release verdict returned to the control plane.
+
+    ``approved`` is the final policy decision, made in code: it is true only
+    when the advisory model approved and ``reason_codes`` is empty.
+    ``actionable`` says whether the result is eligible for operational use;
+    it is false whenever a reason code limits actionability (see
+    ``ReasonCode``). ``risk_score`` is None when the release was not
+    assessed because the evidence is insufficient; missing evidence is not
+    scored as high risk. ``advisory_assessment`` is the model's opinion, if
+    it was consulted. ``safe_order_established`` is true only when the
+    deployment order is acyclic and its compatibility is verified.
 
     ``deployment_sequence`` orders the whole release subgraph;
     ``services_to_deploy`` is the part of it the pull request changes, in the
@@ -518,9 +594,28 @@ class ReleaseAssessment(BaseModel):
     BREAKING change needs running a compatible version before it deploys.
     """
 
-    risk_score: float = Field(ge=0.0, le=1.0)
     approved: bool
+    actionable: bool
+    reason_codes: List[ReasonCode] = Field(default_factory=list)
+    risk_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    safe_order_established: bool = False
     deployment_sequence: List[str] = Field(min_length=1)
     services_to_deploy: List[str] = Field(default_factory=list)
     stale_consumers: List[str] = Field(default_factory=list)
     justification: str = Field(min_length=1)
+    advisory_assessment: Optional[RiskAssessment] = None
+    evidence: AssessmentEvidence
+    issues: List[EvidenceIssue] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _verdict_follows_reason_codes(self) -> Self:
+        limited = any(code.limits_actionability for code in self.reason_codes)
+        if self.actionable == limited:
+            raise ValueError(
+                "actionable must be false exactly when a reason code limits it"
+            )
+        if self.approved and self.reason_codes:
+            raise ValueError("an approved assessment cannot carry reason codes")
+        if self.approved and self.advisory_assessment is None:
+            raise ValueError("an approved assessment requires an advisory assessment")
+        return self

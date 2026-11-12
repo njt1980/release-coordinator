@@ -647,10 +647,10 @@ class DevOpsExtractor:
         References are internal, private-DNS and IP URLs plus endpoint-like
         environment variables (see ``_extract_references``).
 
-        Every manifest-declared service is returned, even with no
-        references. An inferred boundary is returned only when it references
-        at least one dependency. It must not write to the repository or
-        trigger builds or deployments.
+        Every service boundary is returned, even with no references: a
+        service that calls nothing is still part of the inventory and can
+        still be called. It must not write to the repository or trigger
+        builds or deployments.
 
         Args:
             repo_name: Name of the repository to inspect.
@@ -710,8 +710,6 @@ class DevOpsExtractor:
                     references=list(references[boundary.root].values()),
                 )
                 for boundary in boundaries
-                if boundary.source is BoundarySource.MANIFEST
-                or references[boundary.root]
             ]
             return DiscoveryResult[ServiceScan].success(scans)
         except Exception as error:

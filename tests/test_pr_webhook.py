@@ -15,12 +15,14 @@ from src import webhooks
 from src.coordinator import nodes as coordinator_nodes
 from src.coordinator.file_mapping import ChangedFileMapping, map_changed_files
 from src.core.models import (
+    AssessmentEvidence,
     ContractChange,
     DependencyEdge,
     DiscoveryMethod,
     DiscoveryStageReport,
     DiscoveryStatus,
     KnowledgeGraph,
+    ReasonCode,
     ReleaseAssessment,
     RiskAssessment,
     ServiceNode,
@@ -148,6 +150,10 @@ def _payload(**overrides: Any) -> PullRequestWebhook:
     return PullRequestWebhook.model_validate(fields)
 
 
+def _mapping(targets: list[str] | None = None) -> ChangedFileMapping:
+    return ChangedFileMapping(target_services=targets or [_id("order-service")])
+
+
 class PullRequestWebhookPayloadTests(unittest.TestCase):
     def test_rejects_malformed_payloads(self) -> None:
         for overrides in [
@@ -213,8 +219,18 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         state = task.args[2]
         self.assertEqual(state["target_services"], [_id("order-service")])
         self.assertEqual(state["tenant"], "acme")
-        self.assertEqual(state["trigger_event"]["change_type"], "breaking")
-        self.assertEqual(state["trigger_event"]["target_service"], _id("order-service"))
+        self.assertEqual(state["baseline_snapshot_id"], snapshot_id)
+        self.assertEqual(state["unmapped_files"], ["docs/../../x"])
+        event = state["trigger_event"]
+        self.assertEqual(event["change_type"], "breaking")
+        self.assertEqual(event["target_service"], _id("order-service"))
+        self.assertEqual(
+            (event["repository"], event["base_sha"], event["head_sha"]),
+            ("shop", "3f1c2aa", "9b7e410c0ffee"),
+        )
+        self.assertEqual(
+            event["changed_files"], ["src/order-service/routes/root.js", "docs/../../x"]
+        )
 
     def test_missing_baseline_is_a_conflict(self) -> None:
         with self.assertRaises(HTTPException) as raised:
@@ -236,15 +252,18 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         assessment = ReleaseAssessment(
             risk_score=0.8,
             approved=False,
+            actionable=True,
+            reason_codes=[ReasonCode.MODEL_REJECTED],
             deployment_sequence=[_id("store-front"), _id("order-service")],
             justification="store-front must send customerId first.",
+            evidence=AssessmentEvidence(pr_id="PR-2048"),
         )
         coordinator = MagicMock()
         coordinator.invoke.return_value = {
             "release_assessment": assessment,
             "evidence_report": "## report",
         }
-        state = webhooks.build_coordinator_state(_payload(), [_id("order-service")])
+        state = webhooks.build_coordinator_state(_payload(), "snap-1", _mapping())
         with patch.object(webhooks, "coordinator_app", coordinator):
             asyncio.run(webhooks.run_assessment_job("job-1", "PR-2048", state))
 
@@ -257,7 +276,7 @@ class PrAssessmentWebhookTests(unittest.TestCase):
     def test_job_records_failure_and_unknown_job_is_404(self) -> None:
         coordinator = MagicMock()
         coordinator.invoke.side_effect = RuntimeError("anthropic down")
-        state = webhooks.build_coordinator_state(_payload(), [_id("order-service")])
+        state = webhooks.build_coordinator_state(_payload(), "snap-1", _mapping())
         with patch.object(webhooks, "coordinator_app", coordinator):
             asyncio.run(webhooks.run_assessment_job("job-2", "PR-2048", state))
 
@@ -268,38 +287,95 @@ class PrAssessmentWebhookTests(unittest.TestCase):
             webhooks.get_pr_assessment("missing")
         self.assertEqual(raised.exception.status_code, 404)
 
-    def test_end_to_end_graph_uses_deterministic_sequence(self) -> None:
-        self._write_baseline()
+    def _run_graph(
+        self, payload: PullRequestWebhook, verdict: RiskAssessment
+    ) -> tuple[dict[str, Any], MagicMock]:
         tasks = BackgroundTasks()
-        webhooks.pr_assessment_webhook(_payload(), tasks)
+        webhooks.pr_assessment_webhook(payload, tasks)
         state = tasks.tasks[0].args[2]
-        verdict = RiskAssessment(risk_score=0.8, approved=True, justification="why")
         with (
             patch.object(coordinator_nodes, "BASELINE_STORE", self.store),
             patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls,
         ):
             reasoner_cls.return_value.assess.return_value = verdict
             final = webhooks.coordinator_app.invoke(state)
+        return final, reasoner_cls
+
+    def test_end_to_end_graph_uses_deterministic_sequence(self) -> None:
+        snapshot_id = self._write_baseline()
+        verdict = RiskAssessment(risk_score=0.8, approved=True, justification="why")
+        payload = _payload(changed_files=["src/order-service/routes/root.js"])
+
+        final, reasoner_cls = self._run_graph(payload, verdict)
 
         breaking_order = [_id("store-front"), _id("order-service")]
         request = reasoner_cls.return_value.assess.call_args.args[0]
         self.assertEqual(request.deployment_sequence, breaking_order)
+        assessment = final["release_assessment"]
+        self.assertEqual(assessment.deployment_sequence, breaking_order)
+        self.assertEqual(assessment.services_to_deploy, [_id("order-service")])
+        self.assertEqual(assessment.stale_consumers, [_id("store-front")])
+        # The model approved, but no contract evidence proves the order safe.
+        self.assertEqual(assessment.advisory_assessment, verdict)
+        self.assertFalse(assessment.approved)
+        self.assertFalse(assessment.actionable)
+        self.assertFalse(assessment.safe_order_established)
+        self.assertEqual(assessment.reason_codes, [ReasonCode.COMPATIBILITY_UNVERIFIED])
+        self.assertEqual(assessment.risk_score, 0.8)
         self.assertEqual(
-            final["release_assessment"],
-            ReleaseAssessment(
-                risk_score=0.8,
-                approved=True,
-                deployment_sequence=breaking_order,
-                services_to_deploy=[_id("order-service")],
-                stale_consumers=[_id("store-front")],
-                justification="why",
+            assessment.evidence,
+            AssessmentEvidence(
+                pr_id="PR-2048",
+                repository="shop",
+                base_sha="3f1c2aa",
+                head_sha="9b7e410c0ffee",
+                baseline_snapshot_id=snapshot_id,
+                changed_files=["src/order-service/routes/root.js"],
             ),
+        )
+
+    def test_unmapped_files_block_assessment_without_llm(self) -> None:
+        self._write_baseline()
+        verdict = RiskAssessment(risk_score=0.1, approved=True, justification="why")
+
+        final, reasoner_cls = self._run_graph(_payload(), verdict)
+
+        reasoner_cls.assert_not_called()
+        assessment = final["release_assessment"]
+        self.assertFalse(assessment.approved)
+        self.assertFalse(assessment.actionable)
+        self.assertIsNone(assessment.risk_score)
+        self.assertIn(ReasonCode.UNMAPPED_FILES, assessment.reason_codes)
+        self.assertEqual(assessment.evidence.unmapped_files, ["docs/../../x"])
+        self.assertIn("docs/../../x", assessment.justification)
+
+    def test_assessment_stays_pinned_when_newer_baseline_appears(self) -> None:
+        pinned = self._write_baseline()
+        tasks = BackgroundTasks()
+        webhooks.pr_assessment_webhook(
+            _payload(changed_files=["src/order-service/routes/root.js"]), tasks
+        )
+        state = tasks.tasks[0].args[2]
+        newer = self._write_baseline()
+        self.assertNotEqual(newer, pinned)
+        with (
+            patch.object(coordinator_nodes, "BASELINE_STORE", self.store),
+            patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls,
+        ):
+            reasoner_cls.return_value.assess.return_value = RiskAssessment(
+                risk_score=0.1, approved=True, justification="why"
+            )
+            final = webhooks.coordinator_app.invoke(state)
+
+        self.assertEqual(
+            final["release_assessment"].evidence.baseline_snapshot_id, pinned
         )
 
     def test_coordinator_state_is_a_valid_pull_request(self) -> None:
         state = webhooks.build_coordinator_state(
             _payload(change_type=ContractChange.ADDITIVE),
-            [_id("order-service"), _id("store-front")],
+            "snap-1",
+            _mapping([_id("order-service"), _id("store-front")]),
         )
         self.assertEqual(state["trigger_event"]["title"], "PR PR-2048")
         self.assertEqual(

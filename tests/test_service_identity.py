@@ -133,6 +133,12 @@ class ResolutionTests(unittest.TestCase):
             ("web", with_default, _identity("a", "web")),
             ("web.b.svc", CONTEXT, _identity("b", "web")),
             ("ai-service", with_default, None),  # not in the inventory
+            # Short names resolve only in the caller's namespace, never in
+            # another one just because the name is unique there.
+            ("order-service", with_default, None),
+            ("rabbitmq", with_default, None),
+            # Explicitly namespaced references are not confined.
+            ("default/order-service", with_default, _identity("default", "order-service")),
             ("api.example.com", CONTEXT, None),
         ]:
             with self.subTest(raw=raw):

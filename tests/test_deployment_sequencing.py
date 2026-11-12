@@ -208,6 +208,18 @@ class SequenceDeploymentTests(unittest.TestCase):
         self.assertEqual(plan.services_to_deploy, [_id("store-front"), TARGET])
         self.assertEqual(plan.stale_consumers, [_id("admin"), _id("api-gateway")])
 
+    def test_acyclic_order_is_not_a_safe_order_without_compatibility_evidence(
+        self,
+    ) -> None:
+        for change_type in (ADDITIVE, BREAKING):
+            with self.subTest(change_type=change_type):
+                plan = sequence_deployment(
+                    [TARGET], UPSTREAM, DOWNSTREAM, EDGES, change_type
+                )
+                self.assertTrue(plan.is_acyclic)
+                self.assertFalse(plan.compatibility_verified)
+                self.assertFalse(plan.safe_order_established)
+
     def test_lone_target_and_missing_target(self) -> None:
         plan = sequence_deployment([TARGET], [], [], [], BREAKING)
         self.assertEqual(plan.sequence, [TARGET])

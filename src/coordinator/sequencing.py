@@ -45,6 +45,12 @@ class DeploymentPlan(BaseModel):
     rest of the release subgraph. ``stale_consumers`` lists, for a BREAKING
     change only, the unchanged upstream consumers that must already run a
     compatible version before the targets deploy.
+
+    ``compatibility_verified`` records whether contract compatibility
+    evidence proves the order safe. The order rules above are assumptions
+    drawn from the declared change type (a new consumer may, for example,
+    need a field an old provider cannot return), and no contract analysis
+    exists yet, so ``sequence_deployment`` always leaves it False.
     """
 
     change_type: ContractChange
@@ -53,11 +59,17 @@ class DeploymentPlan(BaseModel):
     services_to_deploy: list[str] = Field(default_factory=list)
     unchanged_services: list[str] = Field(default_factory=list)
     stale_consumers: list[str] = Field(default_factory=list)
+    compatibility_verified: bool = False
 
     @property
     def is_acyclic(self) -> bool:
         """Whether ``sequence`` satisfies every dependency edge."""
         return not self.cyclic_services
+
+    @property
+    def safe_order_established(self) -> bool:
+        """Whether the order is both acyclic and proven compatible."""
+        return self.is_acyclic and self.compatibility_verified
 
 
 def _phase_ranks(

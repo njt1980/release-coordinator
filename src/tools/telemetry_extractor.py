@@ -74,6 +74,11 @@ class TelemetryExtractor:
             self._credential = DefaultAzureCredential()
             self._client = LogsQueryClient(self._credential)
 
+    @property
+    def is_mock(self) -> bool:
+        """Whether answers come from the demo fixture instead of Azure."""
+        return self._source == "mock"
+
     def verify_access(self) -> tuple[bool, str]:
         """Confirm query access with a trivial KQL statement that scans no data.
 

@@ -7,31 +7,31 @@ from typing import Final, Literal
 
 from pydantic import BaseModel
 
+from src.coordinator.policy import decide_release, needs_model
 from src.coordinator.sequencing import DeploymentPlan, sequence_deployment
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
 from src.core.models import (
+    AssessmentEvidence,
     DependencyEdge,
+    DiscoveryIncompleteError,
     DiscoveryMethod,
+    EvidenceIssue,
     KnowledgeGraph,
     PullRequestPayload,
+    ReasonCode,
     ReleaseAssessment,
     ServiceIdentity,
     TelemetryStatus,
 )
 from src.core.service_ids import IdentityIndex
-from src.tools.baseline_store import BaselineScope, default_store
+from src.tools.baseline_store import BaselineScope, StoredBaseline, default_store
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
 from src.tools.telemetry_extractor import TelemetryExtractor
 
 logger = logging.getLogger(__name__)
 
 BASELINE_STORE = default_store()
-
-# Score reported when the assessment is refused for missing evidence: an
-# unassessable release is treated as maximally risky.
-DISCOVERY_GAP_RISK_SCORE = 1.0
-
 
 UNRESOLVED_DEPENDENCY_ISSUE: Final[str] = "Unresolved dependency in critical path"
 
@@ -44,11 +44,45 @@ def _service_name(service_id: str) -> str:
         return service_id
 
 
+def _gap(detail: str) -> EvidenceIssue:
+    return EvidenceIssue(code=ReasonCode.DISCOVERY_GAP, detail=detail)
+
+
+def unmapped_files_issue(
+    repository: str, unmapped_files: list[str]
+) -> EvidenceIssue | None:
+    """Return the issue for changed files no registered service owns, if any."""
+    if not unmapped_files:
+        return None
+    where = f" in {repository}" if repository else ""
+    return EvidenceIssue(
+        code=ReasonCode.UNMAPPED_FILES,
+        detail=(
+            f"{len(unmapped_files)} changed file(s){where} are not owned by any "
+            f"registered service: {', '.join(unmapped_files)}"
+        ),
+    )
+
+
 def extract_trigger_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Validate the pull-request payload and resolve the target services."""
+    """Validate the pull-request payload and resolve the target services.
+
+    Changed files no registered service owns (``unmapped_files``) become an
+    UNMAPPED_FILES issue: their impact was never assessed.
+    """
     pull_request = PullRequestPayload.model_validate(state["trigger_event"])
     targets = list(state.get("target_services") or [pull_request.target_service])
-    return {"pull_request": pull_request, "target_services": targets}
+    issues = list(state.get("discovery_issues", []))
+    unmapped = unmapped_files_issue(
+        pull_request.repository, list(state.get("unmapped_files", []))
+    )
+    if unmapped is not None:
+        issues.append(unmapped)
+    return {
+        "pull_request": pull_request,
+        "target_services": targets,
+        "discovery_issues": issues,
+    }
 
 
 Direction = Literal["upstream", "downstream"]
@@ -199,51 +233,87 @@ def resolve_targets(
     return resolved, issues
 
 
+def load_baseline(
+    scope: BaselineScope, snapshot_id: str | None
+) -> tuple[StoredBaseline | None, EvidenceIssue | None]:
+    """Load the pinned snapshot, or the newest complete one when none is pinned.
+
+    A pinned snapshot is never replaced by another one: if it cannot be
+    read, the assessment has no baseline rather than a different one.
+
+    Returns:
+        The baseline, or None and a BASELINE_UNAVAILABLE issue saying why.
+    """
+    where = f"{scope.tenant}/{scope.project_id}"
+    if snapshot_id:
+        try:
+            return BASELINE_STORE.read(scope, snapshot_id), None
+        except (OSError, ValueError, DiscoveryIncompleteError) as error:
+            logger.warning("Pinned baseline %s/%s unusable: %s", where, snapshot_id, error)
+            return None, EvidenceIssue(
+                code=ReasonCode.BASELINE_UNAVAILABLE,
+                detail=f"Pinned baseline snapshot {where}/{snapshot_id} is unusable: {error}",
+            )
+    baseline = BASELINE_STORE.latest(scope)
+    if baseline is None:
+        logger.warning("No complete discovery baseline for %s.", where)
+        return None, EvidenceIssue(
+            code=ReasonCode.BASELINE_UNAVAILABLE,
+            detail=f"No complete discovery baseline found for {where}; run discovery first.",
+        )
+    return baseline, None
+
+
 def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     """Compute the full transitive blast radius of the target services.
 
-    The project's newest complete baseline snapshot is loaded (see
-    ``BaselineStore.latest``); failed, partial or unreadable snapshots are
-    skipped, so they never shadow an older good baseline. Targets are
-    resolved to registered FQURIs, then the graph is walked breadth-first in
-    both directions with no depth limit (see ``traverse_blast_radius``).
+    The snapshot pinned in ``baseline_snapshot_id`` is loaded, or the
+    project's newest complete one when none is pinned (see
+    ``load_baseline``). Targets are resolved to registered FQURIs, then the
+    graph is walked breadth-first in both directions with no depth limit
+    (see ``traverse_blast_radius``).
 
-    Every reason the radius cannot be trusted is reported in
+    Every reason the radius cannot be trusted is added to
     ``discovery_issues``, which rejects the release without calling the LLM:
-    no complete baseline, a target that does not resolve, or an unresolved
-    dependency anywhere in the radius.
+    no usable baseline, a target that does not resolve, an unresolved
+    dependency anywhere in the radius, or a baseline relying on mock data.
     """
     scope = BaselineScope(
         tenant=state.get("tenant") or config.DEFAULT_TENANT,
         project_id=state.get("project_id") or config.DEFAULT_PROJECT_ID,
     )
-    baseline = BASELINE_STORE.latest(scope)
+    issues = list(state.get("discovery_issues", []))
+    baseline, problem = load_baseline(scope, state.get("baseline_snapshot_id"))
     if baseline is None:
-        logger.warning(
-            "No complete discovery baseline for %s/%s; returning no static dependents.",
-            scope.tenant,
-            scope.project_id,
-        )
+        assert problem is not None
         return {
             "upstream_services": [],
             "downstream_services": [],
             "matched_edges": [],
-            "discovery_issues": [
-                "No complete discovery baseline found for "
-                f"{scope.tenant}/{scope.project_id}; run discovery first."
-            ],
+            "discovery_issues": [*issues, problem],
         }
 
     targets, target_issues = resolve_targets(
         baseline.graph, list(state.get("target_services", []))
     )
     radius = traverse_blast_radius(baseline.graph, targets)
+    issues.extend(_gap(issue) for issue in [*target_issues, *radius.issues])
+    if baseline.demo_mode:
+        issues.append(
+            EvidenceIssue(
+                code=ReasonCode.DEMO_EVIDENCE,
+                detail=(
+                    f"Baseline snapshot {baseline.snapshot_id} relies on mock "
+                    "fixture data."
+                ),
+            )
+        )
     return {
         "target_services": targets,
         "upstream_services": radius.upstream,
         "downstream_services": radius.downstream,
         "matched_edges": radius.matched_edges,
-        "discovery_issues": [*target_issues, *radius.issues],
+        "discovery_issues": issues,
         "baseline_snapshot_id": baseline.snapshot_id,
         "baseline_demo_mode": baseline.demo_mode,
     }
@@ -256,7 +326,8 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     evidence is the matched edges that carry RUNTIME_TELEMETRY. Otherwise the
     telemetry workspace is queried live and its metrics are filtered to the
     services in the radius. A FAILED or PARTIAL live query is added to
-    ``discovery_issues``.
+    ``discovery_issues`` as a DISCOVERY_GAP, and a query answered from the
+    mock fixture as DEMO_EVIDENCE (its status ``source`` is then ``mock``).
     """
     observed_edges = [
         f"{edge.source_service_id} -> {edge.target_service_id}"
@@ -283,7 +354,15 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     issues = list(state.get("discovery_issues", []))
     if result.status.is_incomplete:
         issues.append(
-            f"Live telemetry {result.status.value}: {'; '.join(result.errors)}"
+            _gap(f"Live telemetry {result.status.value}: {'; '.join(result.errors)}")
+        )
+    is_mock = extractor.is_mock or any(edge.is_mock_fixture for edge in result.items)
+    if is_mock:
+        issues.append(
+            EvidenceIssue(
+                code=ReasonCode.DEMO_EVIDENCE,
+                detail="Live telemetry was answered from the mock fixture.",
+            )
         )
     runtime_metrics = {
         service: {name: float(value) for name, value in metrics.items()}
@@ -291,7 +370,7 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         if _service_name(service) in radius
     }
     status = TelemetryStatus(
-        source="live",
+        source="mock" if is_mock else "live",
         runtime_observed_edges=observed_edges,
         runtime_metrics=runtime_metrics,
     )
@@ -316,95 +395,129 @@ def sequence_deployment_node(state: ReleaseGraphState) -> dict[str, object]:
     return {"deployment_plan": plan, "deployment_sequence": plan.sequence}
 
 
-def discovery_gap_rejection(
-    issues: list[str], deployment_sequence: list[str]
-) -> dict[str, object]:
-    """Return the deterministic verdict for a release with discovery gaps.
-
-    No LLM is consulted: a verdict over incomplete dependency evidence is not
-    safe to act on, so the release is rejected at maximum risk and every gap
-    is listed. ``deployment_sequence`` is computed from incomplete evidence
-    and is reported for reference only.
-    """
-    gaps = " ".join(f"({index}) {issue}" for index, issue in enumerate(issues, 1))
-    return {
-        "risk_score": DISCOVERY_GAP_RISK_SCORE,
-        "approved": False,
-        "justification": (
-            "Rejected without LLM risk assessment because discovery evidence "
-            f"is incomplete. Discovery gaps: {gaps} Resolve these gaps and "
-            "re-run discovery before re-assessing; the deployment sequence "
-            "shown is computed from incomplete evidence."
-        ),
-    }
-
-
-def dependency_cycle_rejection(plan: DeploymentPlan) -> dict[str, object]:
-    """Return the deterministic verdict for a release subgraph with a cycle.
-
-    No deployment order satisfies every dependency edge, so the release is
-    rejected at maximum risk without consulting the LLM.
-    """
-    return {
-        "risk_score": DISCOVERY_GAP_RISK_SCORE,
-        "approved": False,
-        "justification": (
-            "Rejected without LLM risk assessment because the release "
-            "subgraph has a dependency cycle, so no deployment order "
-            f"satisfies every dependency for a {plan.change_type.value} "
-            "change. Services in or blocked by the cycle: "
-            f"{', '.join(plan.cyclic_services)}. The deployment sequence "
-            "shown breaks the cycle arbitrarily and needs human review."
-        ),
-    }
-
-
 def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Ask the LLM reasoner to score and justify the deterministic sequence.
+    """Consult the advisory model if appropriate, then apply release policy.
 
     The deployment sequence comes from ``sequence_deployment_node`` and is
-    never changed here. The Anthropic API is not called when
-    ``discovery_issues`` is non-empty (``discovery_gap_rejection``) or the
-    subgraph has a dependency cycle (``dependency_cycle_rejection``).
+    never changed here. The Anthropic API is not called when there are
+    evidence issues or the subgraph has a dependency cycle (``needs_model``).
+    The final verdict is always decided in code by ``decide_release``.
     """
     plan: DeploymentPlan = state["deployment_plan"]
     issues = list(state.get("discovery_issues", []))
-    if issues:
-        return discovery_gap_rejection(issues, plan.sequence)
-    if not plan.is_acyclic:
-        return dependency_cycle_rejection(plan)
-
-    request = RiskAssessmentRequest(
-        pull_request=state["pull_request"],
-        change_type=plan.change_type,
-        target_services=list(state.get("target_services", [])),
-        upstream_services=list(state.get("upstream_services", [])),
-        downstream_services=list(state.get("downstream_services", [])),
-        deployment_sequence=plan.sequence,
-        services_to_deploy=plan.services_to_deploy,
-        stale_consumers=plan.stale_consumers,
-        matched_edges=list(state.get("matched_edges", [])),
-        telemetry=state.get("telemetry_status")
-        or TelemetryStatus(source="knowledge_graph"),
-    )
-    assessment = RiskReasoner().assess(request)
+    advisory = None
+    if needs_model(issues, plan):
+        request = RiskAssessmentRequest(
+            pull_request=state["pull_request"],
+            change_type=plan.change_type,
+            target_services=list(state.get("target_services", [])),
+            upstream_services=list(state.get("upstream_services", [])),
+            downstream_services=list(state.get("downstream_services", [])),
+            deployment_sequence=plan.sequence,
+            services_to_deploy=plan.services_to_deploy,
+            stale_consumers=plan.stale_consumers,
+            matched_edges=list(state.get("matched_edges", [])),
+            telemetry=state.get("telemetry_status")
+            or TelemetryStatus(source="knowledge_graph"),
+        )
+        advisory = RiskReasoner().assess(request)
     return {
-        "risk_score": assessment.risk_score,
-        "approved": assessment.approved,
-        "justification": assessment.justification,
+        "advisory_assessment": advisory,
+        "verdict": decide_release(issues, plan, advisory),
     }
+
+
+def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
+    """Return the exact inputs this run assessed."""
+    pull_request: PullRequestPayload = state["pull_request"]
+    telemetry = state.get("telemetry_status")
+    return AssessmentEvidence(
+        pr_id=pull_request.pr_id,
+        repository=pull_request.repository,
+        base_sha=pull_request.base_sha,
+        head_sha=pull_request.head_sha,
+        baseline_snapshot_id=state.get("baseline_snapshot_id") or None,
+        changed_files=list(pull_request.changed_files),
+        unmapped_files=list(state.get("unmapped_files", [])),
+        demo_mode=bool(state.get("baseline_demo_mode"))
+        or (telemetry is not None and telemetry.source == "mock"),
+    )
 
 
 def build_release_assessment(state: ReleaseGraphState) -> ReleaseAssessment:
     """Return the typed verdict the control plane parses from the run."""
-    plan = state.get("deployment_plan")
+    plan: DeploymentPlan = state["deployment_plan"]
+    verdict = state["verdict"]
     return ReleaseAssessment(
-        risk_score=state["risk_score"],
-        approved=state["approved"],
-        deployment_sequence=state["deployment_sequence"],
-        services_to_deploy=plan.services_to_deploy if plan else [],
-        stale_consumers=plan.stale_consumers if plan else [],
-        justification=state["justification"],
+        approved=verdict.approved,
+        actionable=verdict.actionable,
+        reason_codes=verdict.reason_codes,
+        risk_score=verdict.risk_score,
+        safe_order_established=plan.safe_order_established,
+        deployment_sequence=plan.sequence,
+        services_to_deploy=plan.services_to_deploy,
+        stale_consumers=plan.stale_consumers,
+        justification=verdict.justification,
+        advisory_assessment=state.get("advisory_assessment"),
+        evidence=assessment_evidence(state),
+        issues=list(state.get("discovery_issues", [])),
+    )
+
+
+def _render_report(assessment: ReleaseAssessment, state: ReleaseGraphState) -> str:
+    """Render an assessment and its radius as a Markdown report."""
+    pull_request: PullRequestPayload = state["pull_request"]
+    evidence = assessment.evidence
+
+    def _list(values: Iterable[str]) -> str:
+        return ", ".join(values) or "None identified"
+
+    snapshot = evidence.baseline_snapshot_id or "None"
+    if evidence.demo_mode:
+        snapshot += " (DEMO MODE: relies on mock fixture data)"
+    revision = (
+        f"{evidence.repository or 'unknown repository'} "
+        f"{evidence.base_sha or '?'}..{evidence.head_sha or '?'}"
+    )
+    risk = (
+        f"{assessment.risk_score:.2f}"
+        if assessment.risk_score is not None
+        else "Not assessed (insufficient evidence)"
+    )
+    advisory = assessment.advisory_assessment
+    advisory_text = (
+        f"{'approve' if advisory.approved else 'reject'} "
+        f"(risk {advisory.risk_score:.2f})"
+        if advisory
+        else "Not consulted"
+    )
+    issues = [f"[{issue.code.value}] {issue.detail}" for issue in assessment.issues]
+    return (
+        "## Release Impact Assessment\n\n"
+        f"**Pull Request:** {pull_request.pr_id}: {pull_request.title}\n\n"
+        f"**Revision:** {revision}\n\n"
+        f"**Baseline Snapshot:** {snapshot}\n\n"
+        f"**Target Services:** {_list(state.get('target_services', []))}\n\n"
+        f"**Unmapped Files:** {_list(evidence.unmapped_files)}\n\n"
+        "**Blast Radius:**\n"
+        "- **Upstream (depend on the target, directly or transitively):** "
+        f"{_list(state.get('upstream_services', []))}\n"
+        "- **Downstream (called by the target, directly or transitively):** "
+        f"{_list(state.get('downstream_services', []))}\n\n"
+        f"**Approved:** {'Yes' if assessment.approved else 'No'}\n\n"
+        f"**Actionable:** {'Yes' if assessment.actionable else 'No'}\n\n"
+        f"**Reason Codes:** {_list(code.value for code in assessment.reason_codes)}\n\n"
+        f"**Risk Score:** {risk}\n\n"
+        f"**Advisory Model:** {advisory_text}\n\n"
+        f"**Evidence Issues:** {_list(issues)}\n\n"
+        "**Safe Order Established:** "
+        f"{'Yes' if assessment.safe_order_established else 'No'}\n\n"
+        f"**Recommended Sequence:** {' -> '.join(assessment.deployment_sequence)}\n\n"
+        "**Services to Deploy:** "
+        f"{' -> '.join(assessment.services_to_deploy) or 'Not determined'}\n\n"
+        "**Stale Consumers (breaking change, not updated by this PR):** "
+        f"{_list(assessment.stale_consumers)}\n\n"
+        f"**Justification:** {assessment.justification}"
     )
 
 
@@ -414,41 +527,8 @@ def compile_evidence_node(state: ReleaseGraphState) -> dict[str, object]:
     ``release_assessment`` is the machine-readable output for the control
     plane; ``evidence_report`` is the human-readable summary.
     """
-    pull_request = state.get("pull_request")
-    pr_text = (
-        f"{pull_request.pr_id}: {pull_request.title}" if pull_request else "Unknown"
-    )
-
-    def _list(services: list[str]) -> str:
-        return ", ".join(services) or "None identified"
-
-    sequence = state.get("deployment_sequence", [])
-    plan = state.get("deployment_plan")
-    to_deploy = plan.services_to_deploy if plan else []
-    stale = plan.stale_consumers if plan else []
-    snapshot = state.get("baseline_snapshot_id") or "None"
-    if state.get("baseline_demo_mode"):
-        snapshot += " (DEMO MODE: relies on mock fixture data)"
-    evidence_report = (
-        "## Release Impact Assessment\n\n"
-        f"**Pull Request:** {pr_text}\n\n"
-        f"**Baseline Snapshot:** {snapshot}\n\n"
-        f"**Target Services:** {_list(state.get('target_services', []))}\n\n"
-        "**Blast Radius:**\n"
-        "- **Upstream (depend on the target, directly or transitively):** "
-        f"{_list(state.get('upstream_services', []))}\n"
-        "- **Downstream (called by the target, directly or transitively):** "
-        f"{_list(state.get('downstream_services', []))}\n\n"
-        f"**Risk Score:** {state.get('risk_score', 0.0):.2f}\n\n"
-        f"**Approved:** {'Yes' if state.get('approved') else 'No'}\n\n"
-        f"**Discovery Gaps:** {_list(state.get('discovery_issues', []))}\n\n"
-        f"**Recommended Sequence:** {' -> '.join(sequence) or 'Not determined'}\n\n"
-        f"**Services to Deploy:** {' -> '.join(to_deploy) or 'Not determined'}\n\n"
-        f"**Stale Consumers (breaking change, not updated by this PR):** "
-        f"{_list(stale)}\n\n"
-        f"**Justification:** {state.get('justification') or 'Not provided'}"
-    )
+    assessment = build_release_assessment(state)
     return {
-        "evidence_report": evidence_report,
-        "release_assessment": build_release_assessment(state),
+        "evidence_report": _render_report(assessment, state),
+        "release_assessment": assessment,
     }

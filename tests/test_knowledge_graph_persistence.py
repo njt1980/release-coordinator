@@ -19,8 +19,10 @@ from src.core.models import (
     DiscoveryMethod,
     DiscoveryStageReport,
     DiscoveryStatus,
+    EvidenceIssue,
     KnowledgeGraph,
     PullRequestPayload,
+    ReasonCode,
     ServiceNode,
     UnresolvedEntity,
 )
@@ -382,9 +384,15 @@ class StaticRadiusTests(_StoreTestCase):
         self.assertEqual(
             result["discovery_issues"],
             [
-                "Unresolved dependency in critical path: unresolved:10.0.0.12:5432 "
-                f"(IP_ADDRESS) is downstream of the release via {TARGET} -> "
-                f"{_id('ledger-service')} -> unresolved:10.0.0.12:5432"
+                EvidenceIssue(
+                    code=ReasonCode.DISCOVERY_GAP,
+                    detail=(
+                        "Unresolved dependency in critical path: "
+                        "unresolved:10.0.0.12:5432 (IP_ADDRESS) is downstream of "
+                        f"the release via {TARGET} -> {_id('ledger-service')} -> "
+                        "unresolved:10.0.0.12:5432"
+                    ),
+                )
             ],
         )
 
@@ -402,11 +410,12 @@ class StaticRadiusTests(_StoreTestCase):
 
         assert isinstance(issues, list)
         self.assertEqual(len(issues), 1)
-        self.assertIn("unresolved:legacy-batch (UNREGISTERED_SERVICE)", issues[0])
+        self.assertIs(issues[0].code, ReasonCode.DISCOVERY_GAP)
+        self.assertIn("unresolved:legacy-batch (UNREGISTERED_SERVICE)", issues[0].detail)
         self.assertIn(
             f"upstream of the release via unresolved:legacy-batch -> "
             f"{_id('checkout')} -> {TARGET}",
-            issues[0],
+            issues[0].detail,
         )
 
     def test_unresolved_entity_outside_radius_is_ignored(self) -> None:
@@ -453,7 +462,9 @@ class StaticRadiusTests(_StoreTestCase):
         assessment = coordinator_nodes.compile_evidence_node(state)["release_assessment"]
 
         self.assertFalse(assessment.approved)
-        self.assertEqual(assessment.risk_score, 1.0)
+        self.assertFalse(assessment.actionable)
+        self.assertIsNone(assessment.risk_score)
+        self.assertIn(ReasonCode.DISCOVERY_GAP, assessment.reason_codes)
         self.assertIn(
             "Unresolved dependency in critical path: unresolved:vault.corp.internal "
             "(PRIVATE_DNS)",
@@ -482,8 +493,14 @@ class StaticRadiusTests(_StoreTestCase):
         self.assertEqual(
             result["discovery_issues"],
             [
-                f"Unresolved dependency in critical path: target {ghost} does not "
-                "match exactly one registered service in the baseline"
+                EvidenceIssue(
+                    code=ReasonCode.DISCOVERY_GAP,
+                    detail=(
+                        f"Unresolved dependency in critical path: target {ghost} "
+                        "does not match exactly one registered service in the "
+                        "baseline"
+                    ),
+                )
             ],
         )
 
@@ -499,7 +516,48 @@ class StaticRadiusTests(_StoreTestCase):
 
     def test_static_radius_reports_demo_mode(self) -> None:
         self._persist([_edge("api-gateway", "payment-service", "mock_fixture")])
-        self.assertTrue(self._radius()["baseline_demo_mode"])
+
+        result = self._radius()
+
+        self.assertTrue(result["baseline_demo_mode"])
+        issues = result["discovery_issues"]
+        assert isinstance(issues, list)
+        self.assertEqual([issue.code for issue in issues], [ReasonCode.DEMO_EVIDENCE])
+
+    def test_pinned_snapshot_is_used_even_when_newer_exists(self) -> None:
+        pinned = self._persist([_edge("api-gateway", "payment-service")])
+        self._persist([_edge("checkout", "payment-service")])
+
+        state: Any = {
+            "tenant": SCOPE.tenant,
+            "project_id": SCOPE.project_id,
+            "target_services": [TARGET],
+            "baseline_snapshot_id": pinned,
+        }
+        result = coordinator_nodes.calculate_static_radius_node(state)
+
+        self.assertEqual(result["baseline_snapshot_id"], pinned)
+        self.assertEqual(result["upstream_services"], [_id("api-gateway")])
+
+    def test_unusable_pinned_snapshot_never_falls_back_to_latest(self) -> None:
+        self._persist([_edge("api-gateway", "payment-service")])
+
+        state: Any = {
+            "tenant": SCOPE.tenant,
+            "project_id": SCOPE.project_id,
+            "target_services": [TARGET],
+            "baseline_snapshot_id": "20200101T000000000000Z-deadbeef",
+        }
+        with self.assertLogs(coordinator_nodes.logger, level="WARNING"):
+            result = coordinator_nodes.calculate_static_radius_node(state)
+
+        self.assertEqual(result["upstream_services"], [])
+        issues = result["discovery_issues"]
+        assert isinstance(issues, list)
+        self.assertEqual(
+            [issue.code for issue in issues], [ReasonCode.BASELINE_UNAVAILABLE]
+        )
+        self.assertIn("20200101T000000000000Z-deadbeef", issues[0].detail)
 
     def test_static_radius_missing_baseline_is_a_discovery_issue(self) -> None:
         self._persist([_edge("api-gateway", "payment-service")])
@@ -515,8 +573,13 @@ class StaticRadiusTests(_StoreTestCase):
                 "downstream_services": [],
                 "matched_edges": [],
                 "discovery_issues": [
-                    "No complete discovery baseline found for "
-                    "acme/unknown-project; run discovery first."
+                    EvidenceIssue(
+                        code=ReasonCode.BASELINE_UNAVAILABLE,
+                        detail=(
+                            "No complete discovery baseline found for "
+                            "acme/unknown-project; run discovery first."
+                        ),
+                    )
                 ],
             },
         )

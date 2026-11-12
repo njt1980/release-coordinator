@@ -268,8 +268,8 @@ class ScanRepositoryTests(unittest.TestCase):
         result = extractor.scan_repository("repo-a")
 
         self.assertEqual(result.status, DiscoveryStatus.SUCCESS)
-        # idle-service has no dependencies and no manifest, so it is not
-        # registered; /src/unmarked has no marker file, so it is not a service.
+        # idle-service calls nothing but is still a service; /src/unmarked has
+        # no marker file, so it is not a service.
         self.assertEqual(
             _summary(result),
             [
@@ -283,6 +283,7 @@ class ScanRepositoryTests(unittest.TestCase):
                     ],
                 ),
                 ("order-service", [("URL", "http://10.0.0.12:5672")]),
+                ("idle-service", []),
             ],
         )
         self.assertEqual(

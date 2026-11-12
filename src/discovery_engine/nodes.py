@@ -113,7 +113,8 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     stored as dependency targets; both ends are resolved against the
     inventory later, during reconciliation.
     The stage is skipped when no Azure DevOps organization URL or project is
-    configured. A repository that cannot be scanned makes the stage PARTIAL
+    configured, and FAILED when they are configured but no repositories are
+    selected. A repository that cannot be scanned makes the stage PARTIAL
     (or FAILED if no repository could be scanned) instead of silently
     contributing no edges.
     """
@@ -170,10 +171,16 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
                 )
                 edge_count += 1
 
+    if not statuses:
+        # Repository discovery was requested, but nothing was selected to
+        # scan: an empty result would look like a codebase with no services.
+        statuses.append(DiscoveryStatus.FAILED)
+        errors.append(
+            "Azure DevOps is configured but no repositories were selected to scan"
+        )
     report = DiscoveryStageReport(
         source=DiscoveryMethod.STATIC_CODE,
-        # Configured DevOps scope with no repositories still ran: nothing to scan.
-        status=combine_statuses(statuses) if statuses else DiscoveryStatus.SUCCESS,
+        status=combine_statuses(statuses),
         item_count=edge_count,
         errors=errors,
     )

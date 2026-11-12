@@ -193,22 +193,18 @@ def resolve_reference(
 ) -> ServiceIdentity | None:
     """Resolve a raw reference to exactly one registered identity, or None.
 
-    A name whose namespace is unknown falls back to ``default_namespace``
-    when matching across all namespaces is not unique.
+    A name whose namespace is unknown resolves only within
+    ``default_namespace`` when the context has one, as Kubernetes resolves
+    short names in the caller's namespace: a service elsewhere is never
+    chosen just because its name is unique. Without a known namespace, the
+    name must match exactly one registered service in any namespace.
     """
     query = parse_reference(reference, context)
     if query is None:
         return None
-    resolved = index.resolve(query)
-    if (
-        resolved is None
-        and query.namespace == UNKNOWN_LABEL
-        and context.default_namespace
-    ):
-        resolved = index.resolve(
-            query.model_copy(update={"namespace": context.default_namespace})
-        )
-    return resolved
+    if query.namespace == UNKNOWN_LABEL and context.default_namespace:
+        query = query.model_copy(update={"namespace": context.default_namespace})
+    return index.resolve(query)
 
 
 def resolve_env_var_reference(

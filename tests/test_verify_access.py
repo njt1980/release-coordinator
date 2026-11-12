@@ -336,6 +336,15 @@ class OnboardingPayloadTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             OnboardingPayload(target_repositories=["repo-a"], workspace_id="ws-1")
 
+    def test_rejects_devops_scope_without_repositories(self) -> None:
+        with self.assertRaises(ValidationError) as raised:
+            OnboardingPayload(
+                devops_org_url="https://dev.azure.com/org",
+                devops_project="proj",
+                target_repositories=[" "],
+            )
+        self.assertIn("at least one repository", str(raised.exception))
+
 
 def _discovery_state(**overrides: object) -> DiscoveryGraphState:
     state: DiscoveryGraphState = {
@@ -403,6 +412,20 @@ class DiscoveryNodeSkipTests(unittest.TestCase):
             project="proj",
             repositories=["repo-a"],
         )
+
+    def test_static_scan_fails_when_devops_has_no_repositories(self) -> None:
+        with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
+            result = discovery_nodes.extract_static_code_baseline(
+                _discovery_state(
+                    devops_org_url="https://dev.azure.com/org",
+                    devops_project="proj",
+                )
+            )
+        devops_cls.return_value.scan_repository.assert_not_called()
+        reports = result["discovery_reports"]
+        assert isinstance(reports, list)
+        self.assertEqual(reports[0].status, DiscoveryStatus.FAILED)
+        self.assertIn("no repositories were selected", reports[0].errors[0])
 
     def test_k8s_skipped_without_namespaces(self) -> None:
         with patch.object(discovery_nodes, "KubernetesExtractor") as k8s_cls:
