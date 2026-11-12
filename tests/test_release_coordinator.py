@@ -23,7 +23,8 @@ from src.tools.risk_reasoner import (
     SYSTEM_PROMPT,
 )
 
-TARGET = "default/order-service"
+URN = "urn:release-coord:default:unknown:unknown:default"
+TARGET = f"{URN}:order-service"
 PR = PullRequestPayload(
     pr_id="PR-1",
     title="Change order schema",
@@ -46,9 +47,9 @@ def _request() -> RiskAssessmentRequest:
     return RiskAssessmentRequest(
         pull_request=PR,
         target_services=[TARGET],
-        upstream_services=["default/store-front"],
-        downstream_services=["default/rabbitmq"],
-        baseline_deployment_order=["default/rabbitmq", TARGET, "default/store-front"],
+        upstream_services=[f"{URN}:store-front"],
+        downstream_services=[f"{URN}:rabbitmq"],
+        baseline_deployment_order=[f"{URN}:rabbitmq", TARGET, f"{URN}:store-front"],
         matched_edges=[],
         telemetry=TelemetryStatus(source="knowledge_graph"),
     )
@@ -67,7 +68,7 @@ class RiskReasonerTests(unittest.TestCase):
         verdict = RiskAssessment(
             risk_score=0.75,
             approved=True,
-            deployment_order=["default/rabbitmq", TARGET, "default/store-front"],
+            deployment_order=[f"{URN}:rabbitmq", TARGET, f"{URN}:store-front"],
             justification="store-front posts orders without customerId.",
         )
         client = _fake_client("end_turn", verdict)
@@ -81,7 +82,7 @@ class RiskReasonerTests(unittest.TestCase):
         self.assertIn("<diff>\n--- a\n+++ b\n", kwargs["messages"][0]["content"])
 
     def test_rejects_unknown_or_missing_services(self) -> None:
-        for order in [["default/ghost", TARGET], ["default/store-front"]]:
+        for order in [[f"{URN}:ghost", TARGET], [f"{URN}:store-front"]]:
             with self.subTest(order=order):
                 client = _fake_client(
                     "end_turn",
@@ -97,9 +98,9 @@ class RiskReasonerTests(unittest.TestCase):
         gains schemaVersion 2, so callers and the queue consumer must deploy
         before the target. The validator must not force the additive baseline."""
         consumers = [
-            "default/makeline-service",
-            "default/store-admin",
-            "default/store-front",
+            f"{URN}:makeline-service",
+            f"{URN}:store-admin",
+            f"{URN}:store-front",
         ]
         request = RiskAssessmentRequest(
             pull_request=PR,
@@ -148,8 +149,8 @@ class CoordinatorNodeTests(unittest.TestCase):
         state: Any = {
             "workspace_id": "",
             "matched_edges": [
-                _edge("default/store-front", TARGET, DiscoveryMethod.RUNTIME_TELEMETRY),
-                _edge(TARGET, "default/rabbitmq", DiscoveryMethod.STATIC_CODE),
+                _edge(f"{URN}:store-front", TARGET, DiscoveryMethod.RUNTIME_TELEMETRY),
+                _edge(TARGET, f"{URN}:rabbitmq", DiscoveryMethod.STATIC_CODE),
             ],
         }
         with patch.object(coordinator_nodes, "TelemetryExtractor") as extractor:
@@ -159,7 +160,7 @@ class CoordinatorNodeTests(unittest.TestCase):
             result["telemetry_status"],
             TelemetryStatus(
                 source="knowledge_graph",
-                runtime_observed_edges=[f"default/store-front -> {TARGET}"],
+                runtime_observed_edges=[f"{URN}:store-front -> {TARGET}"],
             ),
         )
 
@@ -167,15 +168,15 @@ class CoordinatorNodeTests(unittest.TestCase):
         state: Any = {
             "pull_request": PR,
             "target_services": [TARGET],
-            "upstream_services": ["default/store-front"],
-            "downstream_services": ["default/rabbitmq"],
+            "upstream_services": [f"{URN}:store-front"],
+            "downstream_services": [f"{URN}:rabbitmq"],
             "matched_edges": [],
             "telemetry_status": TelemetryStatus(source="knowledge_graph"),
         }
         verdict = RiskAssessment(
             risk_score=0.4,
             approved=True,
-            deployment_order=[TARGET, "default/store-front"],
+            deployment_order=[TARGET, f"{URN}:store-front"],
             justification="why",
         )
         with patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls:
@@ -185,14 +186,14 @@ class CoordinatorNodeTests(unittest.TestCase):
         request = reasoner_cls.return_value.assess.call_args.args[0]
         self.assertEqual(
             request.baseline_deployment_order,
-            ["default/rabbitmq", TARGET, "default/store-front"],
+            [f"{URN}:rabbitmq", TARGET, f"{URN}:store-front"],
         )
         self.assertEqual(
             result,
             {
                 "risk_score": 0.4,
                 "approved": True,
-                "deployment_sequence": [TARGET, "default/store-front"],
+                "deployment_sequence": [TARGET, f"{URN}:store-front"],
                 "justification": "why",
             },
         )
@@ -206,8 +207,8 @@ class CoordinatorNodeTests(unittest.TestCase):
         state: Any = {
             "pull_request": PR,
             "target_services": [TARGET],
-            "upstream_services": ["default/store-front"],
-            "downstream_services": ["default/rabbitmq"],
+            "upstream_services": [f"{URN}:store-front"],
+            "downstream_services": [f"{URN}:rabbitmq"],
             "matched_edges": [],
             "telemetry_status": TelemetryStatus(source="live"),
             "discovery_issues": issues,
@@ -220,7 +221,7 @@ class CoordinatorNodeTests(unittest.TestCase):
         self.assertIs(result["approved"], False)
         self.assertEqual(
             result["deployment_sequence"],
-            ["default/rabbitmq", TARGET, "default/store-front"],
+            [f"{URN}:rabbitmq", TARGET, f"{URN}:store-front"],
         )
         justification = result["justification"]
         assert isinstance(justification, str)
@@ -264,15 +265,47 @@ class CoordinatorNodeTests(unittest.TestCase):
             ["existing issue", "Live telemetry FAILED: query timed out"],
         )
 
+    def test_baseline_order_deploys_deepest_providers_first(self) -> None:
+        # Traversal order is nearest first: TARGET -> queue -> storage.
+        order = coordinator_nodes.baseline_deployment_order(
+            [TARGET],
+            upstream=[f"{URN}:store-front", f"{URN}:web"],
+            downstream=[f"{URN}:queue", f"{URN}:storage"],
+        )
+        self.assertEqual(
+            order,
+            [f"{URN}:storage", f"{URN}:queue", TARGET, f"{URN}:store-front", f"{URN}:web"],
+        )
+
+    def test_live_metrics_are_filtered_by_fquri_service_name(self) -> None:
+        state: Any = {
+            "workspace_id": "ws-1",
+            "target_services": [TARGET],
+            "downstream_services": [f"{URN}:rabbitmq"],
+        }
+        with patch.object(coordinator_nodes, "TelemetryExtractor") as extractor_cls:
+            extractor = extractor_cls.return_value
+            extractor.get_active_dependencies.return_value = DiscoveryResult.success([])
+            extractor.get_runtime_metrics.return_value = {
+                "order-service": {"error_rate": 0.1},
+                "rabbitmq": {"error_rate": 0.0},
+                "unrelated": {"error_rate": 0.9},
+            }
+            result = coordinator_nodes.validate_runtime_telemetry_node(state)
+
+        status = result["telemetry_status"]
+        assert isinstance(status, TelemetryStatus)
+        self.assertEqual(set(status.runtime_metrics), {"order-service", "rabbitmq"})
+
     def test_compile_node_emits_typed_release_assessment(self) -> None:
         state: Any = {
             "pull_request": PR,
             "target_services": [TARGET],
-            "upstream_services": ["default/store-front"],
+            "upstream_services": [f"{URN}:store-front"],
             "downstream_services": [],
             "risk_score": 0.8,
             "approved": False,
-            "deployment_sequence": ["default/store-front", TARGET],
+            "deployment_sequence": [f"{URN}:store-front", TARGET],
             "justification": "store-front must send customerId first.",
         }
 
@@ -285,7 +318,7 @@ class CoordinatorNodeTests(unittest.TestCase):
             {
                 "risk_score": 0.8,
                 "approved": False,
-                "deployment_sequence": ["default/store-front", TARGET],
+                "deployment_sequence": [f"{URN}:store-front", TARGET],
                 "justification": "store-front must send customerId first.",
             },
         )

@@ -6,6 +6,7 @@ from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
 from src.core.models import DiscoveryResult, ServiceNode
+from src.core.service_ids import IdentityContext
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
     VERIFY_TIMEOUT_SECONDS,
@@ -22,10 +23,10 @@ class KubernetesExtractor:
     def __init__(self) -> None:
         self._core_v1_api: client.CoreV1Api | None = None
         try:
-            config.load_kube_config()
+            config.load_kube_config()  # type: ignore[no-untyped-call]
         except ConfigException:
             try:
-                config.load_incluster_config()
+                config.load_incluster_config()  # type: ignore[no-untyped-call]
             except ConfigException:
                 logger.exception("Unable to load Kubernetes client configuration")
                 return
@@ -69,15 +70,19 @@ class KubernetesExtractor:
             )
             return False, str(error)
 
-    def get_namespace_services(self, namespace: str) -> DiscoveryResult[ServiceNode]:
+    def get_namespace_services(
+        self, namespace: str, context: IdentityContext
+    ) -> DiscoveryResult[ServiceNode]:
         """Return service nodes observed in a Kubernetes namespace.
 
         This method is intended to read service metadata from the specified
         namespace only. It must not create, update, or delete Kubernetes
-        resources.
+        resources. Each node's ``service_id`` is its FQURI, built from
+        ``context`` (tenant, environment, cluster) and the namespace.
 
         Args:
             namespace: Kubernetes namespace whose services to inspect.
+            context: Identity segments known for this discovery run.
 
         Returns:
             SUCCESS with the namespace's services, PARTIAL when some service
@@ -110,7 +115,7 @@ class KubernetesExtractor:
                 continue
             services.append(
                 ServiceNode(
-                    service_id=f"{namespace}/{metadata.name}",
+                    service_id=context.identity(metadata.name, namespace).uri,
                     name=metadata.name,
                 )
             )

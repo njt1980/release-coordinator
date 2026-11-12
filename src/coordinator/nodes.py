@@ -1,16 +1,24 @@
 """Node functions for the release orchestration graph."""
 
 import logging
+from collections import deque
+from collections.abc import Iterable, Mapping
+from typing import Final, Literal
+
+from pydantic import BaseModel
 
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
 from src.core.models import (
     DependencyEdge,
     DiscoveryMethod,
+    KnowledgeGraph,
     PullRequestPayload,
     ReleaseAssessment,
+    ServiceIdentity,
     TelemetryStatus,
 )
+from src.core.service_ids import IdentityIndex
 from src.tools.baseline_store import BaselineScope, default_store
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
 from src.tools.telemetry_extractor import TelemetryExtractor
@@ -24,9 +32,15 @@ BASELINE_STORE = default_store()
 DISCOVERY_GAP_RISK_SCORE = 1.0
 
 
+UNRESOLVED_DEPENDENCY_ISSUE: Final[str] = "Unresolved dependency in critical path"
+
+
 def _service_name(service_id: str) -> str:
-    """Return the bare service name of a ``<namespace>/<name>`` ID."""
-    return service_id.rsplit("/", 1)[-1]
+    """Return the bare service name of a FQURI (or the ID itself otherwise)."""
+    try:
+        return ServiceIdentity.parse(service_id).service_name
+    except ValueError:
+        return service_id
 
 
 def baseline_deployment_order(
@@ -34,14 +48,16 @@ def baseline_deployment_order(
 ) -> list[str]:
     """Return the order for an additive change: providers first, consumers last.
 
-    Downstream services (called by the target) go first so the target's new
-    code finds compatible dependencies, then the target, then upstream
-    consumers that may start using the target's new capability. For
-    tightening or breaking contract changes the consumers must go before the
-    target; the risk reasoner is instructed to reorder in that case.
+    ``upstream`` and ``downstream`` are in traversal order, nearest first.
+    Downstream services (called by the target, directly or transitively) go
+    first, deepest provider first, so the target's new code finds compatible
+    dependencies; then the target; then upstream consumers, nearest first,
+    that may start using the target's new capability. For tightening or
+    breaking contract changes the consumers must go before the target; the
+    risk reasoner is instructed to reorder in that case.
     """
     order: list[str] = []
-    for service in [*downstream, *targets, *upstream]:
+    for service in [*reversed(downstream), *targets, *upstream]:
         if service not in order:
             order.append(service)
     return order
@@ -54,18 +70,167 @@ def extract_trigger_node(state: ReleaseGraphState) -> dict[str, object]:
     return {"pull_request": pull_request, "target_services": targets}
 
 
+Direction = Literal["upstream", "downstream"]
+_Adjacency = Mapping[str, list[tuple[str, int]]]
+
+
+class BlastRadius(BaseModel):
+    """Transitive blast radius of a set of target services.
+
+    ``upstream`` and ``downstream`` hold registered services only, in
+    breadth-first order (nearest first). ``matched_edges`` are every edge
+    walked in either direction. ``issues`` holds one entry per unresolved
+    node reached.
+    """
+
+    upstream: list[str]
+    downstream: list[str]
+    matched_edges: list[DependencyEdge]
+    issues: list[str]
+
+
+def _adjacency(
+    edges: list[DependencyEdge], direction: Direction
+) -> dict[str, list[tuple[str, int]]]:
+    """Map each node to ``(neighbour, edge index)`` pairs in one direction.
+
+    ``downstream`` follows edges caller -> callee; ``upstream`` follows them
+    backwards, from callee to caller.
+    """
+    adjacency: dict[str, list[tuple[str, int]]] = {}
+    for position, edge in enumerate(edges):
+        source, target = edge.source_service_id, edge.target_service_id
+        if direction == "upstream":
+            source, target = target, source
+        adjacency.setdefault(source, []).append((target, position))
+    return adjacency
+
+
+def _breadth_first(
+    starts: Iterable[str], adjacency: _Adjacency
+) -> tuple[list[str], list[int], dict[str, list[str]]]:
+    """Walk ``adjacency`` breadth-first from ``starts``.
+
+    A visited set (seeded with the start nodes) means each node is expanded
+    once, so cyclic dependencies terminate and starts are never reported
+    as their own neighbours.
+
+    Returns:
+        The nodes reached (excluding starts) in visiting order, the indexes
+        of every edge walked, and the path from a start to each reached node.
+    """
+    paths = {start: [start] for start in starts}
+    visited = set(paths)
+    queue = deque(paths)
+    reached: list[str] = []
+    walked: list[int] = []
+    while queue:
+        node = queue.popleft()
+        for neighbour, position in adjacency.get(node, []):
+            walked.append(position)
+            if neighbour in visited:
+                continue
+            visited.add(neighbour)
+            paths[neighbour] = [*paths[node], neighbour]
+            reached.append(neighbour)
+            queue.append(neighbour)
+    return reached, walked, paths
+
+
+def _unresolved_issue(
+    node: str, kind: str, direction: Direction, path: list[str]
+) -> str:
+    """Describe an unresolved node reached by the traversal.
+
+    The path is rendered in call direction (caller -> callee).
+    """
+    hops = path if direction == "downstream" else list(reversed(path))
+    return (
+        f"{UNRESOLVED_DEPENDENCY_ISSUE}: {node} ({kind}) is {direction} of the "
+        f"release via {' -> '.join(hops)}"
+    )
+
+
+def traverse_blast_radius(graph: KnowledgeGraph, targets: list[str]) -> BlastRadius:
+    """Return the full transitive blast radius of ``targets`` in ``graph``.
+
+    An edge ``A -> B`` means A depends on (calls) B. Every service with a
+    path to a target is upstream; every node a target has a path to is
+    downstream. A node that is not a registered service (an
+    ``UnresolvedEntity`` or any endpoint missing from the inventory) is left
+    out of both lists and reported as an issue instead.
+    """
+    registered = {service.service_id for service in graph.services}
+    kinds = {e.entity_id: e.kind.value for e in graph.unresolved_entities}
+    walked: set[int] = set()
+    radius: dict[Direction, list[str]] = {"upstream": [], "downstream": []}
+    issues: list[str] = []
+    reported: set[str] = set()
+    for direction in ("downstream", "upstream"):
+        reached, edges, paths = _breadth_first(
+            targets, _adjacency(graph.edges, direction)
+        )
+        walked.update(edges)
+        for node in reached:
+            if node in registered:
+                radius[direction].append(node)
+            elif node not in reported:
+                reported.add(node)
+                kind = kinds.get(node, "not in service inventory")
+                issues.append(_unresolved_issue(node, kind, direction, paths[node]))
+    return BlastRadius(
+        upstream=radius["upstream"],
+        downstream=radius["downstream"],
+        matched_edges=[graph.edges[position] for position in sorted(walked)],
+        issues=issues,
+    )
+
+
+def resolve_targets(
+    graph: KnowledgeGraph, targets: list[str]
+) -> tuple[list[str], list[str]]:
+    """Resolve target FQURIs against the baseline's service inventory.
+
+    Unknown segments in a target act as wildcards; a target resolves only
+    when exactly one registered service matches it.
+
+    Returns:
+        The targets, each replaced by the registered FQURI it resolved to
+        (unresolved targets are kept as given), and one issue per target
+        that did not resolve.
+    """
+    index = IdentityIndex(service.identity for service in graph.services)
+    resolved: list[str] = []
+    issues: list[str] = []
+    for target in targets:
+        try:
+            match = index.resolve(ServiceIdentity.parse(target))
+        except ValueError:
+            match = None
+        if match is None:
+            issues.append(
+                f"{UNRESOLVED_DEPENDENCY_ISSUE}: target {target} does not match "
+                "exactly one registered service in the baseline"
+            )
+        service_id = match.uri if match else target
+        if service_id not in resolved:
+            resolved.append(service_id)
+    return resolved, issues
+
+
 def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Split the target's graph neighbours into upstream and downstream.
+    """Compute the full transitive blast radius of the target services.
 
     The project's newest complete baseline snapshot is loaded (see
     ``BaselineStore.latest``); failed, partial or unreadable snapshots are
-    skipped, so they never shadow an older good baseline. An edge ``A -> B``
-    means A depends on (calls) B. For a target T, ``A -> T`` makes A
-    upstream (a consumer of T) and ``T -> B`` makes B downstream (a
-    dependency of T).
+    skipped, so they never shadow an older good baseline. Targets are
+    resolved to registered FQURIs, then the graph is walked breadth-first in
+    both directions with no depth limit (see ``traverse_blast_radius``).
 
-    When no complete baseline exists, that is reported in
-    ``discovery_issues`` so the release cannot be approved on an empty radius.
+    Every reason the radius cannot be trusted is reported in
+    ``discovery_issues``, which rejects the release without calling the LLM:
+    no complete baseline, a target that does not resolve, or an unresolved
+    dependency anywhere in the radius.
     """
     scope = BaselineScope(
         tenant=state.get("tenant") or config.DEFAULT_TENANT,
@@ -88,24 +253,16 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
             ],
         }
 
-    targets = set(state.get("target_services", []))
-    upstream: list[str] = []
-    downstream: list[str] = []
-    matched: list[DependencyEdge] = []
-    for edge in baseline.graph.edges:
-        source, target = edge.source_service_id, edge.target_service_id
-        if source not in targets and target not in targets:
-            continue
-        matched.append(edge)
-        if target in targets and source not in targets and source not in upstream:
-            upstream.append(source)
-        if source in targets and target not in targets and target not in downstream:
-            downstream.append(target)
+    targets, target_issues = resolve_targets(
+        baseline.graph, list(state.get("target_services", []))
+    )
+    radius = traverse_blast_radius(baseline.graph, targets)
     return {
-        "upstream_services": upstream,
-        "downstream_services": downstream,
-        "matched_edges": matched,
-        "discovery_issues": [],
+        "target_services": targets,
+        "upstream_services": radius.upstream,
+        "downstream_services": radius.downstream,
+        "matched_edges": radius.matched_edges,
+        "discovery_issues": [*target_issues, *radius.issues],
         "baseline_snapshot_id": baseline.snapshot_id,
         "baseline_demo_mode": baseline.demo_mode,
     }
@@ -251,9 +408,9 @@ def compile_evidence_node(state: ReleaseGraphState) -> dict[str, object]:
         f"**Baseline Snapshot:** {snapshot}\n\n"
         f"**Target Services:** {_list(state.get('target_services', []))}\n\n"
         "**Blast Radius:**\n"
-        "- **Upstream (depend on the target):** "
+        "- **Upstream (depend on the target, directly or transitively):** "
         f"{_list(state.get('upstream_services', []))}\n"
-        "- **Downstream (called by the target):** "
+        "- **Downstream (called by the target, directly or transitively):** "
         f"{_list(state.get('downstream_services', []))}\n\n"
         f"**Risk Score:** {state.get('risk_score', 0.0):.2f}\n\n"
         f"**Approved:** {'Yes' if state.get('approved') else 'No'}\n\n"

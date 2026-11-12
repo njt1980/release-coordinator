@@ -8,7 +8,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from src.core import config
-from src.core.models import DependencyEdge, DiscoveryStageReport, ServiceNode
+from src.core.models import (
+    DependencyEdge,
+    DiscoveryStageReport,
+    ServiceNode,
+    UnresolvedEntity,
+)
 from src.discovery_engine.graph import discovery_app
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools.baseline_store import (
@@ -97,7 +102,9 @@ class CrawlResults(BaseModel):
 
     Carries the discovered services and dependency edges alongside their
     counts so the frontend can show what was extracted, the outcome of each
-    discovery stage, and which snapshot this is. ``demo_mode`` is true when
+    discovery stage, and which snapshot this is. Service IDs are FQURIs;
+    ``unresolved_entities`` lists endpoints that matched no registered
+    service. ``demo_mode`` is true when
     the baseline relies on mock fixture data rather than real evidence.
     """
 
@@ -107,8 +114,10 @@ class CrawlResults(BaseModel):
     demo_mode: bool
     service_count: int = Field(ge=0)
     edge_count: int = Field(ge=0)
+    unresolved_count: int = Field(ge=0)
     services: list[ServiceNode]
     edges: list[DependencyEdge]
+    unresolved_entities: list[UnresolvedEntity]
     discovery: list[DiscoveryStageReport]
 
 
@@ -233,8 +242,10 @@ def summarize_baseline(baseline: StoredBaseline) -> CrawlResults:
         demo_mode=baseline.demo_mode,
         service_count=len(graph.services),
         edge_count=len(graph.edges),
+        unresolved_count=len(graph.unresolved_entities),
         services=graph.services,
         edges=graph.edges,
+        unresolved_entities=graph.unresolved_entities,
         discovery=graph.discovery or [],
     )
 

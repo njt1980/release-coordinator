@@ -157,6 +157,10 @@ class ScanRepositoryTests(unittest.TestCase):
         self.assertIn("401", result.errors[0])
 
 
+# FQURI prefix of a statically registered service: namespace not yet known.
+UNKNOWN_URN = "urn:release-coord:default:unknown:unknown:unknown"
+
+
 def _devops_state() -> DiscoveryGraphState:
     return {
         "tenant": "default",
@@ -202,7 +206,7 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
             services,
             [
                 ServiceNode(
-                    service_id=name,
+                    service_id=f"{UNKNOWN_URN}:{name}",
                     name=name,
                     metadata={
                         "source": "STATIC_CODE",
@@ -218,9 +222,9 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
         self.assertEqual(
             [(e.source_service_id, e.target_service_id) for e in edges],
             [
-                ("store-front", "order-service"),
-                ("store-front", "product-service"),
-                ("order-service", "rabbitmq"),
+                (f"{UNKNOWN_URN}:store-front", "order-service"),
+                (f"{UNKNOWN_URN}:store-front", "product-service"),
+                (f"{UNKNOWN_URN}:order-service", "rabbitmq"),
             ],
         )
         self.assertEqual({e.provenance for e in edges}, {"azure_devops"})

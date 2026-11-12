@@ -20,7 +20,10 @@ from src.core.models import (
     KnowledgeGraph,
     ServiceNode,
 )
+from src.core.service_ids import unresolved_entity
 from src.tools.baseline_store import BaselineScope, BaselineStore
+
+URN = "urn:release-coord:acme:unknown:unknown:payments"
 
 
 REPORTS = [
@@ -79,15 +82,17 @@ class OnboardingJobTests(unittest.TestCase):
     def test_wrapper_marks_running_then_completed_with_results(self) -> None:
         observed: list[str] = []
 
-        services = [ServiceNode(service_id=name, name=name) for name in "abc"]
+        services = [ServiceNode(service_id=f"{URN}:{name}", name=name) for name in "abc"]
+        external = unresolved_entity("api.stripe.com")
         edges = [
             DependencyEdge(
-                source_service_id="a",
-                target_service_id="b",
+                source_service_id=f"{URN}:a",
+                target_service_id=target,
                 discovery_methods=[DiscoveryMethod.STATIC_CODE],
                 confidence_score=0.5,
                 last_observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
+            for target in [f"{URN}:b", external.entity_id]
         ]
 
         snapshot_ids: list[str] = []
@@ -97,11 +102,18 @@ class OnboardingJobTests(unittest.TestCase):
             scope = BaselineScope(
                 tenant=state["tenant"], project_id=state["project_id"]
             )
-            graph = KnowledgeGraph(services=services, edges=edges, discovery=REPORTS)
+            graph = KnowledgeGraph(
+                services=services,
+                edges=edges,
+                discovery=REPORTS,
+                unresolved_entities=[external],
+            )
             stored = self.store.write(scope, graph)
             snapshot_ids.append(stored.snapshot_id)
             # A concurrent run for the same project lands a newer snapshot.
-            self.store.write(scope, graph.model_copy(update={"services": []}))
+            self.store.write(
+                scope, graph.model_copy(update={"services": services[:2]})
+            )
             return {"baseline_snapshot_id": stored.snapshot_id}
 
         with patch.object(api, "discovery_app", MagicMock(invoke=fake_invoke)):
@@ -119,9 +131,11 @@ class OnboardingJobTests(unittest.TestCase):
                     snapshot_id=snapshot_ids[0],
                     demo_mode=False,
                     service_count=3,
-                    edge_count=1,
+                    edge_count=2,
+                    unresolved_count=1,
                     services=services,
                     edges=edges,
+                    unresolved_entities=[external],
                     discovery=REPORTS,
                 ),
             ),
@@ -194,9 +208,10 @@ class OnboardingJobTests(unittest.TestCase):
         self.assertIn("without writing a baseline snapshot", record.error_message)
 
     def test_latest_baseline_endpoint_exposes_demo_mode(self) -> None:
+        services = [ServiceNode(service_id=f"{URN}:{name}", name=name) for name in "ab"]
         mock_edge = DependencyEdge(
-            source_service_id="a",
-            target_service_id="b",
+            source_service_id=f"{URN}:a",
+            target_service_id=f"{URN}:b",
             discovery_methods=[DiscoveryMethod.RUNTIME_TELEMETRY],
             confidence_score=0.0,
             last_observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -205,7 +220,7 @@ class OnboardingJobTests(unittest.TestCase):
         )
         stored = self.store.write(
             self.scope,
-            KnowledgeGraph(services=[], edges=[mock_edge], discovery=REPORTS),
+            KnowledgeGraph(services=services, edges=[mock_edge], discovery=REPORTS),
         )
 
         results = api.get_latest_baseline("acme", "shop")

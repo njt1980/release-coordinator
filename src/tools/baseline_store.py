@@ -7,6 +7,7 @@ suffix, so concurrent runs never write the same file. Writes go to a hidden
 temporary file that is atomically renamed into place, so readers never see a
 half-written snapshot. Readers pick the newest snapshot that parses and
 records a complete discovery; older good snapshots are never overwritten.
+Every service FQURI in a snapshot must name the snapshot's tenant.
 """
 
 import logging
@@ -56,6 +57,23 @@ class StoredBaseline(BaseModel):
         return self.graph.uses_mock_data
 
 
+def ensure_scope_identities(scope: BaselineScope, graph: KnowledgeGraph) -> None:
+    """Raise unless every service FQURI in ``graph`` belongs to ``scope``'s tenant.
+
+    Raises:
+        ValueError: naming the services whose tenant segment differs.
+    """
+    foreign = [
+        service.service_id
+        for service in graph.services
+        if service.identity.tenant != scope.tenant
+    ]
+    if foreign:
+        raise ValueError(
+            f"services do not belong to tenant {scope.tenant!r}: {foreign}"
+        )
+
+
 def new_snapshot_id(now: datetime | None = None) -> str:
     """Return a sortable, collision-resistant snapshot ID."""
     moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -78,8 +96,11 @@ class BaselineStore:
         Raises:
             DiscoveryIncompleteError: if ``graph`` does not record a complete
                 discovery; nothing is written.
+            ValueError: if a service FQURI names another tenant; nothing is
+                written.
         """
         ensure_complete_baseline(graph)
+        ensure_scope_identities(scope, graph)
         stored = StoredBaseline(scope=scope, snapshot_id=new_snapshot_id(), graph=graph)
         directory = self.project_dir(scope)
         directory.mkdir(parents=True, exist_ok=True)
@@ -110,7 +131,7 @@ class BaselineStore:
             FileNotFoundError: if the snapshot does not exist.
             ValueError: if ``snapshot_id`` is not a single safe path segment.
             pydantic.ValidationError: if the file does not hold a valid
-                knowledge graph.
+                knowledge graph (including pre-FQURI snapshots).
             DiscoveryIncompleteError: if the snapshot's discovery is incomplete.
         """
         if not re.fullmatch(PATH_SEGMENT_PATTERN, snapshot_id):
@@ -118,6 +139,7 @@ class BaselineStore:
         path = self.project_dir(scope) / f"{snapshot_id}{_SNAPSHOT_SUFFIX}"
         graph = KnowledgeGraph.model_validate_json(path.read_text(encoding="utf-8"))
         ensure_complete_baseline(graph)
+        ensure_scope_identities(scope, graph)
         return StoredBaseline(scope=scope, snapshot_id=snapshot_id, graph=graph)
 
     def snapshot_ids(self, scope: BaselineScope) -> list[str]:

@@ -29,10 +29,14 @@ should be deployed.
 
 How to read the dependency graph you are given:
 - Each edge "A -> B" means service A calls / depends on service B.
-- Upstream services depend on the target service (they call it). A breaking
-  change in the target's API, events or data contracts breaks them.
-- Downstream services are called by the target. The target's new code may
-  require them to already be deployed and compatible.
+- Upstream services depend on the target service, directly or transitively
+  (they call it, or call a service that does). A breaking change in the
+  target's API, events or data contracts can break them.
+- Downstream services are called by the target, directly or transitively.
+  The target's new code may require them to already be deployed and
+  compatible.
+- Service IDs are URIs of the form
+  urn:release-coord:{tenant}:{environment}:{cluster}:{namespace}:{name}.
 - Edges carry discovery evidence: STATIC_CODE (referenced in source),
   K8S_MANIFEST, or RUNTIME_TELEMETRY (observed in live traffic). Runtime
   evidence is the strongest signal that a dependency is real and active.
@@ -159,8 +163,10 @@ class RiskReasoner:
             client: Pre-built client (for tests); a default client is created
                 otherwise, resolving credentials from the environment.
         """
-        self._model = model or os.getenv(
-            "RISK_REASONER_MODEL", config.DEFAULT_RISK_REASONER_MODEL
+        self._model: str = (
+            model
+            or os.environ.get("RISK_REASONER_MODEL")
+            or config.DEFAULT_RISK_REASONER_MODEL
         )
         self._client = client or anthropic.Anthropic()
 

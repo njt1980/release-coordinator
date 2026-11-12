@@ -17,7 +17,10 @@ from src.core.models import (
     combine_statuses,
 )
 from src.discovery_engine import nodes as discovery_nodes
+from src.core.service_ids import IdentityContext
 from src.tools.k8s_extractor import KubernetesExtractor
+
+CONTEXT = IdentityContext(tenant="acme")
 
 S = DiscoveryStatus
 
@@ -91,21 +94,27 @@ class KubernetesExtractorResultTests(unittest.TestCase):
         api.list_namespaced_service.return_value = SimpleNamespace(
             items=[_service("orders")]
         )
-        result = _k8s_extractor(api).get_namespace_services("prod")
+        result = _k8s_extractor(api).get_namespace_services("prod", CONTEXT)
         self.assertEqual(result.status, S.SUCCESS)
         self.assertEqual(
-            result.items, [ServiceNode(service_id="prod/orders", name="orders")]
+            result.items,
+            [
+                ServiceNode(
+                    service_id="urn:release-coord:acme:unknown:unknown:prod:orders",
+                    name="orders",
+                )
+            ],
         )
 
     def test_unavailable_client_is_failed(self) -> None:
-        result = _k8s_extractor(None).get_namespace_services("prod")
+        result = _k8s_extractor(None).get_namespace_services("prod", CONTEXT)
         self.assertEqual(result.status, S.FAILED)
 
     def test_list_error_is_failed_not_empty(self) -> None:
         api = MagicMock()
         api.list_namespaced_service.side_effect = RuntimeError("403")
         with self.assertLogs("src.tools.k8s_extractor", level="ERROR"):
-            result = _k8s_extractor(api).get_namespace_services("prod")
+            result = _k8s_extractor(api).get_namespace_services("prod", CONTEXT)
         self.assertEqual(result.status, S.FAILED)
         self.assertIn("403", result.errors[0])
 
@@ -115,7 +124,7 @@ class KubernetesExtractorResultTests(unittest.TestCase):
             items=[_service("orders"), _service(None)]
         )
         with self.assertLogs("src.tools.k8s_extractor", level="WARNING"):
-            result = _k8s_extractor(api).get_namespace_services("prod")
+            result = _k8s_extractor(api).get_namespace_services("prod", CONTEXT)
         self.assertEqual(result.status, S.PARTIAL)
         self.assertEqual(len(result.items), 1)
 
@@ -126,7 +135,7 @@ class DiscoveryStageAggregationTests(unittest.TestCase):
         with patch.object(discovery_nodes, "KubernetesExtractor") as k8s_cls:
             k8s_cls.return_value.get_namespace_services.side_effect = [
                 DiscoveryResult[ServiceNode].success(
-                    [ServiceNode(service_id="a/x", name="x")]
+                    [ServiceNode(service_id=CONTEXT.identity("x", "a").uri, name="x")]
                 ),
                 DiscoveryResult[ServiceNode].failed("b: 403"),
             ]

@@ -1,57 +1,197 @@
-"""Canonical service identifiers shared by services and dependency edges.
+"""Identity resolution: map raw service references onto registered FQURIs.
 
-Kubernetes-discovered services are identified as ``<namespace>/<name>``.
-Static-code and telemetry evidence usually names a service by its DNS
-hostname instead (``order-service``, ``order-service:3000`` or
-``order-service.default.svc.cluster.local``). These helpers map such
-references onto the namespaced form so that edges join to service nodes.
+Every service is identified by a FQURI
+(``urn:release-coord:{tenant}:{environment}:{cluster}:{namespace}:{name}``,
+see ``ServiceIdentity``). Static-code and telemetry evidence name services by
+other means: a DNS hostname (``order-service``, ``order-service:3000`` or
+``order-service.default.svc.cluster.local``), the older ``<namespace>/<name>``
+form, a FQURI with unknown segments, or something that is not a service at
+all (an IP address, an external or private DNS name). These helpers turn a
+reference into a partial identity and resolve it against the inventory.
+A reference resolves only when exactly one registered service matches;
+anything else is classified as an ``UnresolvedEntityKind``.
 """
 
-from collections.abc import Iterable, Mapping
+import ipaddress
+import re
+from collections.abc import Iterable
+from typing import Final
+from urllib.parse import urlsplit
 
-_CLUSTER_DNS_MARKER = "svc"
+from pydantic import BaseModel, Field, ValidationError
+
+from src.core.models import (
+    IDENTITY_SEGMENT_PATTERN,
+    UNKNOWN_LABEL,
+    ServiceIdentity,
+    UnresolvedEntity,
+    UnresolvedEntityKind,
+    unresolved_entity_id,
+)
+
+_CLUSTER_DNS_MARKER: Final[str] = "svc"
+_DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+# Dotted quads, including redacted placeholders such as x.x.x.x.
+_IP_LIKE_PATTERN = re.compile(r"^[0-9x*]{1,3}(?:\.[0-9x*]{1,3}){3}$")
+_PRIVATE_DNS_SUFFIXES: Final[tuple[str, ...]] = (
+    ".internal",
+    ".local",
+    ".localdomain",
+    ".lan",
+    ".corp",
+    ".intranet",
+    ".private",
+    ".home.arpa",
+)
+_PRIVATE_DNS_MARKER: Final[str] = ".privatelink."
 
 
-def build_name_index(service_ids: Iterable[str]) -> dict[str, str]:
-    """Map bare service names to namespaced IDs where the name is unambiguous.
+class IdentityContext(BaseModel):
+    """Identity segments known for the discovery run resolving references.
 
-    Only namespaced IDs (``ns/name``) are indexed; a name that appears in
-    more than one namespace is left out so it is never resolved by guessing.
+    ``default_namespace`` is used for bare names when exactly one namespace
+    was scanned, mirroring how Kubernetes resolves short names in-namespace.
     """
-    candidates: dict[str, set[str]] = {}
-    for service_id in service_ids:
-        namespace, separator, name = service_id.partition("/")
-        if separator and namespace and name:
-            candidates.setdefault(name, set()).add(service_id)
-    return {
-        name: next(iter(ids)) for name, ids in candidates.items() if len(ids) == 1
-    }
+
+    tenant: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
+    environment: str = Field(default=UNKNOWN_LABEL, pattern=IDENTITY_SEGMENT_PATTERN)
+    cluster: str = Field(default=UNKNOWN_LABEL, pattern=IDENTITY_SEGMENT_PATTERN)
+    default_namespace: str | None = None
+
+    def identity(self, service_name: str, namespace: str | None = None) -> ServiceIdentity:
+        """Return the identity of ``service_name`` within this context.
+
+        Raises:
+            pydantic.ValidationError: if a segment is not a valid FQURI segment.
+        """
+        return ServiceIdentity(
+            tenant=self.tenant,
+            environment=self.environment,
+            cluster=self.cluster,
+            namespace=namespace or UNKNOWN_LABEL,
+            service_name=service_name,
+        )
 
 
-def canonical_service_id(
-    raw_id: str,
-    name_index: Mapping[str, str],
-    default_namespace: str | None = None,
-) -> str:
-    """Return the ``<namespace>/<name>`` form of a service reference.
+class IdentityIndex:
+    """Lookup of registered service identities supporting partial queries."""
 
-    Resolution order:
-      1. IDs that are already namespaced are returned unchanged.
-      2. Cluster DNS names (``name.ns.svc[.cluster.local]``) use their namespace.
-      3. Bare names resolve through ``name_index`` (discovered services).
-      4. Bare names fall back to ``default_namespace`` when one is given,
-         mirroring how Kubernetes resolves short names in-namespace.
-    Anything else (for example an external FQDN) is returned unchanged.
+    def __init__(self, identities: Iterable[ServiceIdentity]) -> None:
+        self._identities = list(dict.fromkeys(identities))
+        self._exact = set(self._identities)
+
+    def resolve(self, query: ServiceIdentity) -> ServiceIdentity | None:
+        """Return the single registered identity ``query`` refers to, or None.
+
+        An exact match wins. Otherwise ``unknown`` segments in ``query`` act
+        as wildcards, and the query resolves only if exactly one registered
+        identity matches; ambiguous queries are never resolved by guessing.
+        """
+        if query in self._exact:
+            return query
+        matches = [identity for identity in self._identities if query.matches(identity)]
+        return matches[0] if len(matches) == 1 else None
+
+
+def _host_of(reference: str) -> str:
+    """Return the lower-case host part of a hostname, ``host:port`` or URL."""
+    raw = reference.strip().lower()
+    if "://" in raw:
+        try:
+            return (urlsplit(raw).hostname or "").rstrip(".")
+        except ValueError:
+            return ""
+    raw = raw.split("/", 1)[0]
+    if raw.startswith("["):
+        return raw[1:].split("]", 1)[0]
+    if raw.count(":") > 1:  # bare IPv6 address
+        return raw
+    return raw.split(":", 1)[0].rstrip(".")
+
+
+def _is_ip(host: str) -> bool:
+    if _IP_LIKE_PATTERN.match(host):
+        return True
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def parse_reference(reference: str, context: IdentityContext) -> ServiceIdentity | None:
+    """Return the (possibly partial) identity a raw reference names.
+
+    Accepted forms: a FQURI, ``<namespace>/<name>``, a cluster DNS name
+    (``name.ns.svc[.cluster.local]``, with optional port), or a bare service
+    name (with optional port). Returns None for references that cannot name
+    an in-cluster service, such as IP addresses and other dotted hosts.
     """
-    if "/" in raw_id:
-        return raw_id
-    host = raw_id.strip().lower().split(":", 1)[0]
+    raw = reference.strip()
+    try:
+        return ServiceIdentity.parse(raw)
+    except ValueError:
+        pass
+    namespace, separator, name = raw.lower().partition("/")
+    if separator and _DNS_LABEL_PATTERN.match(namespace) and _DNS_LABEL_PATTERN.match(name):
+        return context.identity(name, namespace)
+    host = _host_of(raw)
+    if not host or _is_ip(host):
+        return None
     labels = host.split(".")
-    if len(labels) >= 3 and labels[2] == _CLUSTER_DNS_MARKER:
-        return f"{labels[1]}/{labels[0]}"
-    if len(labels) == 1 and host:
-        if host in name_index:
-            return name_index[host]
-        if default_namespace:
-            return f"{default_namespace}/{host}"
-    return raw_id
+    try:
+        if len(labels) >= 3 and labels[2] == _CLUSTER_DNS_MARKER:
+            if _DNS_LABEL_PATTERN.match(labels[0]) and _DNS_LABEL_PATTERN.match(labels[1]):
+                return context.identity(labels[0], labels[1])
+            return None
+        if len(labels) == 1 and _DNS_LABEL_PATTERN.match(host):
+            return context.identity(host)
+    except ValidationError:
+        return None
+    return None
+
+
+def resolve_reference(
+    reference: str, index: IdentityIndex, context: IdentityContext
+) -> ServiceIdentity | None:
+    """Resolve a raw reference to exactly one registered identity, or None.
+
+    A name whose namespace is unknown falls back to ``default_namespace``
+    when matching across all namespaces is not unique.
+    """
+    query = parse_reference(reference, context)
+    if query is None:
+        return None
+    resolved = index.resolve(query)
+    if (
+        resolved is None
+        and query.namespace == UNKNOWN_LABEL
+        and context.default_namespace
+    ):
+        resolved = index.resolve(
+            query.model_copy(update={"namespace": context.default_namespace})
+        )
+    return resolved
+
+
+def classify_unresolved(reference: str) -> UnresolvedEntityKind:
+    """Classify why ``reference`` is not a registered service."""
+    host = _host_of(reference)
+    if host and _is_ip(host):
+        return UnresolvedEntityKind.IP_ADDRESS
+    labels = host.split(".")
+    if "." not in host or (len(labels) >= 3 and labels[2] == _CLUSTER_DNS_MARKER):
+        return UnresolvedEntityKind.UNREGISTERED_SERVICE
+    if host.endswith(_PRIVATE_DNS_SUFFIXES) or _PRIVATE_DNS_MARKER in f".{host}":
+        return UnresolvedEntityKind.PRIVATE_DNS
+    return UnresolvedEntityKind.EXTERNAL_DNS
+
+
+def unresolved_entity(reference: str) -> UnresolvedEntity:
+    """Build the unresolved-entity node for a raw reference."""
+    normalized = reference.strip().lower()
+    return UnresolvedEntity(
+        entity_id=unresolved_entity_id(normalized),
+        reference=normalized,
+        kind=classify_unresolved(normalized),
+    )

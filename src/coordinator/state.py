@@ -19,8 +19,12 @@ class ReleaseGraphState(TypedDict, total=False):
     ``tenant`` and ``project_id`` select the baseline to load (both default
     to ``default``); ``baseline_snapshot_id`` and ``baseline_demo_mode``
     record which snapshot was used and whether it relies on mock data.
+    ``target_services`` are FQURIs; the radius node replaces them with the
+    registered FQURIs they resolve to. ``upstream_services`` and
+    ``downstream_services`` hold the full transitive radius, nearest first.
     ``discovery_issues`` lists every reason the dependency evidence may be
-    incomplete; any entry rejects the release without calling the LLM.
+    incomplete, including unresolved dependencies in the radius; any entry
+    rejects the release without calling the LLM.
     """
 
     trigger_event: Required[dict[str, object]]

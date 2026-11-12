@@ -12,25 +12,36 @@ from pydantic import ValidationError
 
 from src.coordinator import nodes as coordinator_nodes
 from src.core.models import (
+    UNRESOLVED_ID_PREFIX,
     DependencyEdge,
     DiscoveryIncompleteError,
     DiscoveryMethod,
     DiscoveryStageReport,
     DiscoveryStatus,
     KnowledgeGraph,
+    PullRequestPayload,
     ServiceNode,
+    UnresolvedEntity,
 )
+from src.core.service_ids import unresolved_entity
 from src.discovery_engine import nodes as discovery_nodes
 from src.tools.baseline_store import BaselineScope, BaselineStore
 
 COMPLETE = {DiscoveryStatus.SUCCESS, DiscoveryStatus.SKIPPED}
 SCOPE = BaselineScope(tenant="acme", project_id="shop")
+URN = "urn:release-coord:acme:unknown:unknown:shop"
+TARGET = f"{URN}:payment-service"
+
+
+def _id(node: str) -> str:
+    """Return the FQURI for a service name; unresolved IDs pass through."""
+    return node if node.startswith(UNRESOLVED_ID_PREFIX) else f"{URN}:{node}"
 
 
 def _edge(source: str, target: str, provenance: str = "azure_devops") -> DependencyEdge:
     return DependencyEdge(
-        source_service_id=source,
-        target_service_id=target,
+        source_service_id=_id(source),
+        target_service_id=_id(target),
         discovery_methods=[DiscoveryMethod.STATIC_CODE],
         confidence_score=0.0 if provenance == "mock_fixture" else 0.7,
         last_observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -73,14 +84,27 @@ class _StoreTestCase(unittest.TestCase):
         edges: list[DependencyEdge],
         reports: list[DiscoveryStageReport] | None = None,
         scope: BaselineScope = SCOPE,
+        unresolved: list[UnresolvedEntity] | None = None,
     ) -> str:
+        """Persist ``edges``, registering every non-unresolved endpoint."""
+        entities = unresolved or []
+        entity_ids = {entity.entity_id for entity in entities}
+        service_ids = [TARGET]
+        for edge in edges:
+            for node in (edge.source_service_id, edge.target_service_id):
+                if node not in entity_ids and node not in service_ids:
+                    service_ids.append(node)
         state: Any = {
             "tenant": scope.tenant,
             "project_id": scope.project_id,
             "discovery_reports": _reports() if reports is None else reports,
             "reconciled_graph": {
-                "services": [ServiceNode(service_id="payment-service", name="Payment")],
+                "services": [
+                    ServiceNode(service_id=service_id, name=service_id.rsplit(":", 1)[1])
+                    for service_id in service_ids
+                ],
                 "edges": edges,
+                "unresolved_entities": entities,
             },
         }
         result = discovery_nodes.persist_to_graph_db(state)
@@ -99,7 +123,7 @@ class BaselinePersistenceTests(_StoreTestCase):
 
         path = self.root / "acme" / "shop" / f"{snapshot_id}.json"
         data = json.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual(data["services"][0]["service_id"], "payment-service")
+        self.assertEqual(data["services"][0]["service_id"], TARGET)
         self.assertEqual(data["edges"][0]["discovery_methods"], ["STATIC_CODE"])
         self.assertEqual(data["edges"][0]["provenance"], "azure_devops")
         self.assertEqual(
@@ -134,7 +158,7 @@ class BaselinePersistenceTests(_StoreTestCase):
 
         latest = self.store.latest(other)
         assert latest is not None
-        self.assertEqual(latest.graph.edges[0].source_service_id, "x")
+        self.assertEqual(latest.graph.edges[0].source_service_id, _id("x"))
         self.assertEqual(len(self._snapshot_files()), 1)
 
     def test_persist_refuses_baseline_when_a_stage_is_incomplete(self) -> None:
@@ -188,13 +212,42 @@ class BaselinePersistenceTests(_StoreTestCase):
         (directory / "99990101T000000000000Z-garbage.json").write_text(
             "{not json", encoding="utf-8"
         )
+        complete = [r.model_dump(mode="json") for r in _reports()]
+        pre_fquri = {
+            "services": [{"service_id": "shop/a", "name": "a"}],
+            "edges": [],
+            "discovery": complete,
+        }
+        (directory / "99990101T000000000000Z-prefqur.json").write_text(
+            json.dumps(pre_fquri), encoding="utf-8"
+        )
+        other_tenant = {
+            "services": [
+                {"service_id": "urn:release-coord:evil:unknown:unknown:shop:a", "name": "a"}
+            ],
+            "edges": [],
+            "discovery": complete,
+        }
+        (directory / "99990101T000000000000Z-tenant0.json").write_text(
+            json.dumps(other_tenant), encoding="utf-8"
+        )
 
         with self.assertLogs("src.tools.baseline_store", level="WARNING") as logs:
             latest = self.store.latest(SCOPE)
 
         assert latest is not None
         self.assertEqual(latest.snapshot_id, good)
-        self.assertEqual(len(logs.records), 3)
+        self.assertEqual(len(logs.records), 5)
+
+    def test_store_refuses_services_from_another_tenant(self) -> None:
+        graph = KnowledgeGraph(
+            services=[ServiceNode(service_id=TARGET, name="payment-service")],
+            edges=[],
+            discovery=_reports(),
+        )
+        with self.assertRaises(ValueError):
+            self.store.write(BaselineScope(tenant="other", project_id="shop"), graph)
+        self.assertEqual(list(self.root.rglob("*.json")), [])
 
     def test_latest_ignores_in_progress_temp_files(self) -> None:
         directory = self.root / "acme" / "shop"
@@ -223,11 +276,13 @@ class BaselinePersistenceTests(_StoreTestCase):
 
 
 class StaticRadiusTests(_StoreTestCase):
-    def _radius(self, scope: BaselineScope = SCOPE) -> dict[str, object]:
+    def _radius(
+        self, scope: BaselineScope = SCOPE, target: str = TARGET
+    ) -> dict[str, object]:
         state: Any = {
             "tenant": scope.tenant,
             "project_id": scope.project_id,
-            "target_services": ["payment-service"],
+            "target_services": [target],
         }
         return coordinator_nodes.calculate_static_radius_node(state)
 
@@ -237,21 +292,194 @@ class StaticRadiusTests(_StoreTestCase):
                 _edge("api-gateway", "payment-service"),
                 _edge("payment-service", "ledger-service"),
                 _edge("order-service", "payment-service"),
-                _edge("api-gateway", "payment-service"),
                 _edge("order-service", "inventory-service"),
             ]
         )
 
         result = self._radius()
 
-        self.assertEqual(result["upstream_services"], ["api-gateway", "order-service"])
-        self.assertEqual(result["downstream_services"], ["ledger-service"])
+        self.assertEqual(
+            result["upstream_services"], [_id("api-gateway"), _id("order-service")]
+        )
+        self.assertEqual(result["downstream_services"], [_id("ledger-service")])
         matched = result["matched_edges"]
         assert isinstance(matched, list)
-        self.assertEqual(len(matched), 4)
+        self.assertEqual(len(matched), 3)
         self.assertEqual(result["discovery_issues"], [])
         self.assertEqual(result["baseline_snapshot_id"], snapshot_id)
         self.assertFalse(result["baseline_demo_mode"])
+
+    def test_static_radius_is_fully_transitive(self) -> None:
+        self._persist(
+            [
+                _edge("web", "api-gateway"),
+                _edge("api-gateway", "checkout"),
+                _edge("checkout", "payment-service"),
+                _edge("payment-service", "ledger-service"),
+                _edge("ledger-service", "postgres"),
+                _edge("postgres", "backup-agent"),
+                _edge("reporting", "inventory"),  # not connected to the target
+            ]
+        )
+
+        result = self._radius()
+
+        self.assertEqual(
+            result["upstream_services"],
+            [_id("checkout"), _id("api-gateway"), _id("web")],
+        )
+        self.assertEqual(
+            result["downstream_services"],
+            [_id("ledger-service"), _id("postgres"), _id("backup-agent")],
+        )
+        matched = result["matched_edges"]
+        assert isinstance(matched, list)
+        self.assertEqual(len(matched), 6)
+        self.assertNotIn(_id("reporting"), [e.source_service_id for e in matched])
+        self.assertEqual(result["discovery_issues"], [])
+
+    def test_static_radius_terminates_on_cycles(self) -> None:
+        self._persist(
+            [
+                _edge("payment-service", "ledger-service"),
+                _edge("ledger-service", "fraud-check"),
+                _edge("fraud-check", "payment-service"),  # cycle through target
+                _edge("fraud-check", "ledger-service"),  # inner cycle
+                _edge("x", "y"),
+                _edge("y", "x"),  # disconnected cycle
+            ]
+        )
+
+        result = self._radius()
+
+        self.assertEqual(
+            result["downstream_services"], [_id("ledger-service"), _id("fraud-check")]
+        )
+        self.assertEqual(
+            result["upstream_services"], [_id("fraud-check"), _id("ledger-service")]
+        )
+        matched = result["matched_edges"]
+        assert isinstance(matched, list)
+        keys = [(e.source_service_id, e.target_service_id) for e in matched]
+        self.assertEqual(len(keys), 4)
+        self.assertEqual(len(set(keys)), 4)
+        self.assertEqual(result["discovery_issues"], [])
+
+    def test_unresolved_entity_deep_downstream_is_a_discovery_issue(self) -> None:
+        database = unresolved_entity("10.0.0.12:5432")
+        self._persist(
+            [
+                _edge("payment-service", "ledger-service"),
+                _edge("ledger-service", database.entity_id),
+            ],
+            unresolved=[database],
+        )
+
+        result = self._radius()
+
+        self.assertEqual(result["downstream_services"], [_id("ledger-service")])
+        self.assertEqual(
+            result["discovery_issues"],
+            [
+                "Unresolved dependency in critical path: unresolved:10.0.0.12:5432 "
+                f"(IP_ADDRESS) is downstream of the release via {TARGET} -> "
+                f"{_id('ledger-service')} -> unresolved:10.0.0.12:5432"
+            ],
+        )
+
+    def test_unresolved_entity_upstream_is_a_discovery_issue(self) -> None:
+        caller = unresolved_entity("legacy-batch")
+        self._persist(
+            [
+                _edge(caller.entity_id, "checkout"),
+                _edge("checkout", "payment-service"),
+            ],
+            unresolved=[caller],
+        )
+
+        issues = self._radius()["discovery_issues"]
+
+        assert isinstance(issues, list)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("unresolved:legacy-batch (UNREGISTERED_SERVICE)", issues[0])
+        self.assertIn(
+            f"upstream of the release via unresolved:legacy-batch -> "
+            f"{_id('checkout')} -> {TARGET}",
+            issues[0],
+        )
+
+    def test_unresolved_entity_outside_radius_is_ignored(self) -> None:
+        external = unresolved_entity("api.stripe.com")
+        self._persist(
+            [
+                _edge("payment-service", "ledger-service"),
+                _edge("reporting", external.entity_id),
+            ],
+            unresolved=[external],
+        )
+        self.assertEqual(self._radius()["discovery_issues"], [])
+
+    def test_unresolved_dependency_rejects_release_without_llm(self) -> None:
+        external = unresolved_entity("vault.corp.internal")
+        self._persist(
+            [
+                _edge("checkout", "payment-service"),
+                _edge("payment-service", external.entity_id),
+            ],
+            unresolved=[external],
+        )
+        pull_request = PullRequestPayload(
+            pr_id="PR-9", title="t", target_service=TARGET, diff="d"
+        )
+        state: Any = {
+            "tenant": "acme",
+            "project_id": "shop",
+            "workspace_id": "",
+            "pull_request": pull_request,
+            "target_services": [TARGET],
+        }
+        state.update(coordinator_nodes.calculate_static_radius_node(state))
+        state.update(coordinator_nodes.validate_runtime_telemetry_node(state))
+        with patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls:
+            state.update(coordinator_nodes.assess_risk_and_sequence_node(state))
+        reasoner_cls.assert_not_called()
+
+        assessment = coordinator_nodes.compile_evidence_node(state)["release_assessment"]
+
+        self.assertFalse(assessment.approved)
+        self.assertEqual(assessment.risk_score, 1.0)
+        self.assertIn(
+            "Unresolved dependency in critical path: unresolved:vault.corp.internal "
+            "(PRIVATE_DNS)",
+            assessment.justification,
+        )
+        self.assertEqual(assessment.deployment_sequence, [TARGET, _id("checkout")])
+
+    def test_target_with_unknown_segments_resolves_to_registered_fquri(self) -> None:
+        self._persist([_edge("api-gateway", "payment-service")])
+
+        result = self._radius(
+            target="urn:release-coord:acme:unknown:unknown:unknown:payment-service"
+        )
+
+        self.assertEqual(result["target_services"], [TARGET])
+        self.assertEqual(result["upstream_services"], [_id("api-gateway")])
+        self.assertEqual(result["discovery_issues"], [])
+
+    def test_unregistered_target_is_a_discovery_issue(self) -> None:
+        self._persist([_edge("api-gateway", "payment-service")])
+
+        ghost = f"{URN}:ghost-service"
+        result = self._radius(target=ghost)
+
+        self.assertEqual(result["target_services"], [ghost])
+        self.assertEqual(
+            result["discovery_issues"],
+            [
+                f"Unresolved dependency in critical path: target {ghost} does not "
+                "match exactly one registered service in the baseline"
+            ],
+        )
 
     def test_static_radius_uses_latest_good_snapshot_after_failed_run(self) -> None:
         self._persist([_edge("api-gateway", "payment-service")])
@@ -260,7 +488,7 @@ class StaticRadiusTests(_StoreTestCase):
 
         result = self._radius()
 
-        self.assertEqual(result["upstream_services"], ["api-gateway"])
+        self.assertEqual(result["upstream_services"], [_id("api-gateway")])
         self.assertEqual(result["discovery_issues"], [])
 
     def test_static_radius_reports_demo_mode(self) -> None:

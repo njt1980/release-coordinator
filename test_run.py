@@ -13,7 +13,8 @@ from src.coordinator.state import ReleaseGraphState
 MOCK_PULL_REQUEST: dict[str, object] = {
     "pr_id": "PR-2048",
     "title": "Require customerId on POST /order and persist order priority",
-    "target_service": "default/order-service",
+    # FQURI; unknown environment/cluster segments match any registered value.
+    "target_service": "urn:release-coord:default:unknown:unknown:default:order-service",
     "source_branch": "feature/order-priority",
     "target_branch": "main",
     "description": (

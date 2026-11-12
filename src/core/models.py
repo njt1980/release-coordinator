@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, Final, Generic, List, Literal, Optional, Self, TypeVar
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 T = TypeVar("T")
@@ -108,14 +108,170 @@ class DiscoveryStageReport(BaseModel):
     errors: List[str] = Field(default_factory=list)
 
 
+MOCK_FIXTURE_PROVENANCE: Final[str] = "mock_fixture"
+UNKNOWN_LABEL: Final[str] = "unknown"
+LABEL_SEPARATOR: Final[str] = ","
+
+FQURI_PREFIX: Final[str] = "urn:release-coord"
+# One FQURI segment: no colons, so the URI splits unambiguously.
+IDENTITY_SEGMENT_PATTERN: Final[str] = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+_FQURI_SEGMENT_COUNT: Final[int] = 5
+
+
+class ServiceIdentity(BaseModel, frozen=True):
+    """Fully qualified identity of a service.
+
+    Rendered as the FQURI
+    ``urn:release-coord:{tenant}:{environment}:{cluster}:{namespace}:{service_name}``.
+    Segments that discovery could not determine (for example environment and
+    cluster during static extraction) are ``unknown``; an identity with
+    unknown segments can still be used as a query that matches any value in
+    those positions (see ``matches``).
+    """
+
+    tenant: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
+    environment: str = Field(default=UNKNOWN_LABEL, pattern=IDENTITY_SEGMENT_PATTERN)
+    cluster: str = Field(default=UNKNOWN_LABEL, pattern=IDENTITY_SEGMENT_PATTERN)
+    namespace: str = Field(default=UNKNOWN_LABEL, pattern=IDENTITY_SEGMENT_PATTERN)
+    service_name: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
+
+    @property
+    def uri(self) -> str:
+        """Return the FQURI form of this identity."""
+        return ":".join(
+            [
+                FQURI_PREFIX,
+                self.tenant,
+                self.environment,
+                self.cluster,
+                self.namespace,
+                self.service_name,
+            ]
+        )
+
+    @classmethod
+    def parse(cls, uri: str) -> Self:
+        """Parse a FQURI.
+
+        Raises:
+            ValueError: if ``uri`` is not a well-formed FQURI (a pydantic
+                ValidationError, itself a ValueError, for invalid segments).
+        """
+        prefix = f"{FQURI_PREFIX}:"
+        if not uri.startswith(prefix):
+            raise ValueError(f"not a {FQURI_PREFIX} URI: {uri!r}")
+        segments = uri[len(prefix) :].split(":")
+        if len(segments) != _FQURI_SEGMENT_COUNT:
+            raise ValueError(
+                f"FQURI must have {_FQURI_SEGMENT_COUNT} segments after the "
+                f"prefix: {uri!r}"
+            )
+        tenant, environment, cluster, namespace, service_name = segments
+        return cls(
+            tenant=tenant,
+            environment=environment,
+            cluster=cluster,
+            namespace=namespace,
+            service_name=service_name,
+        )
+
+    def matches(self, candidate: "ServiceIdentity") -> bool:
+        """Whether ``candidate`` fits this identity used as a query.
+
+        Tenant and service name must be equal. Environment, cluster and
+        namespace must be equal unless this identity leaves them unknown.
+        """
+        if (self.tenant, self.service_name) != (
+            candidate.tenant,
+            candidate.service_name,
+        ):
+            return False
+        return all(
+            mine == UNKNOWN_LABEL or mine == theirs
+            for mine, theirs in [
+                (self.environment, candidate.environment),
+                (self.cluster, candidate.cluster),
+                (self.namespace, candidate.namespace),
+            ]
+        )
+
+
+def is_fquri(value: str) -> bool:
+    """Whether ``value`` is a well-formed service FQURI."""
+    try:
+        ServiceIdentity.parse(value)
+    except ValueError:
+        return False
+    return True
+
+
 class ServiceNode(BaseModel):
-    """A microservice node and its identifying metadata in the dependency graph."""
+    """A microservice node and its identifying metadata in the dependency graph.
+
+    ``service_id`` is the service's FQURI (see ``ServiceIdentity``).
+    """
 
     service_id: str
     name: str
     repository_url: Optional[str] = None
     criticality_tier: int = 3
     metadata: Dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("service_id")
+    @classmethod
+    def _require_fquri(cls, value: str) -> str:
+        ServiceIdentity.parse(value)
+        return value
+
+    @property
+    def identity(self) -> ServiceIdentity:
+        """Return the parsed identity of this service."""
+        return ServiceIdentity.parse(self.service_id)
+
+
+class UnresolvedEntityKind(str, Enum):
+    """Why a discovered endpoint could not be mapped to a registered service.
+
+    IP_ADDRESS: the endpoint is an IP address.
+    PRIVATE_DNS: a private or internal DNS name outside the cluster.
+    EXTERNAL_DNS: a public DNS name.
+    UNREGISTERED_SERVICE: looks like a service name, but no registered
+        service in the inventory matches it (exactly one match is required).
+    """
+
+    IP_ADDRESS = "IP_ADDRESS"
+    PRIVATE_DNS = "PRIVATE_DNS"
+    EXTERNAL_DNS = "EXTERNAL_DNS"
+    UNREGISTERED_SERVICE = "UNREGISTERED_SERVICE"
+
+
+UNRESOLVED_ID_PREFIX: Final[str] = "unresolved:"
+
+
+class UnresolvedEntity(BaseModel):
+    """A dependency endpoint that does not map to a registered service.
+
+    Edges point at ``entity_id`` (``unresolved:<reference>``), which can
+    never collide with a service FQURI. ``reference`` is the endpoint as it
+    was discovered, normalized to lower case.
+    """
+
+    entity_id: str = Field(min_length=len(UNRESOLVED_ID_PREFIX) + 1)
+    reference: str = Field(min_length=1)
+    kind: UnresolvedEntityKind
+
+    @model_validator(mode="after")
+    def _id_matches_reference(self) -> Self:
+        if self.entity_id != unresolved_entity_id(self.reference):
+            raise ValueError(
+                f"entity_id must be {UNRESOLVED_ID_PREFIX!r} + reference"
+            )
+        return self
+
+
+def unresolved_entity_id(reference: str) -> str:
+    """Return the node ID used for an unresolved ``reference``."""
+    return f"{UNRESOLVED_ID_PREFIX}{reference}"
 
 
 class DeploymentContext(BaseModel):
@@ -167,11 +323,6 @@ class DiscoveryIncompleteError(RuntimeError):
         self.problems = problems
 
 
-MOCK_FIXTURE_PROVENANCE: Final[str] = "mock_fixture"
-UNKNOWN_LABEL: Final[str] = "unknown"
-LABEL_SEPARATOR: Final[str] = ","
-
-
 class DependencyEdge(BaseModel):
     """A directed, evidence-backed relationship between two service nodes.
 
@@ -206,6 +357,9 @@ class DependencyEdge(BaseModel):
 class KnowledgeGraph(BaseModel):
     """Shape of one persisted discovery baseline snapshot.
 
+    Every edge endpoint is either a registered service's FQURI or the ID of
+    an ``UnresolvedEntity``; snapshots that break this (including those
+    written with the older ``<namespace>/<name>`` IDs) fail validation.
     ``discovery`` is None for graphs written before discovery outcomes were
     recorded; such a graph cannot prove its discovery was complete.
     """
@@ -213,6 +367,31 @@ class KnowledgeGraph(BaseModel):
     services: List[ServiceNode]
     edges: List[DependencyEdge]
     discovery: Optional[List[DiscoveryStageReport]] = None
+    unresolved_entities: List[UnresolvedEntity] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _edges_join_to_nodes(self) -> Self:
+        service_ids = [service.service_id for service in self.services]
+        entity_ids = [entity.entity_id for entity in self.unresolved_entities]
+        if len(set(service_ids)) != len(service_ids):
+            raise ValueError("service IDs must be unique")
+        if len(set(entity_ids)) != len(entity_ids):
+            raise ValueError("unresolved entity IDs must be unique")
+        nodes = {*service_ids, *entity_ids}
+        dangling = sorted(
+            {
+                endpoint
+                for edge in self.edges
+                for endpoint in (edge.source_service_id, edge.target_service_id)
+                if endpoint not in nodes
+            }
+        )
+        if dangling:
+            raise ValueError(
+                "edge endpoints must be a registered service or an unresolved "
+                f"entity: {dangling}"
+            )
+        return self
 
     @property
     def uses_mock_data(self) -> bool:
@@ -237,7 +416,11 @@ def ensure_complete_baseline(graph: KnowledgeGraph) -> None:
 
 
 class PullRequestPayload(BaseModel):
-    """A pull request that triggers a release impact assessment."""
+    """A pull request that triggers a release impact assessment.
+
+    ``target_service`` is a FQURI; segments left ``unknown`` act as
+    wildcards when the target is resolved against the baseline inventory.
+    """
 
     pr_id: str = Field(min_length=1)
     title: str = Field(min_length=1)
@@ -246,6 +429,12 @@ class PullRequestPayload(BaseModel):
     target_branch: str = "main"
     description: str = ""
     diff: str = Field(min_length=1)
+
+    @field_validator("target_service")
+    @classmethod
+    def _target_is_fquri(cls, value: str) -> str:
+        ServiceIdentity.parse(value)
+        return value
 
 
 class TelemetryStatus(BaseModel):
