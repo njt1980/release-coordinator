@@ -1,13 +1,16 @@
 """Tests for in-memory discovery job tracking and the status endpoint."""
 
 import asyncio
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from fastapi import BackgroundTasks, HTTPException
 
 from src import api
-from src.api import JobRecord, OnboardingPayload
+from src.api import CrawlResults, JobRecord, OnboardingPayload
 
 
 class OnboardingJobTests(unittest.TestCase):
@@ -15,6 +18,15 @@ class OnboardingJobTests(unittest.TestCase):
         jobs_patch = patch.dict(api._jobs, clear=True)
         jobs_patch.start()
         self.addCleanup(jobs_patch.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.graph_path = Path(tmp.name) / "knowledge_graph.json"
+        path_patch = patch.object(api, "KNOWLEDGE_GRAPH_PATH", self.graph_path)
+        path_patch.start()
+        self.addCleanup(path_patch.stop)
+
+    def _write_graph(self, graph: object) -> None:
+        self.graph_path.write_text(json.dumps(graph), encoding="utf-8")
 
     def _state(self) -> api.DiscoveryGraphState:
         return api.build_discovery_state(
@@ -33,11 +45,14 @@ class OnboardingJobTests(unittest.TestCase):
         self.assertIs(tasks.tasks[0].func, api.run_discovery_job)
         self.assertEqual(tasks.tasks[0].args[0], response.job_id)
 
-    def test_wrapper_marks_running_then_completed(self) -> None:
+    def test_wrapper_marks_running_then_completed_with_results(self) -> None:
         observed: list[str] = []
 
         def fake_invoke(state: api.DiscoveryGraphState) -> dict[str, object]:
             observed.append(api._jobs["job-1"].status)
+            self._write_graph(
+                {"services": [{"id": "a"}, {"id": "b"}, {"id": "c"}], "edges": [{}]}
+            )
             return {}
 
         with patch.object(api, "discovery_app", MagicMock(invoke=fake_invoke)):
@@ -45,8 +60,30 @@ class OnboardingJobTests(unittest.TestCase):
 
         self.assertEqual(observed, ["running"])
         self.assertEqual(
-            api._jobs["job-1"], JobRecord(job_id="job-1", status="completed")
+            api._jobs["job-1"],
+            JobRecord(
+                job_id="job-1",
+                status="completed",
+                results=CrawlResults(service_count=3, edge_count=1),
+            ),
         )
+
+    def test_wrapper_fails_when_graph_file_missing(self) -> None:
+        with patch.object(api, "discovery_app", MagicMock()):
+            asyncio.run(api.run_discovery_job("job-4", self._state()))
+
+        record = api._jobs["job-4"]
+        self.assertEqual(record.status, "failed")
+        self.assertIsNone(record.results)
+        self.assertTrue(record.error_message)
+
+    def test_wrapper_fails_when_graph_file_malformed(self) -> None:
+        self._write_graph({"services": []})
+        with patch.object(api, "discovery_app", MagicMock()):
+            asyncio.run(api.run_discovery_job("job-5", self._state()))
+
+        self.assertEqual(api._jobs["job-5"].status, "failed")
+        self.assertIsNone(api._jobs["job-5"].results)
 
     def test_wrapper_records_failure_message(self) -> None:
         failing = MagicMock(invoke=MagicMock(side_effect=RuntimeError("boom")))

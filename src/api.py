@@ -1,6 +1,7 @@
 """FastAPI boundary that lets a frontend trigger the Day-Zero discovery engine."""
 
-from typing import Literal, Self
+import json
+from typing import Any, Literal, Self
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, status
@@ -8,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from src.discovery_engine.graph import discovery_app
+from src.discovery_engine.nodes import KNOWLEDGE_GRAPH_PATH
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
@@ -77,12 +79,27 @@ class OnboardingResponse(BaseModel):
 JobStatus = Literal["queued", "running", "completed", "failed"]
 
 
+class CrawlResults(BaseModel):
+    """Summary of the knowledge graph produced by a completed discovery run."""
+
+    service_count: int = Field(ge=0)
+    edge_count: int = Field(ge=0)
+
+
+class PersistedGraph(BaseModel):
+    """Shape of ``knowledge_graph.json`` needed to summarize a run."""
+
+    services: list[Any]
+    edges: list[Any]
+
+
 class JobRecord(BaseModel):
     """Current state of one scheduled discovery run."""
 
     job_id: str
     status: JobStatus
     error_message: str | None = None
+    results: CrawlResults | None = None
 
 
 # In-memory job registry. Records are lost when the server restarts. Only
@@ -183,21 +200,40 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
     }
 
 
+def summarize_knowledge_graph() -> CrawlResults:
+    """Count the services and dependency edges in the persisted knowledge graph.
+
+    Raises if the file is missing or does not contain ``services`` and
+    ``edges`` lists, so a run without a readable graph is not reported as
+    completed.
+    """
+    raw_graph = json.loads(KNOWLEDGE_GRAPH_PATH.read_text(encoding="utf-8"))
+    graph = PersistedGraph.model_validate(raw_graph)
+    return CrawlResults(service_count=len(graph.services), edge_count=len(graph.edges))
+
+
+def execute_discovery(state: DiscoveryGraphState) -> CrawlResults:
+    """Run the discovery graph to completion and summarize what it persisted."""
+    discovery_app.invoke(state)
+    return summarize_knowledge_graph()
+
+
 async def run_discovery_job(job_id: str, state: DiscoveryGraphState) -> None:
     """Run the discovery graph for one job and record its outcome.
 
-    The synchronous graph runs in the thread pool so the event loop stays free
-    to answer status polls while the crawl is in progress.
+    The synchronous graph and the graph file read run in the thread pool so
+    the event loop stays free to answer status polls while the crawl is in
+    progress.
     """
     _jobs[job_id] = JobRecord(job_id=job_id, status="running")
     try:
-        await run_in_threadpool(discovery_app.invoke, state)
+        results = await run_in_threadpool(execute_discovery, state)
     except Exception as error:
         _jobs[job_id] = JobRecord(
             job_id=job_id, status="failed", error_message=str(error) or repr(error)
         )
     else:
-        _jobs[job_id] = JobRecord(job_id=job_id, status="completed")
+        _jobs[job_id] = JobRecord(job_id=job_id, status="completed", results=results)
 
 
 @app.post(

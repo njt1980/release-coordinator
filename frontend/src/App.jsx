@@ -104,6 +104,9 @@ const BANNER_STYLES = {
 const jobBanner = (job) => {
   switch (job.status) {
     case "completed":
+      if (job.results) {
+        return { tone: "success", summary: job.results, text: "" };
+      }
       return { tone: "success", text: `Discovery run completed. Job ID: ${job.job_id}` };
     case "failed":
       return {
@@ -125,6 +128,25 @@ function Spinner() {
       aria-hidden="true"
       className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"
     />
+  );
+}
+
+// Shown in place of the status banner once a discovery run has completed.
+function CrawlSummary({ results }) {
+  return (
+    <section
+      role="status"
+      aria-labelledby="crawl-summary-heading"
+      className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-green-900"
+    >
+      <h2 id="crawl-summary-heading" className="text-sm font-semibold">
+        Crawl Summary
+      </h2>
+      <p className="mt-1 text-sm">
+        Baseline Established. Discovered {results.service_count} Services and{" "}
+        {results.edge_count} Dependencies. The Release Coordinator is now active.
+      </p>
+    </section>
   );
 }
 
@@ -340,7 +362,8 @@ export default function App() {
       <footer className="fixed inset-x-0 bottom-0 border-t border-slate-200 bg-white/95 shadow-lg backdrop-blur">
         <div className="mx-auto max-w-3xl space-y-3 px-4 py-4">
           <div aria-live="polite" className="max-h-48 space-y-2 overflow-y-auto">
-            {crawlMessage && (
+            {crawlMessage?.summary && <CrawlSummary results={crawlMessage.summary} />}
+            {crawlMessage && !crawlMessage.summary && (
               <p
                 role={crawlMessage.tone === "error" ? "alert" : "status"}
                 className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ${
