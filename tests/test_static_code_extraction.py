@@ -8,11 +8,19 @@ from src.core.models import (
     DiscoveryStageReport,
     DiscoveryStatus,
     ServiceNode,
+    UnresolvedEntityKind,
 )
 from src.discovery_engine import nodes as discovery_nodes
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools import devops_extractor
-from src.tools.devops_extractor import DevOpsExtractor, EndpointReference
+from src.tools.devops_extractor import (
+    BoundarySource,
+    DevOpsExtractor,
+    EndpointReference,
+    ReferenceKind,
+    ServiceBoundary,
+    ServiceScan,
+)
 
 
 class ScannablePathTests(unittest.TestCase):
@@ -44,22 +52,77 @@ class ScannablePathTests(unittest.TestCase):
                 self.assertFalse(devops_extractor._is_scannable_path(path))
 
 
-class ServiceNameFromPathTests(unittest.TestCase):
-    def test_files_under_a_service_directory_map_to_that_service(self) -> None:
-        for path, expected in [
-            ("/src/order-service/routes/root.js", "order-service"),
-            ("/services/Payments/app.py", "payments"),
-            ("/src/makeline-service/main.go", "makeline-service"),
-        ]:
-            with self.subTest(path=path):
-                self.assertEqual(
-                    devops_extractor._service_name_from_path(path), expected
-                )
+class ReleaseCoordManifestTests(unittest.TestCase):
+    def test_valid_manifest_normalizes_roots(self) -> None:
+        manifest = devops_extractor.parse_release_coord_manifest(
+            "services:\n"
+            "  - name: payments\n"
+            "    root: /services/payments-api/\n"
+            "  - name: gateway\n"
+            "    root: ./edge/\n"
+            "  - name: worker\n"
+        )
+        self.assertEqual(
+            [(s.name, s.root) for s in manifest.services],
+            [("payments", "services/payments-api"), ("gateway", "edge"), ("worker", "")],
+        )
 
-    def test_files_outside_service_directories_have_no_service(self) -> None:
-        for path in ["/config.yaml", "/charts/values.yaml", "/src/app.py"]:
-            with self.subTest(path=path):
-                self.assertIsNone(devops_extractor._service_name_from_path(path))
+    def test_invalid_manifests_are_rejected(self) -> None:
+        for content in [
+            "services: [",  # not YAML
+            "",  # empty document
+            "services: []",
+            "services:\n  - name: Payments_API\n",
+            "services:\n  - name: a\n    root: ../other\n",
+            "services:\n  - name: a\n  - name: a\n    root: x\n",
+            "services:\n  - name: a\n    root: x\n  - name: b\n    root: /x/\n",
+            "services:\n  - name: a\n    language: go\n",
+            "services:\n  - name: a\n    root: .\n  - name: b\n",  # both at root
+            "service:\n  - name: a\n",
+        ]:
+            with self.subTest(content=content):
+                with self.assertRaises(ValueError):
+                    devops_extractor.parse_release_coord_manifest(content)
+
+
+class InferServiceBoundariesTests(unittest.TestCase):
+    def _inferred(self, paths: list[str], repo: str = "Repo_A") -> list[tuple[str, str]]:
+        return [
+            (b.name, b.root)
+            for b in devops_extractor._infer_service_boundaries(paths, repo)
+        ]
+
+    def test_root_and_immediate_subdirectories_with_markers(self) -> None:
+        self.assertEqual(
+            self._inferred(
+                [
+                    "/go.mod",
+                    "/payments/Dockerfile",
+                    "/Web_UI/package.json",
+                    "/src/order-service/package.json",
+                    "/src/order-service/Dockerfile",
+                    "/tools/scripts/package.json",  # too deep, not a container
+                    "/node_modules/package.json",  # excluded directory
+                    "/notes/README.md",  # no marker
+                ]
+            ),
+            [
+                ("repo-a", ""),
+                ("payments", "payments"),
+                ("web-ui", "Web_UI"),
+                ("order-service", "src/order-service"),
+            ],
+        )
+
+    def test_files_belong_to_the_deepest_boundary(self) -> None:
+        boundaries = devops_extractor._infer_service_boundaries(
+            ["/Dockerfile", "/payments/Dockerfile"], "repo-a"
+        )
+        owner = devops_extractor._owning_boundary
+        self.assertEqual(owner("/payments/app/main.py", boundaries).name, "payments")  # type: ignore[union-attr]
+        self.assertEqual(owner("/config.yaml", boundaries).name, "repo-a")  # type: ignore[union-attr]
+        self.assertEqual(owner("/paymentsx/a.py", boundaries).name, "repo-a")  # type: ignore[union-attr]
+        self.assertIsNone(owner("/a.py", boundaries[1:]))
 
 
 class NoiseEndpointTests(unittest.TestCase):
@@ -67,29 +130,82 @@ class NoiseEndpointTests(unittest.TestCase):
         for url in [
             "http://localhost:8080/api",
             "http://127.0.0.1:5000",
+            "http://0.0.0.0:80",
+            "http://[::1]:80",
             "http://x.x.x.x:3000",
-            "http://10.0.0.12:8080",
             "http://${storefrontip",
             "https://schemas.xmlsoap.org/soap",
             "https://github.com/Azure-Samples/aks-store-demo",
             "https://paypal.me/someone",
             "https://eslint.org/docs/rules",
-            "https://payments.internal.example.com/v1",
             "https://kubernetes.default.svc/api",
             "ftp://order-service/file",
         ]:
             with self.subTest(url=url):
                 self.assertTrue(devops_extractor._is_noise_endpoint(url))
 
-    def test_internal_service_urls_are_kept(self) -> None:
+    def test_dependency_urls_are_kept(self) -> None:
         for url in [
             "http://inventory-service:8080",
             "http://order-service:3000/order",
             "http://product-service.default.svc.cluster.local:3002",
             "http://makeline-service.default.svc",
+            "http://10.0.0.12:8080",
+            "https://203.0.113.9/v1",
+            "http://[fd00::12]:8443",
+            "https://payments.internal.example.com/v1",
+            "https://vault.corp.internal:8200",
+            "https://mydb.privatelink.database.windows.net",
         ]:
             with self.subTest(url=url):
                 self.assertFalse(devops_extractor._is_noise_endpoint(url))
+
+
+class EnvironmentVariableExtractionTests(unittest.TestCase):
+    def test_endpoint_variables_are_extracted_across_languages(self) -> None:
+        for source, expected in [
+            ("url = os.getenv('SERVICE_URL')", ["SERVICE_URL"]),
+            ('url = os.environ["ORDER_API"]', ["ORDER_API"]),
+            ("url = os.environ.get('INVENTORY_HOST', 'x')", ["INVENTORY_HOST"]),
+            ("from os import getenv\nu = getenv('A_URL')", ["A_URL"]),
+            ("fetch(process.env.PAYMENTS_API + '/pay')", ["PAYMENTS_API"]),
+            ("const u = process.env['ORDER_SERVICE_URL']", ["ORDER_SERVICE_URL"]),
+            ("const u = import.meta.env.VITE_API_BASE_URL", ["VITE_API_BASE_URL"]),
+            ("const u = process.env.orderServiceUrl", ["orderServiceUrl"]),
+            ('u := os.Getenv("MAKELINE_ENDPOINT")', ["MAKELINE_ENDPOINT"]),
+            ('u, ok := os.LookupEnv("RABBITMQ_ADDR")', ["RABBITMQ_ADDR"]),
+            ('String u = System.getenv("BILLING_URI");', ["BILLING_URI"]),
+            (
+                'var u = Environment.GetEnvironmentVariable("CATALOG_URL");',
+                ["CATALOG_URL"],
+            ),
+            ("u = ENV.fetch('SEARCH_URL')", ["SEARCH_URL"]),
+            ("$u = $_ENV['DATABASE_DSN'];", ["DATABASE_DSN"]),
+        ]:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    devops_extractor._extract_env_var_names(source), expected
+                )
+
+    def test_non_endpoint_variables_are_ignored(self) -> None:
+        source = (
+            "os.getenv('API_KEY')\n"
+            "process.env.NODE_ENV\n"
+            "process.env.PORT\n"
+            'os.Getenv("LOG_LEVEL")\n'
+            "settings.getenv('OTHER_URL')\n"  # not an environment read
+        )
+        self.assertEqual(devops_extractor._extract_env_var_names(source), [])
+
+    def test_variables_are_unique_in_source_order(self) -> None:
+        source = (
+            "a = process.env.B_URL\n"
+            "b = os.getenv('A_URL')\n"
+            "c = process.env.B_URL\n"
+        )
+        self.assertEqual(
+            devops_extractor._extract_env_var_names(source), ["B_URL", "A_URL"]
+        )
 
 
 def _extractor_with_files(files: dict[str, str]) -> DevOpsExtractor:
@@ -113,37 +229,141 @@ def _extractor_with_files(files: dict[str, str]) -> DevOpsExtractor:
     return extractor
 
 
+def _summary(result: DiscoveryResult[ServiceScan]) -> list[tuple[str, list[tuple[str, str]]]]:
+    return [
+        (
+            scan.service.name,
+            [(r.kind.value, r.endpoint) for r in scan.references],
+        )
+        for scan in result.items
+    ]
+
+
 class ScanRepositoryTests(unittest.TestCase):
-    def test_scan_attributes_internal_endpoints_to_owning_service(self) -> None:
+    def test_inferred_services_attribute_dependencies(self) -> None:
         extractor = _extractor_with_files(
             {
                 "/README.md": "http://order-service:3000",
                 "/docs/api.yaml": "http://order-service:3000",
                 "/config.yaml": "url: http://order-service:3000\n",
+                "/src/store-front/package.json": "{}",
                 "/src/store-front/src/api.js": (
                     "const a = 'http://order-service:3000/order'\n"
                     "const b = 'http://product-service:3002/'\n"
                     "const c = 'https://github.com/x'\n"
+                    "const d = 'https://payments.internal.example.com/v1'\n"
+                    "const e = process.env.AI_SERVICE_URL\n"
+                    "const f = process.env.NODE_ENV\n"
                 ),
+                "/src/store-front/src/other.js": "'http://order-service:3000/order'",
                 "/src/store-front/node_modules/x/index.js": "http://evil:1/",
-                "/src/order-service/app.js": "http://x.x.x.x:5672",
+                "/src/order-service/Dockerfile": "FROM node",
+                "/src/order-service/app.js": "http://x.x.x.x:5672 http://10.0.0.12:5672",
+                "/src/idle-service/Dockerfile": "FROM node",
+                "/src/idle-service/app.js": "console.log('no deps')",
+                "/src/unmarked/app.js": "http://order-service:3000",
             }
         )
 
-        result = extractor.scan_repository_for_endpoints("repo-a")
+        result = extractor.scan_repository("repo-a")
+
+        self.assertEqual(result.status, DiscoveryStatus.SUCCESS)
+        # idle-service has no dependencies and no manifest, so it is not
+        # registered; /src/unmarked has no marker file, so it is not a service.
+        self.assertEqual(
+            _summary(result),
+            [
+                (
+                    "store-front",
+                    [
+                        ("URL", "http://order-service:3000/order"),
+                        ("URL", "http://product-service:3002/"),
+                        ("URL", "https://payments.internal.example.com/v1"),
+                        ("ENV_VAR", "AI_SERVICE_URL"),
+                    ],
+                ),
+                ("order-service", [("URL", "http://10.0.0.12:5672")]),
+            ],
+        )
+        self.assertEqual(
+            {s.service.source for s in result.items}, {BoundarySource.MARKER}
+        )
+
+    def test_manifest_defines_boundaries_and_registers_idle_services(self) -> None:
+        extractor = _extractor_with_files(
+            {
+                "/release-coord.yaml": (
+                    "services:\n"
+                    "  - name: payments\n"
+                    "    root: backend/payments\n"
+                    "  - name: ledger\n"
+                    "    root: backend/ledger\n"
+                    "  - name: edge\n"
+                    "    root: .\n"
+                ),
+                # Markers are ignored when a manifest exists.
+                "/backend/payments/Dockerfile": "FROM python",
+                "/backend/payments/app/client.py": (
+                    "requests.get(os.getenv('LEDGER_URL'))\n"
+                    "requests.get('http://10.1.2.3:9000/fx')\n"
+                ),
+                "/backend/ledger/main.go": "package main",
+                "/gateway.conf": "proxy_pass http://payments:8080;",
+                "/tools/misc/package.json": "{}",
+            }
+        )
+
+        result = extractor.scan_repository("repo-a")
 
         self.assertEqual(result.status, DiscoveryStatus.SUCCESS)
         self.assertEqual(
-            [(r.service_name, r.endpoint) for r in result.items],
+            _summary(result),
             [
-                ("store-front", "http://order-service:3000/order"),
-                ("store-front", "http://product-service:3002/"),
+                (
+                    "payments",
+                    [("URL", "http://10.1.2.3:9000/fx"), ("ENV_VAR", "LEDGER_URL")],
+                ),
+                ("ledger", []),
+                ("edge", [("URL", "http://payments:8080")]),
+            ],
+        )
+        self.assertEqual(
+            [(s.service.root, s.service.source) for s in result.items],
+            [
+                ("backend/payments", BoundarySource.MANIFEST),
+                ("backend/ledger", BoundarySource.MANIFEST),
+                ("", BoundarySource.MANIFEST),
             ],
         )
 
+    def test_manifest_only_repository_is_still_a_service(self) -> None:
+        extractor = _extractor_with_files(
+            {
+                "/release-coord.yaml": "services:\n  - name: batch-jobs\n",
+                "/jobs/nightly.py": "print('no http')",
+            }
+        )
+        result = extractor.scan_repository("repo-a")
+        self.assertEqual(result.status, DiscoveryStatus.SUCCESS)
+        self.assertEqual(_summary(result), [("batch-jobs", [])])
+
+    def test_invalid_manifest_fails_the_scan(self) -> None:
+        extractor = _extractor_with_files(
+            {
+                "/release-coord.yaml": "services:\n  - name: Bad_Name\n",
+                "/src/a/Dockerfile": "FROM x",
+                "/src/a/x.js": "http://b:1",
+            }
+        )
+        with self.assertLogs(devops_extractor.logger, level="WARNING"):
+            result = extractor.scan_repository("repo-a")
+        self.assertEqual(result.status, DiscoveryStatus.FAILED)
+        self.assertEqual(result.items, [])
+        self.assertIn("repo-a: invalid release-coord.yaml", result.errors[0])
+
     def test_missing_repository_is_failed_not_empty(self) -> None:
         extractor = _extractor_with_files({})
-        result = extractor.scan_repository_for_endpoints("missing")
+        result = extractor.scan_repository("missing")
         self.assertEqual(result.status, DiscoveryStatus.FAILED)
         self.assertEqual(result.items, [])
         self.assertIn("missing", result.errors[0])
@@ -152,7 +372,7 @@ class ScanRepositoryTests(unittest.TestCase):
         extractor = _extractor_with_files({"/src/a/x.js": "http://b:1"})
         extractor._get_clients.side_effect = RuntimeError("401")  # type: ignore[attr-defined]
         with self.assertLogs(devops_extractor.logger, level="ERROR"):
-            result = extractor.scan_repository_for_endpoints("repo-a")
+            result = extractor.scan_repository("repo-a")
         self.assertEqual(result.status, DiscoveryStatus.FAILED)
         self.assertIn("401", result.errors[0])
 
@@ -179,24 +399,48 @@ def _devops_state() -> DiscoveryGraphState:
     }
 
 
-def _reference(service: str, endpoint: str) -> EndpointReference:
-    return EndpointReference(
-        service_name=service, endpoint=endpoint, file_path=f"/src/{service}/a.js"
+def _scan(
+    service: str, *references: tuple[str, ReferenceKind], source: BoundarySource = BoundarySource.MARKER
+) -> ServiceScan:
+    return ServiceScan(
+        service=ServiceBoundary(name=service, root=f"src/{service}", source=source),
+        references=[
+            EndpointReference(
+                service_name=service,
+                endpoint=endpoint,
+                file_path=f"/src/{service}/a.js",
+                kind=kind,
+            )
+            for endpoint, kind in references
+        ],
     )
+
+
+URL = ReferenceKind.URL
+ENV = ReferenceKind.ENV_VAR
 
 
 class StaticBaselineServiceRegistrationTests(unittest.TestCase):
     def test_edges_originate_from_microservices_not_repositories(self) -> None:
         with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
-            devops_cls.return_value.scan_repository_for_endpoints.side_effect = [
-                DiscoveryResult[EndpointReference].success(
+            devops_cls.return_value.scan_repository.side_effect = [
+                DiscoveryResult[ServiceScan].success(
                     [
-                        _reference("store-front", "http://order-service:3000/order"),
-                        _reference("store-front", "http://product-service:3002/"),
-                        _reference("order-service", "http://rabbitmq:5672"),
+                        _scan(
+                            "store-front",
+                            ("http://order-service:3000/order", URL),
+                            ("http://product-service:3002/", URL),
+                            ("AI_SERVICE_URL", ENV),
+                        ),
+                        _scan(
+                            "order-service",
+                            ("http://rabbitmq:5672", URL),
+                            ("http://10.0.0.12:5432", URL),
+                        ),
+                        _scan("ledger", source=BoundarySource.MANIFEST),
                     ]
                 ),
-                DiscoveryResult[EndpointReference].failed("repo-b: not found"),
+                DiscoveryResult[ServiceScan].failed("repo-b: not found"),
             ]
             result = discovery_nodes.extract_static_code_baseline(_devops_state())
 
@@ -214,7 +458,8 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
                         "repository": "repo-a",
                     },
                 )
-                for name in ["store-front", "order-service"]
+                # ledger has no dependencies but is still in the inventory.
+                for name in ["store-front", "order-service", "ledger"]
             ],
         )
         edges = result["static_edges"]
@@ -224,7 +469,9 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
             [
                 (f"{UNKNOWN_URN}:store-front", "order-service"),
                 (f"{UNKNOWN_URN}:store-front", "product-service"),
+                (f"{UNKNOWN_URN}:store-front", "env:store-front/AI_SERVICE_URL"),
                 (f"{UNKNOWN_URN}:order-service", "rabbitmq"),
+                (f"{UNKNOWN_URN}:order-service", "10.0.0.12"),
             ],
         )
         self.assertEqual({e.provenance for e in edges}, {"azure_devops"})
@@ -235,9 +482,46 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
                 DiscoveryStageReport(
                     source=DiscoveryMethod.STATIC_CODE,
                     status=DiscoveryStatus.PARTIAL,
-                    item_count=3,
+                    item_count=5,
                     errors=["repo-b: not found"],
                 )
+            ],
+        )
+
+    def test_env_and_private_targets_reconcile_to_unresolved_entities(self) -> None:
+        state = _devops_state()
+        with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
+            devops_cls.return_value.scan_repository.return_value = DiscoveryResult[
+                ServiceScan
+            ].success(
+                [
+                    _scan(
+                        "store-front",
+                        ("http://ledger:8080", URL),
+                        ("https://payments.internal.example.com/v1", URL),
+                        ("http://10.0.0.12:5432", URL),
+                        ("AI_SERVICE_URL", ENV),
+                    ),
+                    _scan("ledger", source=BoundarySource.MANIFEST),
+                ]
+            )
+            state.update(discovery_nodes.extract_static_code_baseline(state))  # type: ignore[typeddict-item]
+        graph = discovery_nodes.reconcile_knowledge_graph(state)["reconciled_graph"]
+        assert isinstance(graph, dict)
+
+        self.assertEqual(
+            [(e.source_service_id, e.target_service_id) for e in graph["edges"]][0],
+            (f"{UNKNOWN_URN}:store-front", f"{UNKNOWN_URN}:ledger"),
+        )
+        self.assertEqual(
+            [(u.entity_id, u.kind) for u in graph["unresolved_entities"]],
+            [
+                ("unresolved:payments.internal.example.com", UnresolvedEntityKind.PRIVATE_DNS),
+                ("unresolved:10.0.0.12", UnresolvedEntityKind.IP_ADDRESS),
+                (
+                    "unresolved:env:store-front/ai_service_url",
+                    UnresolvedEntityKind.ENVIRONMENT_VARIABLE,
+                ),
             ],
         )
 

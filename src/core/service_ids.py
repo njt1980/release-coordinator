@@ -33,17 +33,37 @@ _CLUSTER_DNS_MARKER: Final[str] = "svc"
 _DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 # Dotted quads, including redacted placeholders such as x.x.x.x.
 _IP_LIKE_PATTERN = re.compile(r"^[0-9x*]{1,3}(?:\.[0-9x*]{1,3}){3}$")
-_PRIVATE_DNS_SUFFIXES: Final[tuple[str, ...]] = (
-    ".internal",
-    ".local",
-    ".localdomain",
-    ".lan",
-    ".corp",
-    ".intranet",
-    ".private",
-    ".home.arpa",
+# DNS labels that mark a private or corporate zone wherever they appear,
+# e.g. db.corp.internal or payments.internal.example.com.
+_PRIVATE_DNS_LABELS: Final[frozenset[str]] = frozenset(
+    {"corp", "internal", "intranet", "lan", "local", "localdomain", "private", "privatelink"}
 )
-_PRIVATE_DNS_MARKER: Final[str] = ".privatelink."
+_PRIVATE_DNS_SUFFIXES: Final[tuple[str, ...]] = (".home.arpa",)
+ENV_REFERENCE_PREFIX: Final[str] = "env:"
+
+
+def env_var_reference(service_name: str, variable: str) -> str:
+    """Return the edge target for an environment variable read by a service.
+
+    Scoped per service (``env:<service>/<VARIABLE>``) because each service
+    configures its own value for a variable name.
+    """
+    return f"{ENV_REFERENCE_PREFIX}{service_name}/{variable}"
+
+
+def is_env_var_reference(reference: str) -> bool:
+    """Return True for references built by ``env_var_reference``."""
+    return reference.strip().lower().startswith(ENV_REFERENCE_PREFIX)
+
+
+def is_private_dns_host(host: str) -> bool:
+    """Return True for dotted hostnames in a private or corporate DNS zone."""
+    host = host.lower().rstrip(".")
+    if "." not in host:
+        return False
+    return host.endswith(_PRIVATE_DNS_SUFFIXES) or bool(
+        _PRIVATE_DNS_LABELS.intersection(host.split("."))
+    )
 
 
 class IdentityContext(BaseModel):
@@ -125,9 +145,12 @@ def parse_reference(reference: str, context: IdentityContext) -> ServiceIdentity
     Accepted forms: a FQURI, ``<namespace>/<name>``, a cluster DNS name
     (``name.ns.svc[.cluster.local]``, with optional port), or a bare service
     name (with optional port). Returns None for references that cannot name
-    an in-cluster service, such as IP addresses and other dotted hosts.
+    an in-cluster service, such as IP addresses, other dotted hosts and
+    environment-variable references.
     """
     raw = reference.strip()
+    if is_env_var_reference(raw):
+        return None
     try:
         return ServiceIdentity.parse(raw)
     except ValueError:
@@ -176,13 +199,15 @@ def resolve_reference(
 
 def classify_unresolved(reference: str) -> UnresolvedEntityKind:
     """Classify why ``reference`` is not a registered service."""
+    if is_env_var_reference(reference):
+        return UnresolvedEntityKind.ENVIRONMENT_VARIABLE
     host = _host_of(reference)
     if host and _is_ip(host):
         return UnresolvedEntityKind.IP_ADDRESS
     labels = host.split(".")
     if "." not in host or (len(labels) >= 3 and labels[2] == _CLUSTER_DNS_MARKER):
         return UnresolvedEntityKind.UNREGISTERED_SERVICE
-    if host.endswith(_PRIVATE_DNS_SUFFIXES) or _PRIVATE_DNS_MARKER in f".{host}":
+    if is_private_dns_host(host):
         return UnresolvedEntityKind.PRIVATE_DNS
     return UnresolvedEntityKind.EXTERNAL_DNS
 

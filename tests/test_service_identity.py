@@ -20,6 +20,7 @@ from src.core.service_ids import (
     IdentityContext,
     IdentityIndex,
     classify_unresolved,
+    env_var_reference,
     parse_reference,
     resolve_reference,
     unresolved_entity,
@@ -143,9 +144,21 @@ class ResolutionTests(unittest.TestCase):
             ("api.stripe.com:443", UnresolvedEntityKind.EXTERNAL_DNS),
             ("ai-service", UnresolvedEntityKind.UNREGISTERED_SERVICE),
             ("ghost.default.svc", UnresolvedEntityKind.UNREGISTERED_SERVICE),
+            ("payments.internal.example.com", UnresolvedEntityKind.PRIVATE_DNS),
+            ("https://ledger.corp.example.net/v1", UnresolvedEntityKind.PRIVATE_DNS),
+            ("printer.home.arpa", UnresolvedEntityKind.PRIVATE_DNS),
+            ("env:store-front/ai_service_url", UnresolvedEntityKind.ENVIRONMENT_VARIABLE),
         ]:
             with self.subTest(raw=raw):
                 self.assertEqual(classify_unresolved(raw), kind)
+
+    def test_env_var_references_never_resolve_to_a_service(self) -> None:
+        # Even when a service is literally named "env".
+        index = IdentityIndex([_identity("shop", "env")])
+        reference = env_var_reference("store-front", "SERVICE_URL")
+        self.assertEqual(reference, "env:store-front/SERVICE_URL")
+        self.assertIsNone(parse_reference(reference, CONTEXT))
+        self.assertIsNone(resolve_reference(reference, index, CONTEXT))
 
     def test_unresolved_entity_ids_never_collide_with_fquris(self) -> None:
         entity = unresolved_entity(" API.Stripe.com ")

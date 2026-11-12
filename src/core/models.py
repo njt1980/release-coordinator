@@ -237,12 +237,15 @@ class UnresolvedEntityKind(str, Enum):
     EXTERNAL_DNS: a public DNS name.
     UNREGISTERED_SERVICE: looks like a service name, but no registered
         service in the inventory matches it (exactly one match is required).
+    ENVIRONMENT_VARIABLE: an address read from an environment variable
+        (``env:<service>/<VARIABLE>``) whose value is not yet known.
     """
 
     IP_ADDRESS = "IP_ADDRESS"
     PRIVATE_DNS = "PRIVATE_DNS"
     EXTERNAL_DNS = "EXTERNAL_DNS"
     UNREGISTERED_SERVICE = "UNREGISTERED_SERVICE"
+    ENVIRONMENT_VARIABLE = "ENVIRONMENT_VARIABLE"
 
 
 UNRESOLVED_ID_PREFIX: Final[str] = "unresolved:"

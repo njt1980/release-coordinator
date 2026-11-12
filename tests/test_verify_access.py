@@ -387,7 +387,7 @@ class DiscoveryNodeSkipTests(unittest.TestCase):
 
     def test_static_scan_runs_with_devops_scope(self) -> None:
         with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
-            devops_cls.return_value.scan_repository_for_endpoints.return_value = (
+            devops_cls.return_value.scan_repository.return_value = (
                 DiscoveryResult.success([])
             )
             discovery_nodes.extract_static_code_baseline(

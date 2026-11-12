@@ -22,12 +22,17 @@ from src.core.models import (
 from src.core.service_ids import (
     IdentityContext,
     IdentityIndex,
+    env_var_reference,
     resolve_reference,
     unresolved_entity,
 )
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools.baseline_store import BaselineScope, default_store
-from src.tools.devops_extractor import DevOpsExtractor
+from src.tools.devops_extractor import (
+    DevOpsExtractor,
+    EndpointReference,
+    ReferenceKind,
+)
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.telemetry_extractor import TelemetryExtractor
 
@@ -77,17 +82,30 @@ def initialize_scan_scope(state: DiscoveryGraphState) -> dict[str, object]:
     }
 
 
+def _static_target(reference: EndpointReference) -> str | None:
+    """Return the edge target for a static reference.
+
+    URLs are reduced to their hostname; environment variables become a
+    per-service ``env:`` reference that reconciliation keeps unresolved.
+    """
+    if reference.kind is ReferenceKind.ENV_VAR:
+        return env_var_reference(reference.service_name, reference.endpoint)
+    return urlsplit(reference.endpoint).hostname or None
+
+
 def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object]:
     """Build the initial service inventory and static dependency baseline.
 
     The Day-Zero static pass inspects the scoped repositories to identify
-    microservices and code-declared dependencies. Each microservice directory
-    that references an internal endpoint is registered as a service node, and
-    its edges originate from that microservice, not from the repository.
+    microservices and code-declared dependencies. Every service the
+    extractor returns is registered as a service node (services declared in
+    ``release-coord.yaml`` are returned even without dependencies), and its
+    edges originate from that microservice, not from the repository.
     Services are registered under a FQURI whose environment, cluster and
     namespace are ``unknown``. Endpoint URLs are reduced to their hostnames
-    before being stored as dependency targets; both ends are resolved
-    against the inventory later, during reconciliation.
+    and environment variables to ``env:<service>/<VARIABLE>`` before being
+    stored as dependency targets; both ends are resolved against the
+    inventory later, during reconciliation.
     The stage is skipped when no Azure DevOps organization URL or project is
     configured. A repository that cannot be scanned makes the stage PARTIAL
     (or FAILED if no repository could be scanned) instead of silently
@@ -111,20 +129,17 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
 
     for repo_name in state["target_repositories"]:
         extractor.get_pipeline_variables(repo_name)
-        result = extractor.scan_repository_for_endpoints(repo_name)
+        result = extractor.scan_repository(repo_name)
         statuses.append(result.status)
         errors.extend(result.errors)
-        for reference in result.items:
-            target_service_id = urlsplit(reference.endpoint).hostname
-            if not target_service_id:
-                continue
-            source_id = context.identity(reference.service_name).uri
+        for scan in result.items:
+            source_id = context.identity(scan.service.name).uri
             if source_id not in registered:
                 registered.add(source_id)
                 discovered_services.append(
                     ServiceNode(
                         service_id=source_id,
-                        name=reference.service_name,
+                        name=scan.service.name,
                         metadata={
                             "source": DiscoveryMethod.STATIC_CODE.value,
                             "devops_project": state["devops_project"],
@@ -132,17 +147,21 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
                         },
                     )
                 )
-            static_edges.append(
-                DependencyEdge(
-                    source_service_id=source_id,
-                    target_service_id=target_service_id,
-                    discovery_methods=[DiscoveryMethod.STATIC_CODE],
-                    confidence_score=0.7,
-                    last_observed_at=datetime.now(timezone.utc),
-                    provenance=STATIC_CODE_PROVENANCE,
+            for reference in scan.references:
+                target_service_id = _static_target(reference)
+                if not target_service_id:
+                    continue
+                static_edges.append(
+                    DependencyEdge(
+                        source_service_id=source_id,
+                        target_service_id=target_service_id,
+                        discovery_methods=[DiscoveryMethod.STATIC_CODE],
+                        confidence_score=0.7,
+                        last_observed_at=datetime.now(timezone.utc),
+                        provenance=STATIC_CODE_PROVENANCE,
+                    )
                 )
-            )
-            edge_count += 1
+                edge_count += 1
 
     report = DiscoveryStageReport(
         source=DiscoveryMethod.STATIC_CODE,

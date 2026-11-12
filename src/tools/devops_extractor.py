@@ -4,15 +4,19 @@ import ipaddress
 import logging
 import os
 import re
-from typing import Any
+from enum import Enum
+from typing import Any, Final, Self
 from urllib.parse import urlsplit
+
+import yaml
 
 from azure.devops.connection import Connection
 from azure.identity import DefaultAzureCredential
 from msrest.authentication import BasicTokenAuthentication
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.core.models import DiscoveryResult
+from src.core.service_ids import is_private_dns_host
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
     VERIFY_TIMEOUT_SECONDS,
@@ -44,7 +48,7 @@ _TEXT_FILE_SUFFIXES = {
     ".yaml",
     ".yml",
 }
-_ENDPOINT_PATTERN = re.compile(r"""https?://[^\s"'<>)}\]]+""", re.IGNORECASE)
+_URL_PATTERN = re.compile(r"""https?://[^\s"'<>)}\]`]+""", re.IGNORECASE)
 _EXCLUDED_DIRECTORIES = {
     ".git",
     "bower_components",
@@ -61,24 +65,170 @@ _EXCLUDED_FILENAMES = {
     "pnpm-lock.yaml",
     "yarn.lock",
 }
-# Directories whose immediate children are individual microservices, e.g.
-# src/order-service/... in a monorepo.
+# Optional repository-root manifest declaring service boundaries explicitly.
+RELEASE_COORD_MANIFEST_PATH: Final[str] = "/release-coord.yaml"
+# Files whose presence marks a directory as a potential service boundary when
+# the repository has no manifest.
+_SERVICE_MARKER_FILENAMES = {"dockerfile", "go.mod", "package.json"}
+# Conventional grouping directories: their immediate children are scanned for
+# service markers as if they were immediate children of the repository root.
 _SERVICE_CONTAINER_DIRECTORIES = {"apps", "cmd", "services", "src"}
 # A single DNS label: how one in-cluster service addresses another.
 _DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-# Dotted quads, including redacted placeholders such as x.x.x.x.
-_IP_LIKE_PATTERN = re.compile(r"^[0-9x*]{1,3}(?:\.[0-9x*]{1,3}){3}$")
+# Redacted placeholders such as x.x.x.x or *.*.*.* (not real addresses).
+_IP_PLACEHOLDER_PATTERN = re.compile(r"^(?=.*[x*])[0-9x*]{1,3}(?:\.[0-9x*]{1,3}){3}$")
 _CLUSTER_DNS_SUFFIXES = (".svc", ".svc.cluster.local")
-# In-cluster names that are platform infrastructure, not application services.
+# Names that never identify a cross-service dependency.
 _PLATFORM_SERVICE_NAMES = {"kubernetes", "localhost"}
+_ENV_NAME = r"([A-Za-z_][A-Za-z0-9_]*)"
+_QUOTED_ENV_NAME = rf"""['"`]{_ENV_NAME}['"`]"""
+# Environment variable reads across the languages this scanner reads.
+_ENV_VAR_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
+    re.compile(pattern)
+    for pattern in (
+        # Python: os.getenv("X"), getenv("X"); PHP: getenv('X')
+        rf"(?<![\w$.])(?:os\.)?getenv\(\s*{_QUOTED_ENV_NAME}",
+        # Python: os.environ["X"], os.environ.get("X"), environ["X"]
+        rf"(?<![\w$.])(?:os\.)?environ(?:\.get\(|\[)\s*{_QUOTED_ENV_NAME}",
+        # JavaScript/TypeScript: process.env.X, process.env["X"], import.meta.env.X
+        rf"\b(?:process|import\.meta)\.env\.{_ENV_NAME}",
+        rf"\b(?:process|import\.meta)\.env\[\s*{_QUOTED_ENV_NAME}\s*\]",
+        # Go: os.Getenv("X"), os.LookupEnv("X")
+        rf"\bos\.(?:Getenv|LookupEnv)\(\s*{_QUOTED_ENV_NAME}",
+        # Java: System.getenv("X"); C#: Environment.GetEnvironmentVariable("X")
+        rf"\b(?:System\.getenv|Environment\.GetEnvironmentVariable)\(\s*{_QUOTED_ENV_NAME}",
+        # Ruby: ENV["X"], ENV.fetch("X"); PHP: $_ENV["X"]
+        rf"(?<![\w.])(?:\$_)?ENV(?:\.fetch\(|\[)\s*{_QUOTED_ENV_NAME}",
+    )
+)
+# Final name tokens of variables that hold the address of another service.
+_ENDPOINT_ENV_SUFFIXES = {
+    "ADDR",
+    "ADDRESS",
+    "API",
+    "DSN",
+    "ENDPOINT",
+    "ENDPOINTS",
+    "HOST",
+    "HOSTNAME",
+    "URI",
+    "URL",
+    "URLS",
+}
+_ENV_NAME_TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
+
+
+class ReferenceKind(str, Enum):
+    """How a service refers to one of its dependencies.
+
+    URL: a literal http(s) URL; ``endpoint`` is that URL.
+    ENV_VAR: an endpoint-like environment variable read in code;
+        ``endpoint`` is the variable name, to be resolved from configuration.
+    """
+
+    URL = "URL"
+    ENV_VAR = "ENV_VAR"
 
 
 class EndpointReference(BaseModel):
-    """An endpoint URL found in a file owned by a specific microservice."""
+    """A dependency reference found in a file owned by a specific microservice."""
 
     service_name: str = Field(min_length=1)
     endpoint: str = Field(min_length=1)
     file_path: str = Field(min_length=1)
+    kind: ReferenceKind = ReferenceKind.URL
+
+
+class BoundarySource(str, Enum):
+    """Where a service boundary came from.
+
+    MANIFEST: declared in the repository's ``release-coord.yaml``.
+    MARKER: inferred from a Dockerfile, package.json or go.mod.
+    """
+
+    MANIFEST = "MANIFEST"
+    MARKER = "MARKER"
+
+
+class ServiceBoundary(BaseModel):
+    """A service and the repository directory it owns.
+
+    ``root`` is repository-relative without leading or trailing slashes;
+    the empty string is the repository root.
+    """
+
+    name: str = Field(pattern=_DNS_LABEL_PATTERN.pattern)
+    root: str
+    source: BoundarySource
+
+
+class ServiceScan(BaseModel):
+    """One service found in a repository and the dependencies it references."""
+
+    service: ServiceBoundary
+    references: list[EndpointReference] = Field(default_factory=list)
+
+
+class ServiceDeclaration(BaseModel):
+    """One ``services`` entry of a ``release-coord.yaml`` manifest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=_DNS_LABEL_PATTERN.pattern)
+    root: str = Field(default=".", validate_default=True)
+
+    @field_validator("root")
+    @classmethod
+    def _normalize_root(cls, root: str) -> str:
+        segments = [s for s in root.strip().split("/") if s and s != "."]
+        if ".." in segments:
+            raise ValueError("root must stay inside the repository")
+        return "/".join(segments)
+
+
+class ReleaseCoordManifest(BaseModel):
+    """Service boundaries declared in a repository's ``release-coord.yaml``.
+
+    Example::
+
+        services:
+          - name: payments
+            root: services/payments-api
+          - name: gateway
+            root: .
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    services: list[ServiceDeclaration] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _unique_services(self) -> Self:
+        names = [service.name for service in self.services]
+        roots = [service.root for service in self.services]
+        if len(set(names)) != len(names):
+            raise ValueError("service names must be unique")
+        if len(set(roots)) != len(roots):
+            raise ValueError("service roots must be unique")
+        return self
+
+
+def parse_release_coord_manifest(content: str) -> ReleaseCoordManifest:
+    """Parse and validate the text of a ``release-coord.yaml`` manifest.
+
+    Raises:
+        ValueError: if the text is not YAML or does not match the schema
+            (pydantic's ValidationError is a ValueError).
+    """
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError as error:
+        raise ValueError(f"not valid YAML: {error}") from error
+    return ReleaseCoordManifest.model_validate(document)
+
+
+def _path_segments(path: str) -> list[str]:
+    return [segment for segment in path.split("/") if segment]
 
 
 def _is_scannable_path(path: str) -> bool:
@@ -87,7 +237,7 @@ def _is_scannable_path(path: str) -> bool:
     Documentation, dependency/vendor trees, build output, and lock files are
     skipped because they mostly reference third-party sites.
     """
-    segments = [segment.lower() for segment in path.split("/") if segment]
+    segments = [segment.lower() for segment in _path_segments(path)]
     if not segments or _EXCLUDED_DIRECTORIES.intersection(segments[:-1]):
         return False
     filename = segments[-1]
@@ -98,56 +248,117 @@ def _is_scannable_path(path: str) -> bool:
     return os.path.splitext(filename)[1] in _TEXT_FILE_SUFFIXES
 
 
-def _service_name_from_path(path: str) -> str | None:
-    """Return the microservice that owns a repository file, if any.
+def _dns_label(name: str) -> str | None:
+    """Normalize a directory or repository name to a DNS label, or None."""
+    label = re.sub(r"[^a-z0-9-]+", "-", name.lower())
+    label = re.sub(r"-{2,}", "-", label).strip("-")[:63].rstrip("-")
+    return label if _DNS_LABEL_PATTERN.match(label) else None
 
-    A file belongs to service ``X`` when it lives under ``<container>/X/``
-    where ``<container>`` is one of ``src``, ``services``, ``apps`` or
-    ``cmd`` (e.g. ``/src/order-service/routes/order.js`` -> ``order-service``).
-    Files outside such a directory (CI config, charts, root manifests) have
-    no owning service and return None.
+
+def _boundaries_from_manifest(manifest: ReleaseCoordManifest) -> list[ServiceBoundary]:
+    return [
+        ServiceBoundary(
+            name=service.name, root=service.root, source=BoundarySource.MANIFEST
+        )
+        for service in manifest.services
+    ]
+
+
+def _marker_boundary_root(path: str) -> list[str] | None:
+    """Return the directory a marker file makes a service boundary, or None.
+
+    Boundaries are the repository root, its immediate subdirectories, and
+    the immediate children of conventional grouping directories
+    (``src/``, ``services/``, ``apps/``, ``cmd/``).
     """
-    segments = [segment for segment in path.split("/") if segment]
-    for index, segment in enumerate(segments[:-2]):
-        if segment.lower() in _SERVICE_CONTAINER_DIRECTORIES:
-            candidate = segments[index + 1].lower()
-            if _DNS_LABEL_PATTERN.match(candidate):
-                return candidate
-            return None
+    segments = _path_segments(path)
+    if not segments or segments[-1].lower() not in _SERVICE_MARKER_FILENAMES:
+        return None
+    directory = segments[:-1]
+    if _EXCLUDED_DIRECTORIES.intersection(s.lower() for s in directory):
+        return None
+    if len(directory) <= 1:
+        return directory
+    if len(directory) == 2 and directory[0].lower() in _SERVICE_CONTAINER_DIRECTORIES:
+        return directory
     return None
 
 
-def _is_internal_service_host(hostname: str) -> bool:
-    """Return True only for hostnames that address an in-cluster service.
+def _infer_service_boundaries(
+    file_paths: list[str], repo_name: str
+) -> list[ServiceBoundary]:
+    """Infer service boundaries from marker files, in discovery order.
 
-    Internal hosts are a single DNS label (``order-service``) or a cluster
-    DNS name (``order-service.default.svc[.cluster.local]``). Every dotted
-    public domain (github.com, paypal.me, eslint.org, ...) and every IP
-    address, including redacted ones like ``x.x.x.x``, is rejected.
+    A marker at the repository root names the service after the repository;
+    any other boundary is named after its directory. Directories whose name
+    cannot become a DNS label are skipped.
+    """
+    boundaries: dict[str, ServiceBoundary] = {}
+    for path in file_paths:
+        directory = _marker_boundary_root(path)
+        if directory is None:
+            continue
+        root = "/".join(directory)
+        if root in boundaries:
+            continue
+        name = _dns_label(directory[-1] if directory else repo_name)
+        if name is None:
+            logger.warning("Skipping service directory %r: not a DNS label", root)
+            continue
+        boundaries[root] = ServiceBoundary(
+            name=name, root=root, source=BoundarySource.MARKER
+        )
+    return list(boundaries.values())
+
+
+def _owning_boundary(
+    path: str, boundaries: list[ServiceBoundary]
+) -> ServiceBoundary | None:
+    """Return the boundary with the deepest root containing ``path``."""
+    segments = _path_segments(path)
+    owner: ServiceBoundary | None = None
+    owner_depth = -1
+    for boundary in boundaries:
+        root = _path_segments(boundary.root)
+        if len(root) > owner_depth and segments[: len(root)] == root:
+            owner, owner_depth = boundary, len(root)
+    return owner
+
+
+def _is_dependency_host(hostname: str) -> bool:
+    """Return True for hosts that can be another service or infrastructure.
+
+    Kept: in-cluster names (a single DNS label or a ``.svc`` cluster name),
+    private DNS names (``*.internal.example.com``, ``*.corp``, private link
+    zones) and IP addresses, so reconciliation can register whatever does
+    not map to the inventory as an ``UnresolvedEntity``. Rejected: loopback
+    and unspecified addresses, redacted placeholders such as ``x.x.x.x``,
+    platform names like ``localhost`` and ``kubernetes``, and public domains.
     """
     host = hostname.lower().rstrip(".")
-    if not host or _IP_LIKE_PATTERN.match(host):
+    if not host or _IP_PLACEHOLDER_PATTERN.match(host):
         return False
     try:
-        ipaddress.ip_address(host.strip("[]"))
-        return False
+        address = ipaddress.ip_address(host.strip("[]"))
     except ValueError:
         pass
+    else:
+        return not (address.is_loopback or address.is_unspecified)
     service_label = host.split(".", 1)[0]
     if service_label in _PLATFORM_SERVICE_NAMES:
         return False
     if "." not in host:
         return bool(_DNS_LABEL_PATTERN.match(host))
-    return host.endswith(_CLUSTER_DNS_SUFFIXES) and bool(
-        _DNS_LABEL_PATTERN.match(service_label)
-    )
+    if host.endswith(_CLUSTER_DNS_SUFFIXES):
+        return bool(_DNS_LABEL_PATTERN.match(service_label))
+    return is_private_dns_host(host)
 
 
 def _is_noise_endpoint(endpoint: str) -> bool:
-    """Return True for anything other than an internal service-to-service URL.
+    """Return True for URLs that are not a dependency of the service.
 
-    Templated URLs and URLs whose host is external, local, or an IP address
-    are noise.
+    Templated URLs, non-http(s) schemes, and URLs whose host fails
+    ``_is_dependency_host`` are noise.
     """
     if "${" in endpoint or "{{" in endpoint:
         return True
@@ -158,7 +369,49 @@ def _is_noise_endpoint(endpoint: str) -> bool:
         return True
     if parsed.scheme.lower() not in {"http", "https"}:
         return True
-    return not _is_internal_service_host(hostname)
+    return not _is_dependency_host(hostname)
+
+
+def _is_endpoint_env_var(name: str) -> bool:
+    """Return True for variable names that hold another service's address.
+
+    The final name token decides: ``SERVICE_URL``, ``PAYMENTS_API``,
+    ``orderServiceHost`` qualify; ``API_KEY``, ``NODE_ENV``, ``PORT`` do not.
+    """
+    tokens = [token for token in _ENV_NAME_TOKEN_SPLIT.split(name) if token]
+    return bool(tokens) and tokens[-1].upper() in _ENDPOINT_ENV_SUFFIXES
+
+
+def _extract_env_var_names(content: str) -> list[str]:
+    """Return endpoint-like environment variables read in ``content``, in order."""
+    found: list[tuple[int, str]] = []
+    for pattern in _ENV_VAR_PATTERNS:
+        found.extend((match.start(), match.group(1)) for match in pattern.finditer(content))
+    names = [name for _, name in sorted(found)]
+    return [name for name in dict.fromkeys(names) if _is_endpoint_env_var(name)]
+
+
+def _extract_references(
+    content: str, service_name: str, file_path: str
+) -> list[EndpointReference]:
+    """Return the dependency references in one file, URLs first."""
+    references = [
+        EndpointReference(
+            service_name=service_name, endpoint=endpoint, file_path=file_path
+        )
+        for endpoint in (match.rstrip(".,;:") for match in _URL_PATTERN.findall(content))
+        if not _is_noise_endpoint(endpoint)
+    ]
+    references.extend(
+        EndpointReference(
+            service_name=service_name,
+            endpoint=name,
+            file_path=file_path,
+            kind=ReferenceKind.ENV_VAR,
+        )
+        for name in _extract_env_var_names(content)
+    )
+    return references
 
 
 class DevOpsExtractor:
@@ -360,68 +613,109 @@ class DevOpsExtractor:
             )
             return {}
 
-    def scan_repository_for_endpoints(
-        self, repo_name: str
-    ) -> DiscoveryResult[EndpointReference]:
-        """Find internal service endpoints referenced by each microservice.
+    def _repository_boundaries(
+        self,
+        git_client: Any,
+        repository: Any,
+        project: str,
+        repo_name: str,
+        file_paths: list[str],
+    ) -> list[ServiceBoundary]:
+        """Return the repository's service boundaries.
 
-        Only application and configuration files under a microservice
-        directory (see ``_service_name_from_path``) are read. Every URL that
-        is not an internal service-to-service call is dropped. It must not
-        write to the repository or trigger builds or deployments.
+        ``release-coord.yaml`` at the repository root, when present, is
+        authoritative; otherwise boundaries are inferred from marker files.
+
+        Raises:
+            ValueError: if the manifest exists but is invalid.
+        """
+        if RELEASE_COORD_MANIFEST_PATH in file_paths:
+            content = self._read_item_content(
+                git_client, repository.id, RELEASE_COORD_MANIFEST_PATH, project
+            )
+            return _boundaries_from_manifest(parse_release_coord_manifest(content))
+        return _infer_service_boundaries(file_paths, repo_name)
+
+    def scan_repository(self, repo_name: str) -> DiscoveryResult[ServiceScan]:
+        """Find the services in a repository and the dependencies they reference.
+
+        Service boundaries come from ``release-coord.yaml`` when the
+        repository has one, otherwise from directories (the root and its
+        immediate subdirectories) holding a Dockerfile, package.json or
+        go.mod. Each scannable file is attributed to the boundary with the
+        deepest enclosing root; files outside every boundary are not read.
+        References are internal, private-DNS and IP URLs plus endpoint-like
+        environment variables (see ``_extract_references``).
+
+        Every manifest-declared service is returned, even with no
+        references. An inferred boundary is returned only when it references
+        at least one dependency. It must not write to the repository or
+        trigger builds or deployments.
 
         Args:
             repo_name: Name of the repository to inspect.
 
         Returns:
-            SUCCESS with unique (service, endpoint) references in discovery
-            order, or FAILED if the repository could not be found or scanned.
+            SUCCESS with one ``ServiceScan`` per service, each with its
+            unique references in discovery order, or FAILED if the repository
+            could not be found or scanned or its manifest is invalid.
         """
         try:
             _, git_client, project = self._get_clients()
             repository = self._find_repository(git_client, project, repo_name)
             if repository is None:
                 logger.warning("Azure DevOps repository %s was not found", repo_name)
-                return DiscoveryResult[EndpointReference].failed(
+                return DiscoveryResult[ServiceScan].failed(
                     f"{repo_name}: repository was not found"
                 )
 
             items = git_client.get_items(
                 repository.id, project=project, recursion_level="Full"
             )
-            references: list[EndpointReference] = []
-            seen: set[tuple[str, str]] = set()
-            for item in items:
-                if getattr(item, "is_folder", False):
+            file_paths = [
+                getattr(item, "path", "")
+                for item in items
+                if not getattr(item, "is_folder", False)
+            ]
+            try:
+                boundaries = self._repository_boundaries(
+                    git_client, repository, project, repo_name, file_paths
+                )
+            except ValueError as error:
+                logger.warning("Invalid release-coord.yaml in %s: %s", repo_name, error)
+                return DiscoveryResult[ServiceScan].failed(
+                    f"{repo_name}: invalid release-coord.yaml: {error}"
+                )
+
+            references: dict[str, dict[tuple[ReferenceKind, str], EndpointReference]] = {
+                boundary.root: {} for boundary in boundaries
+            }
+            for path in file_paths:
+                if path == RELEASE_COORD_MANIFEST_PATH or not _is_scannable_path(path):
                     continue
-                path = getattr(item, "path", "")
-                if not _is_scannable_path(path):
-                    continue
-                service_name = _service_name_from_path(path)
-                if service_name is None:
+                owner = _owning_boundary(path, boundaries)
+                if owner is None:
                     continue
                 content = self._read_item_content(
                     git_client, repository.id, path, project
                 )
-                for match in _ENDPOINT_PATTERN.findall(content):
-                    endpoint = match.rstrip(".,;:")
-                    if _is_noise_endpoint(endpoint):
-                        continue
-                    key = (service_name, endpoint)
-                    if key not in seen:
-                        seen.add(key)
-                        references.append(
-                            EndpointReference(
-                                service_name=service_name,
-                                endpoint=endpoint,
-                                file_path=path,
-                            )
-                        )
-            return DiscoveryResult[EndpointReference].success(references)
+                for reference in _extract_references(content, owner.name, path):
+                    references[owner.root].setdefault(
+                        (reference.kind, reference.endpoint), reference
+                    )
+
+            scans = [
+                ServiceScan(
+                    service=boundary,
+                    references=list(references[boundary.root].values()),
+                )
+                for boundary in boundaries
+                if boundary.source is BoundarySource.MANIFEST
+                or references[boundary.root]
+            ]
+            return DiscoveryResult[ServiceScan].success(scans)
         except Exception as error:
-            logger.exception(
-                "Failed to scan repository %s for endpoints", repo_name
-            )
-            return DiscoveryResult[EndpointReference].failed(
-                f"{repo_name}: endpoint scan failed: {error}"
+            logger.exception("Failed to scan repository %s", repo_name)
+            return DiscoveryResult[ServiceScan].failed(
+                f"{repo_name}: repository scan failed: {error}"
             )
