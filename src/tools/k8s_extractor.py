@@ -138,9 +138,9 @@ class KubernetesExtractor:
         Reads Deployments, StatefulSets and standalone Pods (Pods with no
         owner, so ReplicaSet-managed Pods are not counted twice) and maps
         each workload to every Service whose selector matches its pod
-        labels. Variables come from ``env[].value`` and
-        ``env[].valueFrom.configMapKeyRef``; other sources (Secrets, field
-        refs, ``envFrom``) are not read. A variable with conflicting values
+        labels. Variables come from ``env[].value``,
+        ``env[].valueFrom.configMapKeyRef`` and ``envFrom[].configMapRef``;
+        other sources (Secrets, field refs) are not read. A variable with conflicting values
         across one service's containers is dropped rather than guessed.
         Read-only: nothing is created, updated or deleted.
 
@@ -238,13 +238,32 @@ def _env_value(
 def _container_env(
     pod_spec: Any, config_maps: Mapping[str, Mapping[str, str]]
 ) -> list[tuple[str, str]]:
-    """Return the (name, value) env pairs of every container in a pod spec."""
+    """Return the (name, value) env pairs of every container in a pod spec.
+
+    Follows Kubernetes precedence: later ``envFrom`` config maps override
+    earlier ones, and explicit ``env`` entries override ``envFrom``. An
+    explicit entry whose value cannot be read (e.g. a Secret ref) still
+    shadows any ``envFrom`` value of the same name.
+    """
     pairs: list[tuple[str, str]] = []
     for container in getattr(pod_spec, "containers", None) or []:
+        resolved: dict[str, str] = {}
+        for source in getattr(container, "env_from", None) or []:
+            ref = getattr(source, "config_map_ref", None)
+            if ref is None or not ref.name:
+                continue
+            prefix = getattr(source, "prefix", None) or ""
+            for key, value in config_maps.get(ref.name, {}).items():
+                resolved[f"{prefix}{key}"] = value
         for env_var in container.env or []:
+            if not env_var.name:
+                continue
             value = _env_value(env_var, config_maps)
-            if env_var.name and value is not None:
-                pairs.append((env_var.name, value))
+            if value is None:
+                resolved.pop(env_var.name, None)
+            else:
+                resolved[env_var.name] = value
+        pairs.extend(resolved.items())
     return pairs
 
 

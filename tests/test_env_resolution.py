@@ -210,6 +210,59 @@ class KubernetesEnvironmentExtractionTests(unittest.TestCase):
             [(f"{DEFAULT_NS}:api", {"CACHE_HOST": "redis"})],
         )
 
+    def test_env_from_config_maps_follow_kubernetes_precedence(self) -> None:
+        def source(config_map: str | None = None, secret: str | None = None,
+                   prefix: str | None = None) -> SimpleNamespace:
+            return SimpleNamespace(
+                config_map_ref=SimpleNamespace(name=config_map) if config_map else None,
+                secret_ref=SimpleNamespace(name=secret) if secret else None,
+                prefix=prefix,
+            )
+
+        secret_env = SimpleNamespace(
+            name="DB_HOST", value=None,
+            value_from=SimpleNamespace(config_map_key_ref=None, secret_key_ref=object()),
+        )
+        container = SimpleNamespace(
+            name="app",
+            env=[_env("QUEUE_PORT", "5673"), secret_env],
+            env_from=[
+                source(config_map="base"),
+                source(secret="creds"),
+                source(config_map="override"),
+                source(config_map="base", prefix="LEGACY_"),
+                source(config_map="missing"),
+            ],
+        )
+        template = SimpleNamespace(
+            metadata=_meta(labels={"app": "api"}),
+            spec=SimpleNamespace(containers=[container]),
+        )
+        core, apps = _apis(
+            services=[_service("api", {"app": "api"})],
+            deployments=[
+                SimpleNamespace(metadata=_meta("api"), spec=SimpleNamespace(template=template))
+            ],
+            config_maps=[
+                _config_map("base", {"QUEUE_HOST": "old", "QUEUE_PORT": "5672",
+                                     "DB_HOST": "pg"}),
+                _config_map("override", {"QUEUE_HOST": "rabbitmq"}),
+            ],
+        )
+        result = _extractor(core, apps).get_namespace_environments("default", CONTEXT)
+
+        self.assertEqual(
+            result.items[0].variables,
+            {
+                "QUEUE_HOST": "rabbitmq",  # later envFrom source wins
+                "QUEUE_PORT": "5673",  # explicit env overrides envFrom
+                # DB_HOST: explicit Secret ref shadows the envFrom value
+                "LEGACY_QUEUE_HOST": "old",
+                "LEGACY_QUEUE_PORT": "5672",
+                "LEGACY_DB_HOST": "pg",
+            },
+        )
+
     def test_unlistable_workload_kind_makes_result_partial(self) -> None:
         core, apps = _order_service_apis()
         apps.list_namespaced_deployment.side_effect = RuntimeError("403")
