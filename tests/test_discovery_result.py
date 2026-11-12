@@ -12,6 +12,7 @@ from src.core.models import (
     DiscoveryResult,
     DiscoveryStageReport,
     DiscoveryStatus,
+    ServiceEnvironment,
     ServiceNode,
     baseline_problems,
     combine_statuses,
@@ -139,6 +140,9 @@ class DiscoveryStageAggregationTests(unittest.TestCase):
                 ),
                 DiscoveryResult[ServiceNode].failed("b: 403"),
             ]
+            k8s_cls.return_value.get_namespace_environments.return_value = (
+                DiscoveryResult[ServiceEnvironment].success([])
+            )
             result = discovery_nodes.extract_k8s_topology(state)
 
         self.assertEqual(

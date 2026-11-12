@@ -399,9 +399,9 @@ export default function App() {
           onTest={testKubernetes}
           testState={tests.kubernetes}
           testDisabled={isCrawling}
-          description="Service objects used to map the deployed topology of each namespace."
-          requiredRole="Namespaced Role: get, list on services"
-          securityJustification="Bound per namespace via RoleBinding. Only Service objects are listed. No access to Secrets, ConfigMaps, Pods/exec, or any create, update, patch, or delete verbs."
+          description="Services and workload manifests used to map the deployed topology and environment-driven dependencies of each namespace."
+          requiredRole="Namespaced Role: get, list on services, configmaps, pods, deployments (apps), statefulsets (apps)"
+          securityJustification="Bound per namespace via RoleBinding. Requires read-only access to Services, Deployments, StatefulSets, Pods, and ConfigMaps to resolve environment-driven dependencies. No access to Secrets or Pod exec, and no create, update, patch, or delete verbs."
         >
           <TextField
             id="k8s-namespaces"

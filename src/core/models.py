@@ -236,6 +236,25 @@ class ServiceNode(BaseModel):
         return ServiceIdentity.parse(self.service_id)
 
 
+class ServiceEnvironment(BaseModel):
+    """Environment variables Kubernetes injects into a service's workloads.
+
+    ``service_id`` is the FQURI of the Kubernetes Service whose selector
+    matches the workloads; ``variables`` maps each variable name to its
+    resolved value (literal ``value`` or ``configMapKeyRef``). Variables
+    whose value could not be determined unambiguously are left out.
+    """
+
+    service_id: str
+    variables: Dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("service_id")
+    @classmethod
+    def _require_fquri(cls, value: str) -> str:
+        ServiceIdentity.parse(value)
+        return value
+
+
 class UnresolvedEntityKind(str, Enum):
     """Why a discovered endpoint could not be mapped to a registered service.
 

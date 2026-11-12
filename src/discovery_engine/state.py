@@ -2,7 +2,12 @@
 
 from typing import TypedDict
 
-from src.core.models import DependencyEdge, DiscoveryStageReport, ServiceNode
+from src.core.models import (
+    DependencyEdge,
+    DiscoveryStageReport,
+    ServiceEnvironment,
+    ServiceNode,
+)
 
 
 class DiscoveryGraphState(TypedDict):
@@ -12,7 +17,9 @@ class DiscoveryGraphState(TypedDict):
     SKIPPED stages, so persistence can tell a complete baseline from one
     built on failed or partial extraction. ``tenant`` and ``project_id`` pick
     the baseline directory the run writes to; ``baseline_snapshot_id`` is
-    set by persistence to the snapshot the run wrote.
+    set by persistence to the snapshot the run wrote. ``service_environments``
+    holds the container environment variables Kubernetes sets per service,
+    used to resolve ``env:`` dependency references during reconciliation.
     """
 
     tenant: str
@@ -23,6 +30,7 @@ class DiscoveryGraphState(TypedDict):
     target_repositories: list[str]
     target_namespaces: list[str]
     discovered_services: list[ServiceNode]
+    service_environments: list[ServiceEnvironment]
     static_edges: list[DependencyEdge]
     runtime_edges: list[DependencyEdge]
     discovery_reports: list[DiscoveryStageReport]

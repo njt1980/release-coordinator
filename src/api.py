@@ -226,6 +226,7 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
         "target_repositories": list(payload.target_repositories),
         "target_namespaces": list(payload.target_namespaces),
         "discovered_services": [],
+        "service_environments": [],
         "static_edges": [],
         "runtime_edges": [],
         "discovery_reports": [],

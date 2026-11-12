@@ -14,7 +14,7 @@ anything else is classified as an ``UnresolvedEntityKind``.
 
 import ipaddress
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Final
 from urllib.parse import urlsplit
 
@@ -54,6 +54,20 @@ def env_var_reference(service_name: str, variable: str) -> str:
 def is_env_var_reference(reference: str) -> bool:
     """Return True for references built by ``env_var_reference``."""
     return reference.strip().lower().startswith(ENV_REFERENCE_PREFIX)
+
+
+def parse_env_var_reference(reference: str) -> tuple[str, str] | None:
+    """Split an ``env:<service>/<VARIABLE>`` reference into its two parts.
+
+    Returns None for anything that is not a well-formed env reference.
+    """
+    raw = reference.strip()
+    if not is_env_var_reference(raw):
+        return None
+    service_name, separator, variable = raw[len(ENV_REFERENCE_PREFIX) :].partition("/")
+    if not (separator and service_name and variable):
+        return None
+    return service_name, variable
 
 
 def is_private_dns_host(host: str) -> bool:
@@ -195,6 +209,35 @@ def resolve_reference(
             query.model_copy(update={"namespace": context.default_namespace})
         )
     return resolved
+
+
+def resolve_env_var_reference(
+    reference: str,
+    environments: Mapping[str, Mapping[str, str]],
+    index: IdentityIndex,
+    context: IdentityContext,
+) -> ServiceIdentity | None:
+    """Resolve ``env:<service>/<VARIABLE>`` through its runtime value.
+
+    ``environments`` maps service FQURIs to the variables Kubernetes sets
+    for them. The owning service must resolve to exactly one registered
+    service, define ``VARIABLE`` (exact, case-sensitive name), and the value
+    must itself resolve to exactly one registered service. Bare names in the
+    value resolve within the owning service's namespace, as in-cluster DNS
+    does. Returns None when any step fails, so the reference stays unresolved.
+    """
+    parsed = parse_env_var_reference(reference)
+    if parsed is None:
+        return None
+    service_name, variable = parsed
+    owner = resolve_reference(service_name, index, context)
+    if owner is None:
+        return None
+    value = environments.get(owner.uri, {}).get(variable)
+    if value is None:
+        return None
+    owner_context = context.model_copy(update={"default_namespace": owner.namespace})
+    return resolve_reference(value, index, owner_context)
 
 
 def classify_unresolved(reference: str) -> UnresolvedEntityKind:

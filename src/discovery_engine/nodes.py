@@ -15,6 +15,7 @@ from src.core.models import (
     DiscoveryStageReport,
     DiscoveryStatus,
     KnowledgeGraph,
+    ServiceEnvironment,
     ServiceIdentity,
     ServiceNode,
     UnresolvedEntity,
@@ -25,6 +26,7 @@ from src.core.service_ids import (
     IdentityContext,
     IdentityIndex,
     env_var_reference,
+    resolve_env_var_reference,
     resolve_reference,
     unresolved_entity,
 )
@@ -88,7 +90,8 @@ def _static_target(reference: EndpointReference) -> str | None:
     """Return the edge target for a static reference.
 
     URLs are reduced to their hostname; environment variables become a
-    per-service ``env:`` reference that reconciliation keeps unresolved.
+    per-service ``env:`` reference that reconciliation resolves through the
+    variable's Kubernetes-configured value, when one is known.
     """
     if reference.kind is ReferenceKind.ENV_VAR:
         return env_var_reference(reference.service_name, reference.endpoint)
@@ -186,8 +189,12 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
 
     During the initial deep dive, this stage will inspect manifests and
     deployment configuration in the selected namespaces to find deployed
-    services and topology-based relationships. The stage is skipped when no
-    namespaces are configured.
+    services and topology-based relationships. It also records the container
+    environment variables each service's workloads receive
+    (``service_environments``), which reconciliation uses to resolve
+    ``env:`` references. A namespace whose services or workload environments
+    could not be fully read makes the stage PARTIAL. The stage is skipped
+    when no namespaces are configured.
     """
     if not state.get("target_namespaces"):
         return _skipped(state, DiscoveryMethod.K8S_MANIFEST)
@@ -195,6 +202,7 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
     extractor = KubernetesExtractor()
     context = identity_context(state)
     discovered_services = list(state.get("discovered_services", []))
+    service_environments = list(state.get("service_environments", []))
     statuses: list[DiscoveryStatus] = []
     errors: list[str] = []
     service_count = 0
@@ -204,6 +212,10 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
         errors.extend(result.errors)
         discovered_services.extend(result.items)
         service_count += len(result.items)
+        env_result = extractor.get_namespace_environments(namespace, context)
+        statuses.append(env_result.status)
+        errors.extend(env_result.errors)
+        service_environments.extend(env_result.items)
     report = DiscoveryStageReport(
         source=DiscoveryMethod.K8S_MANIFEST,
         status=combine_statuses(statuses),
@@ -212,6 +224,7 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
     )
     return {
         "discovered_services": discovered_services,
+        "service_environments": service_environments,
         "discovery_reports": _append_report(state, report),
     }
 
@@ -293,19 +306,33 @@ def _canonicalize_services(
     return list(merged.values())
 
 
+def _environment_index(
+    environments: list[ServiceEnvironment],
+) -> dict[str, dict[str, str]]:
+    """Map service FQURIs to their Kubernetes environment variables."""
+    index: dict[str, dict[str, str]] = {}
+    for environment in environments:
+        index.setdefault(environment.service_id, {}).update(environment.variables)
+    return index
+
+
 def _resolve_endpoint(
     reference: str,
     index: IdentityIndex,
     context: IdentityContext,
+    environments: dict[str, dict[str, str]],
     unresolved: dict[str, UnresolvedEntity],
 ) -> str:
     """Return the node ID an edge endpoint points at.
 
     References that resolve to exactly one registered service become that
-    service's FQURI; anything else is recorded in ``unresolved`` and its
+    service's FQURI, including ``env:`` references whose Kubernetes value
+    names one. Anything else is recorded in ``unresolved`` and its
     unresolved-entity ID is returned.
     """
-    identity = resolve_reference(reference, index, context)
+    identity = resolve_reference(
+        reference, index, context
+    ) or resolve_env_var_reference(reference, environments, index, context)
     if identity is not None:
         return identity.uri
     entity = unresolved_entity(reference)
@@ -356,7 +383,10 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
     Each edge endpoint is then resolved against that inventory: a reference
     matching exactly one registered service becomes its FQURI, and any other
     endpoint (an IP address, a private or external DNS name, or an unknown
-    service) becomes an ``UnresolvedEntity`` node. Duplicate relationships
+    service) becomes an ``UnresolvedEntity`` node. An ``env:`` reference is
+    resolved through the variable's value in ``service_environments``; if
+    it cannot be mapped to exactly one registered service it stays an
+    ENVIRONMENT_VARIABLE entity, so release gating still sees it. Duplicate relationships
     are merged and self-referencing edges are dropped.
     """
     context = identity_context(state)
@@ -364,6 +394,7 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
         list(state.get("discovered_services", [])), context
     )
     index = IdentityIndex(service.identity for service in services)
+    environments = _environment_index(list(state.get("service_environments", [])))
 
     unresolved: dict[str, UnresolvedEntity] = {}
     merged_edges: dict[tuple[str, str], DependencyEdge] = {}
@@ -371,8 +402,12 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
         *state.get("static_edges", []),
         *state.get("runtime_edges", []),
     ]:
-        source = _resolve_endpoint(edge.source_service_id, index, context, unresolved)
-        target = _resolve_endpoint(edge.target_service_id, index, context, unresolved)
+        source = _resolve_endpoint(
+            edge.source_service_id, index, context, environments, unresolved
+        )
+        target = _resolve_endpoint(
+            edge.target_service_id, index, context, environments, unresolved
+        )
         if source == target:
             continue
         edge = edge.model_copy(

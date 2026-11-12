@@ -35,3 +35,6 @@ baselines/
 
 # Local dev server pid files and logs (start-app skill)
 .run/
+
+# Claude Code local workspace
+.claude/
