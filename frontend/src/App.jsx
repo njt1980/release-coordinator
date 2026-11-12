@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import ScopeInputCard from "./components/ScopeInputCard.jsx";
 
 function TextField({ id, label, value, onChange, placeholder, hint }) {
@@ -28,10 +28,19 @@ const INITIAL_CONFIG = {
   telemetryWorkspaceId: "",
 };
 
-const SYSTEM_LABELS = {
-  devops: "Azure DevOps",
-  kubernetes: "Kubernetes",
-  telemetry: "Telemetry",
+const SYSTEMS = ["devops", "kubernetes", "telemetry"];
+
+const IDLE_TEST = { status: "idle", message: "" };
+
+const INITIAL_TESTS = Object.fromEntries(SYSTEMS.map((system) => [system, IDLE_TEST]));
+
+// Which integration's access test is invalidated when a field changes.
+const FIELD_SYSTEM = {
+  devopsOrgUrl: "devops",
+  devopsProject: "devops",
+  devopsRepos: "devops",
+  k8sNamespaces: "kubernetes",
+  telemetryWorkspaceId: "telemetry",
 };
 
 const splitList = (value) =>
@@ -50,7 +59,7 @@ async function postJson(url, body) {
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await response.json().catch(() => null);
   if (!response.ok) {
@@ -71,74 +80,61 @@ function Spinner() {
   );
 }
 
-function VerificationResults({ results, error }) {
-  if (error) {
-    return (
-      <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
-        Connection test failed: {error}
-      </p>
-    );
-  }
-  if (!results) return null;
-  return (
-    <ul className="space-y-1">
-      {Object.entries(SYSTEM_LABELS).map(([key, label]) => {
-        const result = results[key];
-        if (!result) return null;
-        return (
-          <li
-            key={key}
-            className={`rounded-md px-3 py-2 text-sm ${
-              result.status ? "bg-green-50 text-green-800" : "bg-red-50 text-red-700"
-            }`}
-          >
-            <span className="font-medium">
-              {result.status ? "\u2713" : "\u2717"} {label}:
-            </span>{" "}
-            {result.message}
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
 export default function App() {
   const [config, setConfig] = useState(INITIAL_CONFIG);
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verifyResults, setVerifyResults] = useState(null);
-  const [verifyError, setVerifyError] = useState(null);
-  const [isVerified, setIsVerified] = useState(false);
+  const [tests, setTests] = useState(INITIAL_TESTS);
   const [isCrawling, setIsCrawling] = useState(false);
   const [crawlMessage, setCrawlMessage] = useState(null);
+  // Bumped whenever a system's scope changes or a new test starts, so a
+  // response from an outdated request is discarded.
+  const testGenerations = useRef(Object.fromEntries(SYSTEMS.map((system) => [system, 0])));
+
+  const setTest = (system, testState) =>
+    setTests((previous) => ({ ...previous, [system]: testState }));
 
   const update = (field) => (value) => {
     setConfig((previous) => ({ ...previous, [field]: value }));
-    // Any scope change invalidates a previous successful verification.
-    setIsVerified(false);
+    // A scope change invalidates only the affected integration's test.
+    const system = FIELD_SYSTEM[field];
+    testGenerations.current[system] += 1;
+    setTest(system, IDLE_TEST);
     setCrawlMessage(null);
   };
 
-  const isBusy = isVerifying || isCrawling;
+  const isVerified = SYSTEMS.every((system) => tests[system].status === "success");
 
-  const testConnections = async () => {
-    setIsVerifying(true);
-    setIsVerified(false);
-    setVerifyResults(null);
-    setVerifyError(null);
+  const runTest = async (system, request) => {
+    const generation = ++testGenerations.current[system];
+    setTest(system, { status: "loading", message: "" });
     setCrawlMessage(null);
+    let next;
     try {
-      const results = await postJson("/api/verify", buildPayload(config));
-      setVerifyResults(results);
-      setIsVerified(
-        Object.keys(SYSTEM_LABELS).every((key) => results?.[key]?.status === true)
-      );
+      const result = await request();
+      next = {
+        status: result?.status === true ? "success" : "error",
+        message: result?.message || "No response details returned.",
+      };
     } catch (error) {
-      setVerifyError(error.message);
-    } finally {
-      setIsVerifying(false);
+      next = { status: "error", message: error.message };
+    }
+    if (testGenerations.current[system] === generation) {
+      setTest(system, next);
     }
   };
+
+  const testDevops = () => runTest("devops", () => postJson("/api/verify/devops"));
+
+  const testKubernetes = () =>
+    runTest("kubernetes", () => {
+      const namespaces = splitList(config.k8sNamespaces);
+      if (namespaces.length === 0) {
+        throw new Error("Enter at least one namespace to test.");
+      }
+      return postJson("/api/verify/kubernetes", { target_namespaces: namespaces });
+    });
+
+  const testTelemetry = () =>
+    runTest("telemetry", () => postJson("/api/verify/telemetry"));
 
   const startCrawl = async () => {
     if (!isVerified) return;
@@ -169,6 +165,9 @@ export default function App() {
       <div className="space-y-6">
         <ScopeInputCard
           title="Azure DevOps"
+          onTest={testDevops}
+          testState={tests.devops}
+          testDisabled={isCrawling}
           description="Repositories and pipeline definitions used to discover service configuration and endpoints."
           requiredRole="Project Reader (PAT/Entra scopes: Code (Read), Build (Read))"
           securityJustification="Only lists repositories, reads repository files, and reads build pipeline definitions and their variables. No write, queue, or administer permissions are requested."
@@ -199,6 +198,9 @@ export default function App() {
 
         <ScopeInputCard
           title="Kubernetes"
+          onTest={testKubernetes}
+          testState={tests.kubernetes}
+          testDisabled={isCrawling}
           description="Service objects used to map the deployed topology of each namespace."
           requiredRole="Namespaced Role: get, list on services"
           securityJustification="Bound per namespace via RoleBinding. Only Service objects are listed. No access to Secrets, ConfigMaps, Pods/exec, or any create, update, patch, or delete verbs."
@@ -215,6 +217,9 @@ export default function App() {
 
         <ScopeInputCard
           title="Telemetry"
+          onTest={testTelemetry}
+          testState={tests.telemetry}
+          testDisabled={isCrawling}
           description="Application dependency telemetry used to confirm which service-to-service calls are actually active."
           requiredRole="Log Analytics Reader"
           securityJustification="Runs read-only KQL queries against the AppDependencies table for a bounded lookback window. Cannot modify workspace settings, data, or alerts."
@@ -232,12 +237,6 @@ export default function App() {
       <footer className="fixed inset-x-0 bottom-0 border-t border-slate-200 bg-white/95 shadow-lg backdrop-blur">
         <div className="mx-auto max-w-3xl space-y-3 px-4 py-4">
           <div aria-live="polite" className="max-h-48 space-y-2 overflow-y-auto">
-            {isVerifying && (
-              <p className="flex items-center gap-2 text-sm text-slate-600">
-                <Spinner /> Verifying read-only access to all integrations&hellip;
-              </p>
-            )}
-            <VerificationResults results={verifyResults} error={verifyError} />
             {crawlMessage && (
               <p
                 role={crawlMessage.ok ? "status" : "alert"}
@@ -252,18 +251,11 @@ export default function App() {
           <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
             <button
               type="button"
-              onClick={testConnections}
-              disabled={isBusy}
-              className="inline-flex items-center justify-center gap-2 rounded-md border border-indigo-600 px-4 py-2 text-sm font-semibold text-indigo-600 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isVerifying && <Spinner />}
-              Test Connections
-            </button>
-            <button
-              type="button"
               onClick={startCrawl}
-              disabled={!isVerified || isBusy}
-              title={isVerified ? undefined : "Run a successful connection test first"}
+              disabled={!isVerified || isCrawling}
+              title={
+                isVerified ? undefined : "Run a successful access test on every integration first"
+              }
               className="inline-flex items-center justify-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isCrawling && <Spinner />}

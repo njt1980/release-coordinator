@@ -6,6 +6,11 @@ from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
 from src.core.models import ServiceNode
+from src.tools._timeout import (
+    TIMEOUT_MESSAGE,
+    VERIFY_TIMEOUT_SECONDS,
+    run_with_timeout,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -32,15 +37,30 @@ class KubernetesExtractor:
         The check is namespaced because the required RBAC is a namespaced
         Role; a cluster-wide list would fail for correctly scoped identities.
 
+        The request is bounded by VERIFY_TIMEOUT_SECONDS, both via the
+        client's own request timeout and an overall deadline.
+
         Returns:
             (True, "Success") when services are listable, otherwise
             (False, <error message>).
         """
-        if self._core_v1_api is None:
+        core_v1_api = self._core_v1_api
+        if core_v1_api is None:
             return False, "Kubernetes client configuration could not be loaded"
         try:
-            self._core_v1_api.list_namespaced_service(namespace, limit=1)
+            run_with_timeout(
+                lambda: core_v1_api.list_namespaced_service(
+                    namespace, limit=1, _request_timeout=VERIFY_TIMEOUT_SECONDS
+                ),
+                VERIFY_TIMEOUT_SECONDS,
+            )
             return True, "Success"
+        except TimeoutError:
+            logger.warning(
+                "Kubernetes access verification timed out for namespace %s",
+                namespace,
+            )
+            return False, TIMEOUT_MESSAGE
         except Exception as error:
             logger.warning(
                 "Kubernetes access verification failed for namespace %s: %s",

@@ -13,6 +13,11 @@ from azure.monitor.query import LogsQueryClient
 from pydantic import BaseModel, Field, ValidationError
 
 from src.core.models import DependencyEdge, DiscoveryMethod
+from src.tools._timeout import (
+    TIMEOUT_MESSAGE,
+    VERIFY_TIMEOUT_SECONDS,
+    run_with_timeout,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -52,6 +57,8 @@ class TelemetryExtractor:
         """Confirm query access with a trivial KQL statement that scans no data.
 
         In mock mode no Azure access is required, so the check passes.
+        Otherwise the query is bounded by a strict VERIFY_TIMEOUT_SECONDS
+        deadline.
 
         Returns:
             (True, "Success") when the query succeeds, otherwise
@@ -60,17 +67,26 @@ class TelemetryExtractor:
         if self._source == "mock":
             return True, "Success"
         try:
-            if self._client is None:
+            client = self._client
+            if client is None:
                 raise RuntimeError("Azure telemetry client was not initialized")
             query = "print ok=1"
             timespan = timedelta(minutes=5)
-            if self._resource_id:
-                response = self._client.query_resource(
-                    self._resource_id, query, timespan=timespan
+            resource_id = self._resource_id
+            workspace_id = self._workspace_id
+            if resource_id:
+                response = run_with_timeout(
+                    lambda: client.query_resource(
+                        resource_id, query, timespan=timespan
+                    ),
+                    VERIFY_TIMEOUT_SECONDS,
                 )
-            elif self._workspace_id:
-                response = self._client.query_workspace(
-                    self._workspace_id, query, timespan=timespan
+            elif workspace_id:
+                response = run_with_timeout(
+                    lambda: client.query_workspace(
+                        workspace_id, query, timespan=timespan
+                    ),
+                    VERIFY_TIMEOUT_SECONDS,
                 )
             else:
                 raise ValueError(
@@ -80,6 +96,9 @@ class TelemetryExtractor:
             if not hasattr(response, "tables"):
                 raise RuntimeError(str(getattr(response, "error", response)))
             return True, "Success"
+        except TimeoutError:
+            logger.warning("Telemetry access verification timed out")
+            return False, TIMEOUT_MESSAGE
         except Exception as error:
             logger.warning("Telemetry access verification failed: %s", error)
             return False, str(error)

@@ -9,6 +9,12 @@ from azure.devops.connection import Connection
 from azure.identity import DefaultAzureCredential
 from msrest.authentication import BasicTokenAuthentication
 
+from src.tools._timeout import (
+    TIMEOUT_MESSAGE,
+    VERIFY_TIMEOUT_SECONDS,
+    run_with_timeout,
+)
+
 
 logger = logging.getLogger(__name__)
 _AZURE_DEVOPS_SCOPE = "499b84ac-1321-427f-aa17-267ca6975798/.default"
@@ -67,14 +73,25 @@ class DevOpsExtractor:
     def verify_access(self) -> tuple[bool, str]:
         """Confirm read access by fetching the configured project's metadata.
 
+        Token acquisition and the project lookup share a strict
+        VERIFY_TIMEOUT_SECONDS deadline so a hanging credential chain or
+        network call cannot block the caller.
+
         Returns:
             (True, "Success") when the project is readable, otherwise
             (False, <error message>).
         """
-        try:
+
+        def _check() -> None:
             connection = self._get_connection()
             connection.clients.get_core_client().get_project(self._project)
+
+        try:
+            run_with_timeout(_check, VERIFY_TIMEOUT_SECONDS)
             return True, "Success"
+        except TimeoutError:
+            logger.warning("Azure DevOps access verification timed out")
+            return False, TIMEOUT_MESSAGE
         except Exception as error:
             logger.warning("Azure DevOps access verification failed: %s", error)
             return False, str(error)

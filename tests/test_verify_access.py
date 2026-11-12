@@ -1,13 +1,49 @@
 """Tests for the pre-flight read-only access verification workflow."""
 
+import threading
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from src import api
-from src.api import OnboardingPayload, VerificationResponse
+from src.api import KubernetesVerificationRequest, SystemVerification
+from src.tools import _timeout
+from src.tools._timeout import TIMEOUT_MESSAGE
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.telemetry_extractor import TelemetryExtractor
+
+
+@contextmanager
+def _hanging_call(module: object) -> Iterator[threading.Event]:
+    """Shrink the verify deadline and yield an event a fake SDK call blocks on."""
+    release = threading.Event()
+    with patch.object(module, "VERIFY_TIMEOUT_SECONDS", 0.05):
+        try:
+            yield release
+        finally:
+            release.set()
+
+
+class RunWithTimeoutTests(unittest.TestCase):
+    def test_returns_result(self) -> None:
+        self.assertEqual(_timeout.run_with_timeout(lambda: 42, 1.0), 42)
+
+    def test_reraises_errors(self) -> None:
+        def boom() -> None:
+            raise ValueError("boom")
+
+        with self.assertRaises(ValueError):
+            _timeout.run_with_timeout(boom, 1.0)
+
+    def test_raises_timeout_error(self) -> None:
+        release = threading.Event()
+        try:
+            with self.assertRaises(TimeoutError):
+                _timeout.run_with_timeout(release.wait, 0.05)
+        finally:
+            release.set()
 
 
 class DevOpsVerifyAccessTests(unittest.TestCase):
@@ -34,6 +70,14 @@ class DevOpsVerifyAccessTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("AZURE_DEVOPS_PROJECT", message)
 
+    def test_hanging_token_request_times_out(self) -> None:
+        from src.tools import devops_extractor
+
+        extractor = self._extractor()
+        with _hanging_call(devops_extractor) as release:
+            extractor._credential.get_token.side_effect = lambda _: release.wait()
+            self.assertEqual(extractor.verify_access(), (False, TIMEOUT_MESSAGE))
+
 
 class KubernetesVerifyAccessTests(unittest.TestCase):
     def _extractor(self, api_client: MagicMock | None) -> KubernetesExtractor:
@@ -46,8 +90,21 @@ class KubernetesVerifyAccessTests(unittest.TestCase):
         extractor = self._extractor(api_client)
         self.assertEqual(extractor.verify_access("payments"), (True, "Success"))
         api_client.list_namespaced_service.assert_called_once_with(
-            "payments", limit=1
+            "payments", limit=1, _request_timeout=5.0
         )
+
+    def test_hanging_request_times_out(self) -> None:
+        from src.tools import k8s_extractor
+
+        api_client = MagicMock()
+        with _hanging_call(k8s_extractor) as release:
+            api_client.list_namespaced_service.side_effect = (
+                lambda *_, **__: release.wait()
+            )
+            self.assertEqual(
+                self._extractor(api_client).verify_access("payments"),
+                (False, TIMEOUT_MESSAGE),
+            )
 
     def test_forbidden_returns_error(self) -> None:
         api_client = MagicMock()
@@ -87,31 +144,50 @@ class TelemetryVerifyAccessTests(unittest.TestCase):
         extractor._client.query_workspace.side_effect = Exception("denied")
         self.assertEqual(extractor.verify_access(), (False, "denied"))
 
+    def test_azure_hanging_query_times_out(self) -> None:
+        from src.tools import telemetry_extractor
+
+        extractor = self._extractor("azure")
+        with _hanging_call(telemetry_extractor) as release:
+            extractor._client.query_workspace.side_effect = (
+                lambda *_, **__: release.wait()
+            )
+            self.assertEqual(extractor.verify_access(), (False, TIMEOUT_MESSAGE))
+
 
 class VerifyEndpointTests(unittest.TestCase):
-    def test_maps_each_system_result(self) -> None:
-        payload = OnboardingPayload(
-            target_repositories=["repo"],
-            target_namespaces=["ns-a", "ns-b"],
-            workspace_id="ws",
-        )
+    def test_devops_endpoint_maps_result(self) -> None:
+        with patch.object(api, "DevOpsExtractor") as devops_cls:
+            devops_cls.return_value.verify_access.return_value = (True, "Success")
+            response = api.verify_devops_endpoint()
+        self.assertEqual(response, SystemVerification(status=True, message="Success"))
+
+    def test_kubernetes_endpoint_reports_failing_namespaces(self) -> None:
+        payload = KubernetesVerificationRequest(target_namespaces=["ns-a", "ns-b"])
         k8s = MagicMock()
         k8s.verify_access.side_effect = [(True, "Success"), (False, "Forbidden")]
-        with (
-            patch.object(api, "DevOpsExtractor") as devops_cls,
-            patch.object(api, "KubernetesExtractor", return_value=k8s),
-            patch.object(api, "TelemetryExtractor") as telemetry_cls,
-        ):
-            devops_cls.return_value.verify_access.return_value = (True, "Success")
-            telemetry_cls.side_effect = ValueError("bad TELEMETRY_SOURCE")
-            response = api.verify(payload)
+        with patch.object(api, "KubernetesExtractor", return_value=k8s):
+            response = api.verify_kubernetes_endpoint(payload)
+        self.assertFalse(response.status)
+        self.assertEqual(response.message, "ns-b: Forbidden")
 
-        self.assertIsInstance(response, VerificationResponse)
-        self.assertTrue(response.devops.status)
-        self.assertFalse(response.kubernetes.status)
-        self.assertEqual(response.kubernetes.message, "ns-b: Forbidden")
-        self.assertFalse(response.telemetry.status)
-        self.assertEqual(response.telemetry.message, "bad TELEMETRY_SOURCE")
+    def test_telemetry_endpoint_reports_construction_errors(self) -> None:
+        with patch.object(api, "TelemetryExtractor") as telemetry_cls:
+            telemetry_cls.side_effect = ValueError("bad TELEMETRY_SOURCE")
+            response = api.verify_telemetry_endpoint()
+        self.assertFalse(response.status)
+        self.assertEqual(response.message, "bad TELEMETRY_SOURCE")
+
+    def test_routes_are_registered(self) -> None:
+        paths = {route.path for route in api.app.routes}
+        self.assertTrue(
+            {
+                "/api/verify/devops",
+                "/api/verify/kubernetes",
+                "/api/verify/telemetry",
+            }.issubset(paths)
+        )
+        self.assertNotIn("/api/verify", paths)
 
 
 if __name__ == "__main__":

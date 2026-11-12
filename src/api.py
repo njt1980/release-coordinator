@@ -39,12 +39,10 @@ class SystemVerification(BaseModel):
     message: str
 
 
-class VerificationResponse(BaseModel):
-    """Pre-flight access results keyed by integration."""
+class KubernetesVerificationRequest(BaseModel):
+    """Namespaces whose read access should be checked."""
 
-    devops: SystemVerification
-    kubernetes: SystemVerification
-    telemetry: SystemVerification
+    target_namespaces: list[str] = Field(min_length=1)
 
 
 def _to_verification(result: tuple[bool, str]) -> SystemVerification:
@@ -115,11 +113,21 @@ def onboard(
     )
 
 
-@app.post("/api/verify", response_model=VerificationResponse)
-def verify(payload: OnboardingPayload) -> VerificationResponse:
-    """Run pre-flight read-only access checks against every integration."""
-    return VerificationResponse(
-        devops=verify_devops(),
-        kubernetes=verify_kubernetes(list(payload.target_namespaces)),
-        telemetry=verify_telemetry(),
-    )
+@app.post("/api/verify/devops", response_model=SystemVerification)
+def verify_devops_endpoint() -> SystemVerification:
+    """Run the pre-flight read-only access check for Azure DevOps."""
+    return verify_devops()
+
+
+@app.post("/api/verify/kubernetes", response_model=SystemVerification)
+def verify_kubernetes_endpoint(
+    payload: KubernetesVerificationRequest,
+) -> SystemVerification:
+    """Run the pre-flight read-only access check for Kubernetes namespaces."""
+    return verify_kubernetes(list(payload.target_namespaces))
+
+
+@app.post("/api/verify/telemetry", response_model=SystemVerification)
+def verify_telemetry_endpoint() -> SystemVerification:
+    """Run the pre-flight read-only access check for telemetry."""
+    return verify_telemetry()
