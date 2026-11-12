@@ -1,13 +1,14 @@
 """FastAPI boundary that lets a frontend trigger the Day-Zero discovery engine."""
 
 import json
-from typing import Any, Literal, Self
+from typing import Literal, Self
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
+from src.core.models import DependencyEdge, ServiceNode
 from src.discovery_engine.graph import discovery_app
 from src.discovery_engine.nodes import KNOWLEDGE_GRAPH_PATH
 from src.discovery_engine.state import DiscoveryGraphState
@@ -80,17 +81,23 @@ JobStatus = Literal["queued", "running", "completed", "failed"]
 
 
 class CrawlResults(BaseModel):
-    """Summary of the knowledge graph produced by a completed discovery run."""
+    """Knowledge graph produced by a completed discovery run.
+
+    Carries the discovered services and dependency edges alongside their
+    counts so the frontend can show what was extracted.
+    """
 
     service_count: int = Field(ge=0)
     edge_count: int = Field(ge=0)
+    services: list[ServiceNode]
+    edges: list[DependencyEdge]
 
 
 class PersistedGraph(BaseModel):
-    """Shape of ``knowledge_graph.json`` needed to summarize a run."""
+    """Shape of ``knowledge_graph.json`` needed to report a run's results."""
 
-    services: list[Any]
-    edges: list[Any]
+    services: list[ServiceNode]
+    edges: list[DependencyEdge]
 
 
 class JobRecord(BaseModel):
@@ -201,15 +208,20 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
 
 
 def summarize_knowledge_graph() -> CrawlResults:
-    """Count the services and dependency edges in the persisted knowledge graph.
+    """Load the services and dependency edges from the persisted knowledge graph.
 
-    Raises if the file is missing or does not contain ``services`` and
+    Raises if the file is missing or does not contain valid ``services`` and
     ``edges`` lists, so a run without a readable graph is not reported as
     completed.
     """
     raw_graph = json.loads(KNOWLEDGE_GRAPH_PATH.read_text(encoding="utf-8"))
     graph = PersistedGraph.model_validate(raw_graph)
-    return CrawlResults(service_count=len(graph.services), edge_count=len(graph.edges))
+    return CrawlResults(
+        service_count=len(graph.services),
+        edge_count=len(graph.edges),
+        services=graph.services,
+        edges=graph.edges,
+    )
 
 
 def execute_discovery(state: DiscoveryGraphState) -> CrawlResults:

@@ -150,11 +150,49 @@ function CrawlSummary({ results }) {
   );
 }
 
+function LedgerSection({ title, count, children }) {
+  return (
+    <details className="group rounded-md border border-slate-200 bg-white">
+      <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium text-slate-800">
+        {title} ({count})
+      </summary>
+      <ul className="max-h-40 space-y-1 overflow-y-auto border-t border-slate-100 px-3 py-2 font-mono text-xs text-slate-700">
+        {count === 0 ? <li className="font-sans text-slate-500">None discovered.</li> : children}
+      </ul>
+    </details>
+  );
+}
+
+// Lists the extracted entities so users can verify the crawl, not just its counts.
+function DiscoveryLedger({ services, edges }) {
+  return (
+    <section aria-labelledby="discovery-ledger-heading" className="space-y-2">
+      <h2 id="discovery-ledger-heading" className="text-sm font-semibold text-slate-900">
+        Discovery Ledger
+      </h2>
+      <LedgerSection title="Services" count={services.length}>
+        {services.map((service) => (
+          <li key={service.service_id}>{service.service_id}</li>
+        ))}
+      </LedgerSection>
+      <LedgerSection title="Dependencies" count={edges.length}>
+        {edges.map((edge, index) => (
+          <li key={`${edge.source_service_id}->${edge.target_service_id}-${index}`}>
+            {edge.source_service_id} ➔ {edge.target_service_id}
+          </li>
+        ))}
+      </LedgerSection>
+    </section>
+  );
+}
+
 export default function App() {
   const [config, setConfig] = useState(INITIAL_CONFIG);
   const [tests, setTests] = useState(INITIAL_TESTS);
   const [isCrawling, setIsCrawling] = useState(false);
   const [crawlMessage, setCrawlMessage] = useState(null);
+  // Services and edges extracted by the last completed crawl, or null.
+  const [ledger, setLedger] = useState(null);
   // Bumped whenever a system's scope changes or a new test starts, so a
   // response from an outdated request is discarded.
   const testGenerations = useRef(Object.fromEntries(SYSTEMS.map((system) => [system, 0])));
@@ -246,6 +284,12 @@ export default function App() {
       try {
         const job = await getJson(`/api/onboard/${encodeURIComponent(jobId)}`);
         if (isTerminal(job.status)) {
+          if (job.status === "completed" && job.results) {
+            setLedger({
+              services: job.results.services ?? [],
+              edges: job.results.edges ?? [],
+            });
+          }
           finishCrawl(jobBanner(job));
         } else {
           setCrawlMessage(jobBanner(job));
@@ -266,6 +310,7 @@ export default function App() {
     stopPolling();
     setIsCrawling(true);
     setCrawlMessage(null);
+    setLedger(null);
     try {
       const response = await postJson("/api/onboard", buildPayload(config, tests));
       setCrawlMessage(jobBanner({ job_id: response.job_id, status: "queued" }));
@@ -363,6 +408,9 @@ export default function App() {
         <div className="mx-auto max-w-3xl space-y-3 px-4 py-4">
           <div aria-live="polite" className="max-h-48 space-y-2 overflow-y-auto">
             {crawlMessage?.summary && <CrawlSummary results={crawlMessage.summary} />}
+            {crawlMessage?.summary && ledger && (
+              <DiscoveryLedger services={ledger.services} edges={ledger.edges} />
+            )}
             {crawlMessage && !crawlMessage.summary && (
               <p
                 role={crawlMessage.tone === "error" ? "alert" : "status"}

@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,7 @@ from fastapi import BackgroundTasks, HTTPException
 
 from src import api
 from src.api import CrawlResults, JobRecord, OnboardingPayload
+from src.core.models import DependencyEdge, DiscoveryMethod, ServiceNode
 
 
 class OnboardingJobTests(unittest.TestCase):
@@ -48,10 +50,24 @@ class OnboardingJobTests(unittest.TestCase):
     def test_wrapper_marks_running_then_completed_with_results(self) -> None:
         observed: list[str] = []
 
+        services = [ServiceNode(service_id=name, name=name) for name in "abc"]
+        edges = [
+            DependencyEdge(
+                source_service_id="a",
+                target_service_id="b",
+                discovery_methods=[DiscoveryMethod.STATIC_CODE],
+                confidence_score=0.5,
+                last_observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+        ]
+
         def fake_invoke(state: api.DiscoveryGraphState) -> dict[str, object]:
             observed.append(api._jobs["job-1"].status)
             self._write_graph(
-                {"services": [{"id": "a"}, {"id": "b"}, {"id": "c"}], "edges": [{}]}
+                {
+                    "services": [s.model_dump(mode="json") for s in services],
+                    "edges": [e.model_dump(mode="json") for e in edges],
+                }
             )
             return {}
 
@@ -64,9 +80,19 @@ class OnboardingJobTests(unittest.TestCase):
             JobRecord(
                 job_id="job-1",
                 status="completed",
-                results=CrawlResults(service_count=3, edge_count=1),
+                results=CrawlResults(
+                    service_count=3, edge_count=1, services=services, edges=edges
+                ),
             ),
         )
+
+    def test_wrapper_fails_when_graph_entries_invalid(self) -> None:
+        self._write_graph({"services": [{"id": "a"}], "edges": []})
+        with patch.object(api, "discovery_app", MagicMock()):
+            asyncio.run(api.run_discovery_job("job-6", self._state()))
+
+        self.assertEqual(api._jobs["job-6"].status, "failed")
+        self.assertIsNone(api._jobs["job-6"].results)
 
     def test_wrapper_fails_when_graph_file_missing(self) -> None:
         with patch.object(api, "discovery_app", MagicMock()):
