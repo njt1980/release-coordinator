@@ -36,6 +36,8 @@ How to read the dependency graph you are given:
 - Edges carry discovery evidence: STATIC_CODE (referenced in source),
   K8S_MANIFEST, or RUNTIME_TELEMETRY (observed in live traffic). Runtime
   evidence is the strongest signal that a dependency is real and active.
+- Edges also carry provenance. Provenance "mock_fixture" (confidence 0.0)
+  is demo fixture data, not observed traffic: do not treat it as evidence.
 
 Scoring guidance for risk_score (0.0 to 1.0):
 - Low (< 0.3): internal refactors, no contract change, few or no upstream

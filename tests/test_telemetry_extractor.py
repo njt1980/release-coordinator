@@ -211,6 +211,11 @@ class MockSourceTests(unittest.TestCase):
 
         self.assertEqual(result.status, DiscoveryStatus.SUCCESS)
         self.assertTrue(result.items)
+        for edge in result.items:
+            self.assertEqual(edge.provenance, "mock_fixture")
+            self.assertEqual(edge.environment, "mock")
+            self.assertEqual(edge.confidence_score, 0.0)
+            self.assertTrue(edge.is_mock_fixture)
 
 
 if __name__ == "__main__":

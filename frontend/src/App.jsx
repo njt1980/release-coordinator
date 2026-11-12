@@ -131,6 +131,26 @@ function Spinner() {
   );
 }
 
+// Prominent warning that the active baseline relies on mock fixture data.
+function DemoModeBanner() {
+  return (
+    <section
+      role="alert"
+      aria-labelledby="demo-mode-heading"
+      className="rounded-md border-2 border-amber-500 bg-amber-100 px-4 py-3 text-amber-950"
+    >
+      <h2 id="demo-mode-heading" className="text-sm font-bold uppercase tracking-wide">
+        ⚠ Demo Mode
+      </h2>
+      <p className="mt-1 text-sm">
+        This baseline relies on mock telemetry fixtures, not observed traffic. Mock
+        dependencies carry zero confidence and must not be used for real release
+        decisions.
+      </p>
+    </section>
+  );
+}
+
 // Shown in place of the status banner once a discovery run has completed.
 function CrawlSummary({ results }) {
   return (
@@ -145,6 +165,9 @@ function CrawlSummary({ results }) {
       <p className="mt-1 text-sm">
         Baseline Established. Discovered {results.service_count} Services and{" "}
         {results.edge_count} Dependencies. The Release Coordinator is now active.
+      </p>
+      <p className="mt-1 font-mono text-xs text-green-800">
+        Snapshot {results.tenant}/{results.project_id}/{results.snapshot_id}
       </p>
     </section>
   );
@@ -179,6 +202,11 @@ function DiscoveryLedger({ services, edges }) {
         {edges.map((edge, index) => (
           <li key={`${edge.source_service_id}->${edge.target_service_id}-${index}`}>
             {edge.source_service_id} ➔ {edge.target_service_id}
+            {edge.provenance?.split(",").includes("mock_fixture") && (
+              <span className="ml-2 rounded bg-amber-200 px-1 font-sans text-amber-900">
+                mock
+              </span>
+            )}
           </li>
         ))}
       </LedgerSection>
@@ -407,6 +435,7 @@ export default function App() {
       <footer className="fixed inset-x-0 bottom-0 border-t border-slate-200 bg-white/95 shadow-lg backdrop-blur">
         <div className="mx-auto max-w-3xl space-y-3 px-4 py-4">
           <div aria-live="polite" className="max-h-48 space-y-2 overflow-y-auto">
+            {crawlMessage?.summary?.demo_mode && <DemoModeBanner />}
             {crawlMessage?.summary && <CrawlSummary results={crawlMessage.summary} />}
             {crawlMessage?.summary && ledger && (
               <DiscoveryLedger services={ledger.services} edges={ledger.edges} />

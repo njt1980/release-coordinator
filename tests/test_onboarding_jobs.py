@@ -1,7 +1,6 @@
 """Tests for in-memory discovery job tracking and the status endpoint."""
 
 import asyncio
-import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -12,14 +11,16 @@ from fastapi import BackgroundTasks, HTTPException
 
 from src import api
 from src.api import CrawlResults, JobRecord, OnboardingPayload
-from src.discovery_engine import nodes as discovery_nodes
 from src.core.models import (
     DependencyEdge,
+    DiscoveryIncompleteError,
     DiscoveryMethod,
     DiscoveryStageReport,
     DiscoveryStatus,
+    KnowledgeGraph,
     ServiceNode,
 )
+from src.tools.baseline_store import BaselineScope, BaselineStore
 
 
 REPORTS = [
@@ -39,17 +40,28 @@ class OnboardingJobTests(unittest.TestCase):
         self.addCleanup(jobs_patch.stop)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.graph_path = Path(tmp.name) / "knowledge_graph.json"
-        path_patch = patch.object(api, "KNOWLEDGE_GRAPH_PATH", self.graph_path)
-        path_patch.start()
-        self.addCleanup(path_patch.stop)
+        self.root = Path(tmp.name)
+        self.store = BaselineStore(self.root)
+        store_patch = patch.object(api, "BASELINE_STORE", self.store)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
+        self.scope = BaselineScope(tenant="acme", project_id="shop")
 
-    def _write_graph(self, graph: object) -> None:
-        self.graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    def _write_raw(self, snapshot_id: str, content: str) -> None:
+        directory = self.store.project_dir(self.scope)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{snapshot_id}.json").write_text(content, encoding="utf-8")
+
+    def _invoke_returning(self, snapshot_id: str) -> MagicMock:
+        return MagicMock(
+            invoke=MagicMock(return_value={"baseline_snapshot_id": snapshot_id})
+        )
 
     def _state(self) -> api.DiscoveryGraphState:
         return api.build_discovery_state(
-            OnboardingPayload(target_namespaces=["payments"])
+            OnboardingPayload(
+                tenant="acme", project_id="shop", target_namespaces=["payments"]
+            )
         )
 
     def test_onboard_registers_queued_job_and_schedules_wrapper(self) -> None:
@@ -78,16 +90,19 @@ class OnboardingJobTests(unittest.TestCase):
             )
         ]
 
+        snapshot_ids: list[str] = []
+
         def fake_invoke(state: api.DiscoveryGraphState) -> dict[str, object]:
             observed.append(api._jobs["job-1"].status)
-            self._write_graph(
-                {
-                    "services": [s.model_dump(mode="json") for s in services],
-                    "edges": [e.model_dump(mode="json") for e in edges],
-                    "discovery": [r.model_dump(mode="json") for r in REPORTS],
-                }
+            scope = BaselineScope(
+                tenant=state["tenant"], project_id=state["project_id"]
             )
-            return {}
+            graph = KnowledgeGraph(services=services, edges=edges, discovery=REPORTS)
+            stored = self.store.write(scope, graph)
+            snapshot_ids.append(stored.snapshot_id)
+            # A concurrent run for the same project lands a newer snapshot.
+            self.store.write(scope, graph.model_copy(update={"services": []}))
+            return {"baseline_snapshot_id": stored.snapshot_id}
 
         with patch.object(api, "discovery_app", MagicMock(invoke=fake_invoke)):
             asyncio.run(api.run_discovery_job("job-1", self._state()))
@@ -99,6 +114,10 @@ class OnboardingJobTests(unittest.TestCase):
                 job_id="job-1",
                 status="completed",
                 results=CrawlResults(
+                    tenant="acme",
+                    project_id="shop",
+                    snapshot_id=snapshot_ids[0],
+                    demo_mode=False,
                     service_count=3,
                     edge_count=1,
                     services=services,
@@ -109,7 +128,7 @@ class OnboardingJobTests(unittest.TestCase):
         )
 
     def test_wrapper_fails_when_discovery_refuses_baseline(self) -> None:
-        error = discovery_nodes.DiscoveryIncompleteError(
+        error = DiscoveryIncompleteError(
             ["RUNTIME_TELEMETRY FAILED: query timed out"]
         )
         failing = MagicMock(invoke=MagicMock(side_effect=error))
@@ -133,25 +152,23 @@ class OnboardingJobTests(unittest.TestCase):
         ]
         for job_id, discovery in [("job-8", None), ("job-9", incomplete)]:
             with self.subTest(job_id=job_id):
-                graph: dict[str, object] = {"services": [], "edges": []}
-                if discovery is not None:
-                    graph["discovery"] = [r.model_dump(mode="json") for r in discovery]
-                self._write_graph(graph)
-                with patch.object(api, "discovery_app", MagicMock()):
+                graph = KnowledgeGraph(services=[], edges=[], discovery=discovery)
+                self._write_raw(job_id, graph.model_dump_json())
+                with patch.object(api, "discovery_app", self._invoke_returning(job_id)):
                     asyncio.run(api.run_discovery_job(job_id, self._state()))
                 self.assertEqual(api._jobs[job_id].status, "failed")
                 self.assertIsNone(api._jobs[job_id].results)
 
     def test_wrapper_fails_when_graph_entries_invalid(self) -> None:
-        self._write_graph({"services": [{"id": "a"}], "edges": []})
-        with patch.object(api, "discovery_app", MagicMock()):
+        self._write_raw("job-6", '{"services": [{"id": "a"}], "edges": []}')
+        with patch.object(api, "discovery_app", self._invoke_returning("job-6")):
             asyncio.run(api.run_discovery_job("job-6", self._state()))
 
         self.assertEqual(api._jobs["job-6"].status, "failed")
         self.assertIsNone(api._jobs["job-6"].results)
 
-    def test_wrapper_fails_when_graph_file_missing(self) -> None:
-        with patch.object(api, "discovery_app", MagicMock()):
+    def test_wrapper_fails_when_snapshot_missing(self) -> None:
+        with patch.object(api, "discovery_app", self._invoke_returning("job-4")):
             asyncio.run(api.run_discovery_job("job-4", self._state()))
 
         record = api._jobs["job-4"]
@@ -160,12 +177,48 @@ class OnboardingJobTests(unittest.TestCase):
         self.assertTrue(record.error_message)
 
     def test_wrapper_fails_when_graph_file_malformed(self) -> None:
-        self._write_graph({"services": []})
-        with patch.object(api, "discovery_app", MagicMock()):
+        self._write_raw("job-5", '{"services": []}')
+        with patch.object(api, "discovery_app", self._invoke_returning("job-5")):
             asyncio.run(api.run_discovery_job("job-5", self._state()))
 
         self.assertEqual(api._jobs["job-5"].status, "failed")
         self.assertIsNone(api._jobs["job-5"].results)
+
+    def test_wrapper_fails_when_run_reports_no_snapshot(self) -> None:
+        with patch.object(api, "discovery_app", MagicMock(invoke=lambda s: {})):
+            asyncio.run(api.run_discovery_job("job-10", self._state()))
+
+        record = api._jobs["job-10"]
+        self.assertEqual(record.status, "failed")
+        assert record.error_message is not None
+        self.assertIn("without writing a baseline snapshot", record.error_message)
+
+    def test_latest_baseline_endpoint_exposes_demo_mode(self) -> None:
+        mock_edge = DependencyEdge(
+            source_service_id="a",
+            target_service_id="b",
+            discovery_methods=[DiscoveryMethod.RUNTIME_TELEMETRY],
+            confidence_score=0.0,
+            last_observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            provenance="mock_fixture",
+            environment="mock",
+        )
+        stored = self.store.write(
+            self.scope,
+            KnowledgeGraph(services=[], edges=[mock_edge], discovery=REPORTS),
+        )
+
+        results = api.get_latest_baseline("acme", "shop")
+
+        self.assertTrue(results.demo_mode)
+        self.assertEqual(results.snapshot_id, stored.snapshot_id)
+
+    def test_latest_baseline_endpoint_errors(self) -> None:
+        for tenant, project_id, code in [("acme", "none", 404), ("..", "shop", 422)]:
+            with self.subTest(tenant=tenant, project_id=project_id):
+                with self.assertRaises(HTTPException) as caught:
+                    api.get_latest_baseline(tenant, project_id)
+                self.assertEqual(caught.exception.status_code, code)
 
     def test_wrapper_records_failure_message(self) -> None:
         failing = MagicMock(invoke=MagicMock(side_effect=RuntimeError("boom")))
@@ -194,6 +247,7 @@ class OnboardingJobTests(unittest.TestCase):
             for method in getattr(route, "methods", set())
         }
         self.assertIn(("/api/onboard/{job_id}", "GET"), routes)
+        self.assertIn(("/api/baselines/{tenant}/{project_id}/latest", "GET"), routes)
 
 
 if __name__ == "__main__":

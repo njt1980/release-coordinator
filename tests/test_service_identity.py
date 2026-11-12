@@ -4,6 +4,8 @@ import unittest
 from datetime import datetime, timezone
 from typing import Any
 
+from pydantic import ValidationError
+
 from src.core.models import DependencyEdge, DiscoveryMethod, ServiceNode
 from src.core.service_ids import build_name_index, canonical_service_id
 from src.discovery_engine import nodes as discovery_nodes
@@ -88,6 +90,61 @@ class ReconcileCanonicalizationTests(unittest.TestCase):
             edges[0].discovery_methods,
             [DiscoveryMethod.STATIC_CODE, DiscoveryMethod.RUNTIME_TELEMETRY],
         )
+
+
+    def test_merging_keeps_mock_fixture_provenance_visible(self) -> None:
+        static = _edge("a", "b", DiscoveryMethod.STATIC_CODE).model_copy(
+            update={"provenance": "azure_devops"}
+        )
+        mock = DependencyEdge(
+            source_service_id="a",
+            target_service_id="b",
+            discovery_methods=[DiscoveryMethod.RUNTIME_TELEMETRY],
+            confidence_score=0.0,
+            last_observed_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            provenance="mock_fixture",
+            environment="mock",
+        )
+        state: Any = {
+            "discovered_services": [],
+            "static_edges": [static],
+            "runtime_edges": [mock],
+        }
+
+        graph = discovery_nodes.reconcile_knowledge_graph(state)["reconciled_graph"]
+        assert isinstance(graph, dict)
+
+        (edge,) = graph["edges"]
+        self.assertEqual(edge.provenance, "azure_devops,mock_fixture")
+        self.assertEqual(edge.environment, "unknown,mock")
+        self.assertEqual(edge.confidence_score, 0.7)
+        self.assertTrue(edge.is_mock_fixture)
+
+
+class EdgeProvenanceTests(unittest.TestCase):
+    def test_mock_fixture_edges_must_have_zero_confidence(self) -> None:
+        with self.assertRaises(ValidationError):
+            DependencyEdge(
+                source_service_id="a",
+                target_service_id="b",
+                discovery_methods=[DiscoveryMethod.RUNTIME_TELEMETRY],
+                confidence_score=1.0,
+                last_observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                provenance="mock_fixture",
+            )
+
+    def test_legacy_edges_default_to_unknown_labels(self) -> None:
+        edge = DependencyEdge.model_validate(
+            {
+                "source_service_id": "a",
+                "target_service_id": "b",
+                "discovery_methods": ["STATIC_CODE"],
+                "confidence_score": 0.7,
+                "last_observed_at": "2026-01-01T00:00:00Z",
+            }
+        )
+        self.assertEqual((edge.provenance, edge.environment), ("unknown", "unknown"))
+        self.assertFalse(edge.is_mock_fixture)
 
 
 if __name__ == "__main__":

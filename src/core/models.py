@@ -3,7 +3,7 @@
 from collections.abc import Iterable
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Generic, List, Literal, Optional, Self, TypeVar
+from typing import Dict, Final, Generic, List, Literal, Optional, Self, TypeVar
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -156,18 +156,55 @@ def baseline_problems(reports: list[DiscoveryStageReport]) -> list[str]:
     return problems
 
 
+class DiscoveryIncompleteError(RuntimeError):
+    """Raised when discovery evidence is too incomplete to become a baseline."""
+
+    def __init__(self, problems: list[str]) -> None:
+        super().__init__(
+            "Baseline not established; discovery is incomplete: "
+            + "; ".join(problems)
+        )
+        self.problems = problems
+
+
+MOCK_FIXTURE_PROVENANCE: Final[str] = "mock_fixture"
+UNKNOWN_LABEL: Final[str] = "unknown"
+LABEL_SEPARATOR: Final[str] = ","
+
+
 class DependencyEdge(BaseModel):
-    """A directed, evidence-backed relationship between two service nodes."""
+    """A directed, evidence-backed relationship between two service nodes.
+
+    ``provenance`` names where the evidence came from (for example
+    ``azure_devops``, ``azure_monitor`` or ``mock_fixture``) and
+    ``environment`` the deployment environment it was observed in. Merged
+    edges carry comma-separated labels. Both default to ``unknown`` so
+    snapshots written before they existed still load. Mock fixture evidence
+    is demo data, never real evidence, so it must carry zero confidence.
+    """
 
     source_service_id: str
     target_service_id: str
     discovery_methods: List[DiscoveryMethod]
     confidence_score: float = Field(ge=0.0, le=1.0)
     last_observed_at: datetime
+    provenance: str = Field(default=UNKNOWN_LABEL, min_length=1)
+    environment: str = Field(default=UNKNOWN_LABEL, min_length=1)
+
+    @model_validator(mode="after")
+    def _mock_fixtures_carry_no_confidence(self) -> Self:
+        if self.provenance == MOCK_FIXTURE_PROVENANCE and self.confidence_score != 0.0:
+            raise ValueError("mock_fixture edges must have a confidence_score of 0.0")
+        return self
+
+    @property
+    def is_mock_fixture(self) -> bool:
+        """Whether any of this edge's evidence comes from a mock fixture."""
+        return MOCK_FIXTURE_PROVENANCE in self.provenance.split(LABEL_SEPARATOR)
 
 
 class KnowledgeGraph(BaseModel):
-    """Shape of the persisted ``knowledge_graph.json`` baseline.
+    """Shape of one persisted discovery baseline snapshot.
 
     ``discovery`` is None for graphs written before discovery outcomes were
     recorded; such a graph cannot prove its discovery was complete.
@@ -176,6 +213,27 @@ class KnowledgeGraph(BaseModel):
     services: List[ServiceNode]
     edges: List[DependencyEdge]
     discovery: Optional[List[DiscoveryStageReport]] = None
+
+    @property
+    def uses_mock_data(self) -> bool:
+        """Whether any edge in this baseline relies on mock fixture evidence."""
+        return any(edge.is_mock_fixture for edge in self.edges)
+
+
+def ensure_complete_baseline(graph: KnowledgeGraph) -> None:
+    """Raise unless ``graph`` records a complete discovery run.
+
+    Raises:
+        DiscoveryIncompleteError: if discovery outcomes are missing, or any
+            stage FAILED, was PARTIAL, or did not report.
+    """
+    if graph.discovery is None:
+        raise DiscoveryIncompleteError(
+            ["knowledge graph does not record discovery outcomes"]
+        )
+    problems = baseline_problems(graph.discovery)
+    if problems:
+        raise DiscoveryIncompleteError(problems)
 
 
 class PullRequestPayload(BaseModel):

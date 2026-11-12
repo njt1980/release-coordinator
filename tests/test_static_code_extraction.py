@@ -159,6 +159,8 @@ class ScanRepositoryTests(unittest.TestCase):
 
 def _devops_state() -> DiscoveryGraphState:
     return {
+        "tenant": "default",
+        "project_id": "default",
         "workspace_id": "",
         "devops_org_url": "https://dev.azure.com/org",
         "devops_project": "proj",
@@ -169,6 +171,7 @@ def _devops_state() -> DiscoveryGraphState:
         "runtime_edges": [],
         "discovery_reports": [],
         "reconciled_graph": {},
+        "baseline_snapshot_id": "",
     }
 
 
@@ -220,6 +223,7 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
                 ("order-service", "rabbitmq"),
             ],
         )
+        self.assertEqual({e.provenance for e in edges}, {"azure_devops"})
         # repo-b failed, so the stage is PARTIAL rather than a clean SUCCESS.
         self.assertEqual(
             result["discovery_reports"],

@@ -1,6 +1,5 @@
 """FastAPI boundary that lets a frontend trigger the Day-Zero discovery engine."""
 
-import json
 from typing import Literal, Self
 from uuid import uuid4
 
@@ -8,22 +7,24 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
-from src.core.models import (
-    DependencyEdge,
-    DiscoveryStageReport,
-    KnowledgeGraph,
-    ServiceNode,
-    baseline_problems,
-)
+from src.core import config
+from src.core.models import DependencyEdge, DiscoveryStageReport, ServiceNode
 from src.discovery_engine.graph import discovery_app
-from src.discovery_engine.nodes import KNOWLEDGE_GRAPH_PATH, DiscoveryIncompleteError
 from src.discovery_engine.state import DiscoveryGraphState
+from src.tools.baseline_store import (
+    PATH_SEGMENT_PATTERN,
+    BaselineScope,
+    StoredBaseline,
+    default_store,
+)
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.telemetry_extractor import TelemetryExtractor
 
 
 app = FastAPI(title="Release Coordinator API")
+
+BASELINE_STORE = default_store()
 
 
 class OnboardingPayload(BaseModel):
@@ -32,9 +33,14 @@ class OnboardingPayload(BaseModel):
     Every integration is optional, but at least one must be configured.
     Azure DevOps is configured when both the organization URL and project are
     given, Kubernetes when at least one namespace is given, and telemetry when
-    a workspace ID is given.
+    a workspace ID is given. ``tenant`` and ``project_id`` select where the
+    run's baseline snapshot is stored.
     """
 
+    tenant: str = Field(default=config.DEFAULT_TENANT, pattern=PATH_SEGMENT_PATTERN)
+    project_id: str = Field(
+        default=config.DEFAULT_PROJECT_ID, pattern=PATH_SEGMENT_PATTERN
+    )
     devops_org_url: str = ""
     devops_project: str = ""
     target_repositories: list[str] = Field(default_factory=list)
@@ -87,13 +93,18 @@ JobStatus = Literal["queued", "running", "completed", "failed"]
 
 
 class CrawlResults(BaseModel):
-    """Knowledge graph produced by a completed discovery run.
+    """One stored baseline snapshot, summarized for the frontend.
 
     Carries the discovered services and dependency edges alongside their
-    counts so the frontend can show what was extracted, plus the outcome of
-    each discovery stage.
+    counts so the frontend can show what was extracted, the outcome of each
+    discovery stage, and which snapshot this is. ``demo_mode`` is true when
+    the baseline relies on mock fixture data rather than real evidence.
     """
 
+    tenant: str
+    project_id: str
+    snapshot_id: str
+    demo_mode: bool
     service_count: int = Field(ge=0)
     edge_count: int = Field(ge=0)
     services: list[ServiceNode]
@@ -196,6 +207,8 @@ def verify_telemetry(workspace_id: str) -> SystemVerification:
 def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
     """Map an onboarding payload onto the initial discovery graph state."""
     return {
+        "tenant": payload.tenant,
+        "project_id": payload.project_id,
         "workspace_id": payload.workspace_id,
         "devops_org_url": payload.devops_org_url,
         "devops_project": payload.devops_project,
@@ -206,44 +219,49 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
         "runtime_edges": [],
         "discovery_reports": [],
         "reconciled_graph": {},
+        "baseline_snapshot_id": "",
     }
 
 
-def summarize_knowledge_graph() -> CrawlResults:
-    """Load the services and dependency edges from the persisted knowledge graph.
-
-    Raises if the file is missing, does not contain valid ``services`` and
-    ``edges`` lists, or does not record a complete discovery, so a run without
-    a trustworthy baseline is not reported as completed.
-    """
-    raw_graph = json.loads(KNOWLEDGE_GRAPH_PATH.read_text(encoding="utf-8"))
-    graph = KnowledgeGraph.model_validate(raw_graph)
-    if graph.discovery is None:
-        raise DiscoveryIncompleteError(
-            ["knowledge graph does not record discovery outcomes"]
-        )
-    problems = baseline_problems(graph.discovery)
-    if problems:
-        raise DiscoveryIncompleteError(problems)
+def summarize_baseline(baseline: StoredBaseline) -> CrawlResults:
+    """Summarize a stored baseline snapshot for the frontend."""
+    graph = baseline.graph
     return CrawlResults(
+        tenant=baseline.scope.tenant,
+        project_id=baseline.scope.project_id,
+        snapshot_id=baseline.snapshot_id,
+        demo_mode=baseline.demo_mode,
         service_count=len(graph.services),
         edge_count=len(graph.edges),
         services=graph.services,
         edges=graph.edges,
-        discovery=graph.discovery,
+        discovery=graph.discovery or [],
     )
 
 
 def execute_discovery(state: DiscoveryGraphState) -> CrawlResults:
-    """Run the discovery graph to completion and summarize what it persisted."""
-    discovery_app.invoke(state)
-    return summarize_knowledge_graph()
+    """Run the discovery graph and summarize the snapshot this run wrote.
+
+    The run's own snapshot is read back by ID, not the project's latest, so
+    a concurrent run for the same project cannot be reported in its place.
+
+    Raises:
+        RuntimeError: if the run finished without reporting a snapshot.
+        DiscoveryIncompleteError, OSError, ValueError: if the snapshot is
+            incomplete, missing or invalid.
+    """
+    final_state = discovery_app.invoke(state)
+    snapshot_id = (final_state or {}).get("baseline_snapshot_id")
+    if not snapshot_id:
+        raise RuntimeError("Discovery finished without writing a baseline snapshot")
+    scope = BaselineScope(tenant=state["tenant"], project_id=state["project_id"])
+    return summarize_baseline(BASELINE_STORE.read(scope, snapshot_id))
 
 
 async def run_discovery_job(job_id: str, state: DiscoveryGraphState) -> None:
     """Run the discovery graph for one job and record its outcome.
 
-    The synchronous graph and the graph file read run in the thread pool so
+    The synchronous graph and the snapshot read run in the thread pool so
     the event loop stays free to answer status polls while the crawl is in
     progress.
     """
@@ -289,6 +307,26 @@ def get_onboarding_job(job_id: str) -> JobRecord:
             status_code=status.HTTP_404_NOT_FOUND, detail="Unknown job ID"
         )
     return record
+
+
+@app.get(
+    "/api/baselines/{tenant}/{project_id}/latest", response_model=CrawlResults
+)
+def get_latest_baseline(tenant: str, project_id: str) -> CrawlResults:
+    """Return the project's newest complete baseline, including demo mode."""
+    try:
+        scope = BaselineScope(tenant=tenant, project_id=project_id)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    baseline = BASELINE_STORE.latest(scope)
+    if baseline is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No complete baseline for {tenant}/{project_id}",
+        )
+    return summarize_baseline(baseline)
 
 
 @app.post("/api/verify/devops", response_model=SystemVerification)

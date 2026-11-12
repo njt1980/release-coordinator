@@ -18,7 +18,12 @@ from azure.monitor.query import (
 )
 from pydantic import BaseModel, Field, ValidationError
 
-from src.core.models import DependencyEdge, DiscoveryMethod, DiscoveryResult
+from src.core.models import (
+    MOCK_FIXTURE_PROVENANCE,
+    DependencyEdge,
+    DiscoveryMethod,
+    DiscoveryResult,
+)
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
     VERIFY_TIMEOUT_SECONDS,
@@ -29,6 +34,8 @@ from src.tools._timeout import (
 logger = logging.getLogger(__name__)
 RuntimeMetrics: TypeAlias = dict[str, dict[str, int | float]]
 _REQUIRED_COLUMNS = frozenset({"Source", "Target", "LastObservedAt"})
+AZURE_MONITOR_PROVENANCE = "azure_monitor"
+MOCK_ENVIRONMENT = "mock"
 
 
 class _MockDependencyRecord(BaseModel):
@@ -110,6 +117,9 @@ class TelemetryExtractor:
 
         The local source reads AppDependencies-shaped records from the root
         mock_telemetry.json fixture. Set TELEMETRY_SOURCE=azure to use Azure.
+        Mock edges are labeled ``provenance="mock_fixture"`` and
+        ``environment="mock"`` with a confidence of 0.0: they are demo data,
+        not evidence of real traffic.
 
         Returns:
             SUCCESS with every observed edge, PARTIAL when some records or
@@ -179,7 +189,15 @@ class TelemetryExtractor:
                 failure_counts[record.source] += 1
 
         edges = [
-            _runtime_edge(source, target, observed_at)
+            DependencyEdge(
+                source_service_id=source,
+                target_service_id=target,
+                discovery_methods=[DiscoveryMethod.RUNTIME_TELEMETRY],
+                confidence_score=0.0,
+                last_observed_at=observed_at,
+                provenance=MOCK_FIXTURE_PROVENANCE,
+                environment=MOCK_ENVIRONMENT,
+            )
             for (source, target), observed_at in latest_observations.items()
         ]
         self._runtime_metrics = {
@@ -223,12 +241,14 @@ class TelemetryExtractor:
 
 
 def _runtime_edge(source: str, target: str, observed_at: datetime) -> DependencyEdge:
+    """Build an edge from live Azure Monitor telemetry."""
     return DependencyEdge(
         source_service_id=source,
         target_service_id=target,
         discovery_methods=[DiscoveryMethod.RUNTIME_TELEMETRY],
         confidence_score=1.0,
         last_observed_at=observed_at,
+        provenance=AZURE_MONITOR_PROVENANCE,
     )
 
 

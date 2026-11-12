@@ -1,26 +1,27 @@
 """Node functions for the release orchestration graph."""
 
-import json
 import logging
-from pathlib import Path
 
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
 from src.core.models import (
     DependencyEdge,
     DiscoveryMethod,
-    KnowledgeGraph,
     PullRequestPayload,
     ReleaseAssessment,
     TelemetryStatus,
-    baseline_problems,
 )
+from src.tools.baseline_store import BaselineScope, default_store
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
 from src.tools.telemetry_extractor import TelemetryExtractor
 
 logger = logging.getLogger(__name__)
 
-KNOWLEDGE_GRAPH_PATH = Path(__file__).resolve().parents[2] / config.KNOWLEDGE_GRAPH_PATH
+BASELINE_STORE = default_store()
+
+# Score reported when the assessment is refused for missing evidence: an
+# unassessable release is treated as maximally risky.
+DISCOVERY_GAP_RISK_SCORE = 1.0
 
 
 def _service_name(service_id: str) -> str:
@@ -56,46 +57,42 @@ def extract_trigger_node(state: ReleaseGraphState) -> dict[str, object]:
 def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     """Split the target's graph neighbours into upstream and downstream.
 
-    An edge ``A -> B`` in ``knowledge_graph.json`` means A depends on (calls)
-    B. For a target T, ``A -> T`` makes A upstream (a consumer of T) and
-    ``T -> B`` makes B downstream (a dependency of T).
+    The project's newest complete baseline snapshot is loaded (see
+    ``BaselineStore.latest``); failed, partial or unreadable snapshots are
+    skipped, so they never shadow an older good baseline. An edge ``A -> B``
+    means A depends on (calls) B. For a target T, ``A -> T`` makes A
+    upstream (a consumer of T) and ``T -> B`` makes B downstream (a
+    dependency of T).
 
-    A missing graph, or one whose discovery was not recorded as complete, is
-    reported in ``discovery_issues`` so the release cannot be approved on an
-    empty or partial radius.
+    When no complete baseline exists, that is reported in
+    ``discovery_issues`` so the release cannot be approved on an empty radius.
     """
-    try:
-        raw_graph = json.loads(KNOWLEDGE_GRAPH_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    scope = BaselineScope(
+        tenant=state.get("tenant") or config.DEFAULT_TENANT,
+        project_id=state.get("project_id") or config.DEFAULT_PROJECT_ID,
+    )
+    baseline = BASELINE_STORE.latest(scope)
+    if baseline is None:
         logger.warning(
-            "Knowledge graph not found at %s; returning no static dependents.",
-            KNOWLEDGE_GRAPH_PATH,
+            "No complete discovery baseline for %s/%s; returning no static dependents.",
+            scope.tenant,
+            scope.project_id,
         )
         return {
             "upstream_services": [],
             "downstream_services": [],
             "matched_edges": [],
             "discovery_issues": [
-                "Knowledge graph not found; no discovery baseline exists."
+                "No complete discovery baseline found for "
+                f"{scope.tenant}/{scope.project_id}; run discovery first."
             ],
         }
 
-    graph = KnowledgeGraph.model_validate(raw_graph)
-    if graph.discovery is None:
-        issues = [
-            "Knowledge graph does not record discovery outcomes; re-run discovery."
-        ]
-    else:
-        issues = [
-            f"Discovery baseline is incomplete: {problem}"
-            for problem in baseline_problems(graph.discovery)
-        ]
-    edges = graph.edges
     targets = set(state.get("target_services", []))
     upstream: list[str] = []
     downstream: list[str] = []
     matched: list[DependencyEdge] = []
-    for edge in edges:
+    for edge in baseline.graph.edges:
         source, target = edge.source_service_id, edge.target_service_id
         if source not in targets and target not in targets:
             continue
@@ -108,7 +105,9 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         "upstream_services": upstream,
         "downstream_services": downstream,
         "matched_edges": matched,
-        "discovery_issues": issues,
+        "discovery_issues": [],
+        "baseline_snapshot_id": baseline.snapshot_id,
+        "baseline_demo_mode": baseline.demo_mode,
     }
 
 
@@ -161,41 +160,60 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     return {"telemetry_status": status, "discovery_issues": issues}
 
 
+def discovery_gap_rejection(
+    issues: list[str], deployment_order: list[str]
+) -> dict[str, object]:
+    """Return the deterministic verdict for a release with discovery gaps.
+
+    No LLM is consulted: a verdict over incomplete dependency evidence is not
+    safe to act on, so the release is rejected at maximum risk and every gap
+    is listed. ``deployment_order`` is the unreviewed additive baseline and
+    is reported for reference only.
+    """
+    gaps = " ".join(f"({index}) {issue}" for index, issue in enumerate(issues, 1))
+    return {
+        "risk_score": DISCOVERY_GAP_RISK_SCORE,
+        "approved": False,
+        "deployment_sequence": deployment_order,
+        "justification": (
+            "Rejected without LLM risk assessment because discovery evidence "
+            f"is incomplete. Discovery gaps: {gaps} Resolve these gaps and "
+            "re-run discovery before re-assessing; the deployment sequence "
+            "shown is an unreviewed baseline."
+        ),
+    }
+
+
 def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]:
     """Ask the LLM reasoner for a risk score, deployment order and rationale.
 
-    The LLM's approval is overridden to False whenever ``discovery_issues``
-    is non-empty: a verdict over incomplete dependency evidence is not safe
-    to act on, however low the reasoner scores the risk.
+    When ``discovery_issues`` is non-empty the Anthropic API is not called:
+    the node short-circuits to ``discovery_gap_rejection``.
     """
     targets = list(state.get("target_services", []))
     upstream = list(state.get("upstream_services", []))
     downstream = list(state.get("downstream_services", []))
+    baseline_order = baseline_deployment_order(targets, upstream, downstream)
+    issues = list(state.get("discovery_issues", []))
+    if issues:
+        return discovery_gap_rejection(issues, baseline_order)
+
     request = RiskAssessmentRequest(
         pull_request=state["pull_request"],
         target_services=targets,
         upstream_services=upstream,
         downstream_services=downstream,
-        baseline_deployment_order=baseline_deployment_order(
-            targets, upstream, downstream
-        ),
+        baseline_deployment_order=baseline_order,
         matched_edges=list(state.get("matched_edges", [])),
         telemetry=state.get("telemetry_status")
         or TelemetryStatus(source="knowledge_graph"),
     )
     assessment = RiskReasoner().assess(request)
-    issues = list(state.get("discovery_issues", []))
-    justification = assessment.justification
-    if issues:
-        justification += (
-            " Approval withheld because discovery evidence is incomplete: "
-            + " ".join(issues)
-        )
     return {
         "risk_score": assessment.risk_score,
-        "approved": assessment.approved and not issues,
+        "approved": assessment.approved,
         "deployment_sequence": assessment.deployment_order,
-        "justification": justification,
+        "justification": assessment.justification,
     }
 
 
@@ -224,9 +242,13 @@ def compile_evidence_node(state: ReleaseGraphState) -> dict[str, object]:
         return ", ".join(services) or "None identified"
 
     sequence = state.get("deployment_sequence", [])
+    snapshot = state.get("baseline_snapshot_id") or "None"
+    if state.get("baseline_demo_mode"):
+        snapshot += " (DEMO MODE: relies on mock fixture data)"
     evidence_report = (
         "## Release Impact Assessment\n\n"
         f"**Pull Request:** {pr_text}\n\n"
+        f"**Baseline Snapshot:** {snapshot}\n\n"
         f"**Target Services:** {_list(state.get('target_services', []))}\n\n"
         "**Blast Radius:**\n"
         "- **Upstream (depend on the target):** "

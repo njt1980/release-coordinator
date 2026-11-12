@@ -1,13 +1,13 @@
 """Batch-processing nodes for the Day-Zero discovery workflow."""
 
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from src.core import config
 from src.core.models import (
+    LABEL_SEPARATOR,
     DependencyEdge,
+    DiscoveryIncompleteError,
     DiscoveryMethod,
     DiscoveryStageReport,
     DiscoveryStatus,
@@ -18,22 +18,15 @@ from src.core.models import (
 )
 from src.core.service_ids import build_name_index, canonical_service_id
 from src.discovery_engine.state import DiscoveryGraphState
+from src.tools.baseline_store import BaselineScope, default_store
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.telemetry_extractor import TelemetryExtractor
 
-KNOWLEDGE_GRAPH_PATH = Path(__file__).resolve().parents[2] / config.KNOWLEDGE_GRAPH_PATH
+__all__ = ["DiscoveryIncompleteError"]
 
-
-class DiscoveryIncompleteError(RuntimeError):
-    """Raised when discovery evidence is too incomplete to become a baseline."""
-
-    def __init__(self, problems: list[str]) -> None:
-        super().__init__(
-            "Baseline not established; discovery is incomplete: "
-            + "; ".join(problems)
-        )
-        self.problems = problems
+BASELINE_STORE = default_store()
+STATIC_CODE_PROVENANCE = "azure_devops"
 
 
 def _append_report(
@@ -120,6 +113,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
                     discovery_methods=[DiscoveryMethod.STATIC_CODE],
                     confidence_score=0.7,
                     last_observed_at=datetime.now(timezone.utc),
+                    provenance=STATIC_CODE_PROVENANCE,
                 )
             )
             edge_count += 1
@@ -228,8 +222,21 @@ def _canonicalize_services(
     return list(merged.values())
 
 
+def _merge_labels(first: str, second: str) -> str:
+    """Union two comma-separated label sets, keeping first-seen order."""
+    labels: list[str] = []
+    for label in [*first.split(LABEL_SEPARATOR), *second.split(LABEL_SEPARATOR)]:
+        if label not in labels:
+            labels.append(label)
+    return LABEL_SEPARATOR.join(labels)
+
+
 def _merge_edge(existing_edge: DependencyEdge, edge: DependencyEdge) -> DependencyEdge:
-    """Combine the evidence of two edges between the same services."""
+    """Combine the evidence of two edges between the same services.
+
+    Provenance and environment labels are unioned so mock fixture evidence
+    stays visible on an edge that real evidence also supports.
+    """
     discovery_methods = list(existing_edge.discovery_methods)
     for method in edge.discovery_methods:
         if method not in discovery_methods:
@@ -246,6 +253,8 @@ def _merge_edge(existing_edge: DependencyEdge, edge: DependencyEdge) -> Dependen
         discovery_methods=discovery_methods,
         confidence_score=max(existing_edge.confidence_score, edge.confidence_score),
         last_observed_at=max(existing_observed_at, edge_observed_at),
+        provenance=_merge_labels(existing_edge.provenance, edge.provenance),
+        environment=_merge_labels(existing_edge.environment, edge.environment),
     )
 
 
@@ -298,17 +307,21 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
 
 
 def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
-    """Persist the reconciled Day-Zero graph to the local JSON repository.
+    """Persist the reconciled Day-Zero graph as a new versioned snapshot.
 
     The reconciled services, dependency edges and per-stage discovery reports
-    are serialized from their Pydantic models and written to
-    ``knowledge_graph.json`` in the project root, where the Release
-    Coordinator reads them back.
+    are written to ``baselines/{tenant}/{project_id}/{snapshot_id}.json``.
+    Every run writes its own immutable file, so concurrent runs cannot
+    overwrite each other and the Release Coordinator reads the newest
+    complete snapshot for its project.
+
+    Returns:
+        ``baseline_snapshot_id`` naming the snapshot this run wrote.
 
     Raises:
         DiscoveryIncompleteError: if any stage FAILED, was PARTIAL, or did not
-            report. The existing knowledge graph is left untouched, so an
-            incomplete crawl never replaces the baseline.
+            report. Nothing is written, so an incomplete crawl never becomes
+            the project's latest baseline.
     """
     reports = list(state.get("discovery_reports", []))
     problems = baseline_problems(reports)
@@ -319,7 +332,9 @@ def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
     services: list[ServiceNode] = list(reconciled_graph.get("services", []))
     edges: list[DependencyEdge] = list(reconciled_graph.get("edges", []))
     graph = KnowledgeGraph(services=services, edges=edges, discovery=reports)
-    KNOWLEDGE_GRAPH_PATH.write_text(
-        json.dumps(graph.model_dump(mode="json"), indent=2), encoding="utf-8"
+    scope = BaselineScope(
+        tenant=state.get("tenant") or config.DEFAULT_TENANT,
+        project_id=state.get("project_id") or config.DEFAULT_PROJECT_ID,
     )
-    return {}
+    stored = BASELINE_STORE.write(scope, graph)
+    return {"baseline_snapshot_id": stored.snapshot_id}

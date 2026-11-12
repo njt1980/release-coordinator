@@ -1,7 +1,8 @@
 """Run the release coordination graph for a simulated order-service PR.
 
-The dependency radius and runtime evidence come from the persisted
-``knowledge_graph.json`` (no live telemetry, no mock_telemetry.json). Risk
+The dependency radius and runtime evidence come from the newest complete
+baseline snapshot under ``baselines/default/default/`` (no live telemetry, no
+mock_telemetry.json). Risk
 reasoning calls Claude, so Anthropic credentials must be available, e.g.
 ``export ANTHROPIC_API_KEY=...``.
 """
@@ -61,7 +62,7 @@ index 1a2b3c4..5d6e7f8 100644
 if __name__ == "__main__":
     initial_state: ReleaseGraphState = {
         "trigger_event": MOCK_PULL_REQUEST,
-        # Blank: read runtime evidence from knowledge_graph.json only.
+        # Blank: read runtime evidence from the stored baseline only.
         "workspace_id": "",
     }
     final_state = app.invoke(initial_state)

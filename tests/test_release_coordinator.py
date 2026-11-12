@@ -197,31 +197,53 @@ class CoordinatorNodeTests(unittest.TestCase):
             },
         )
 
-    def test_assess_node_withholds_approval_when_discovery_incomplete(self) -> None:
+    def test_assess_node_short_circuits_without_calling_llm(self) -> None:
+        issues = [
+            "No complete discovery baseline found for default/default; "
+            "run discovery first.",
+            "Live telemetry FAILED: query timed out",
+        ]
         state: Any = {
             "pull_request": PR,
             "target_services": [TARGET],
-            "upstream_services": [],
-            "downstream_services": [],
+            "upstream_services": ["default/store-front"],
+            "downstream_services": ["default/rabbitmq"],
             "matched_edges": [],
             "telemetry_status": TelemetryStatus(source="live"),
-            "discovery_issues": ["Live telemetry FAILED: query timed out"],
+            "discovery_issues": issues,
         }
-        verdict = RiskAssessment(
-            risk_score=0.1,
-            approved=True,
-            deployment_order=[TARGET],
-            justification="Low risk.",
-        )
         with patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls:
-            reasoner_cls.return_value.assess.return_value = verdict
             result = coordinator_nodes.assess_risk_and_sequence_node(state)
 
-        self.assertFalse(result["approved"])
+        reasoner_cls.assert_not_called()
+        self.assertEqual(result["risk_score"], 1.0)
+        self.assertIs(result["approved"], False)
+        self.assertEqual(
+            result["deployment_sequence"],
+            ["default/rabbitmq", TARGET, "default/store-front"],
+        )
         justification = result["justification"]
         assert isinstance(justification, str)
-        self.assertIn("Approval withheld", justification)
-        self.assertIn("Live telemetry FAILED: query timed out", justification)
+        self.assertIn("without LLM risk assessment", justification)
+        self.assertIn(f"(1) {issues[0]}", justification)
+        self.assertIn(f"(2) {issues[1]}", justification)
+
+    def test_short_circuit_verdict_is_a_valid_release_assessment(self) -> None:
+        state: Any = {
+            "pull_request": PR,
+            "target_services": [TARGET],
+            "discovery_issues": ["RUNTIME_TELEMETRY PARTIAL: ns-b: 403"],
+        }
+        with patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls:
+            state.update(coordinator_nodes.assess_risk_and_sequence_node(state))
+        reasoner_cls.assert_not_called()
+
+        assessment = coordinator_nodes.compile_evidence_node(state)["release_assessment"]
+
+        self.assertIsInstance(assessment, ReleaseAssessment)
+        self.assertFalse(assessment.approved)
+        self.assertEqual(assessment.risk_score, 1.0)
+        self.assertEqual(assessment.deployment_sequence, [TARGET])
 
     def test_live_telemetry_failure_becomes_discovery_issue(self) -> None:
         state: Any = {
@@ -268,6 +290,23 @@ class CoordinatorNodeTests(unittest.TestCase):
             },
         )
         self.assertIn("**Approved:** No", result["evidence_report"])
+
+    def test_compile_node_flags_demo_mode_baseline(self) -> None:
+        state: Any = {
+            "pull_request": PR,
+            "target_services": [TARGET],
+            "risk_score": 0.2,
+            "approved": True,
+            "deployment_sequence": [TARGET],
+            "justification": "ok",
+            "baseline_snapshot_id": "20261112T000000000000Z-abcd1234",
+            "baseline_demo_mode": True,
+        }
+
+        report = coordinator_nodes.compile_evidence_node(state)["evidence_report"]
+
+        assert isinstance(report, str)
+        self.assertIn("20261112T000000000000Z-abcd1234 (DEMO MODE", report)
 
 
 if __name__ == "__main__":

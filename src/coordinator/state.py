@@ -16,12 +16,19 @@ class ReleaseGraphState(TypedDict, total=False):
     ``trigger_event`` is the raw pull-request payload; it is validated into
     ``pull_request`` by the first node. A blank ``workspace_id`` means no live
     telemetry is queried and runtime evidence comes from the knowledge graph.
+    ``tenant`` and ``project_id`` select the baseline to load (both default
+    to ``default``); ``baseline_snapshot_id`` and ``baseline_demo_mode``
+    record which snapshot was used and whether it relies on mock data.
     ``discovery_issues`` lists every reason the dependency evidence may be
-    incomplete; any entry forces ``approved`` to False.
+    incomplete; any entry rejects the release without calling the LLM.
     """
 
     trigger_event: Required[dict[str, object]]
     workspace_id: Required[str]
+    tenant: str
+    project_id: str
+    baseline_snapshot_id: str
+    baseline_demo_mode: bool
     pull_request: PullRequestPayload
     target_services: list[str]
     upstream_services: list[str]

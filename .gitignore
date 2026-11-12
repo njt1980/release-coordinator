@@ -30,6 +30,8 @@ htmlcov/
 .DS_Store
 Thumbs.db
 knowledge_graph.json
+# Versioned discovery baselines (baselines/{tenant}/{project_id}/*.json)
+baselines/
 
 # Local dev server pid files and logs (start-app skill)
 .run/
