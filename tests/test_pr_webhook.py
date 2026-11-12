@@ -290,6 +290,8 @@ class PrAssessmentWebhookTests(unittest.TestCase):
                 risk_score=0.8,
                 approved=True,
                 deployment_sequence=breaking_order,
+                services_to_deploy=[_id("order-service")],
+                stale_consumers=[_id("store-front")],
                 justification="why",
             ),
         )

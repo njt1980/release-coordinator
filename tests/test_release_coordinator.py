@@ -154,6 +154,37 @@ class CoordinatorNodeTests(unittest.TestCase):
         breaking = coordinator_nodes.sequence_deployment_node(state)
         self.assertEqual(breaking["deployment_sequence"], list(reversed(SEQUENCE)))
 
+    def test_breaking_plan_reaches_llm_request_and_verdict(self) -> None:
+        state: Any = {
+            "pull_request": PR.model_copy(
+                update={"change_type": ContractChange.BREAKING}
+            ),
+            "target_services": [TARGET],
+            "upstream_services": [f"{URN}:store-front"],
+            "downstream_services": [f"{URN}:rabbitmq"],
+            "matched_edges": [
+                _edge(f"{URN}:store-front", TARGET, DiscoveryMethod.STATIC_CODE),
+                _edge(TARGET, f"{URN}:rabbitmq", DiscoveryMethod.STATIC_CODE),
+            ],
+            "telemetry_status": TelemetryStatus(source="knowledge_graph"),
+        }
+        state.update(coordinator_nodes.sequence_deployment_node(state))
+        verdict = RiskAssessment(risk_score=0.8, approved=False, justification="why")
+        with patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls:
+            reasoner_cls.return_value.assess.return_value = verdict
+            state.update(coordinator_nodes.assess_risk_and_sequence_node(state))
+
+        request = reasoner_cls.return_value.assess.call_args.args[0]
+        self.assertEqual(request.services_to_deploy, [TARGET])
+        self.assertEqual(request.stale_consumers, [f"{URN}:store-front"])
+
+        result = coordinator_nodes.compile_evidence_node(state)
+        assessment = result["release_assessment"]
+        self.assertEqual(assessment.deployment_sequence, list(reversed(SEQUENCE)))
+        self.assertEqual(assessment.services_to_deploy, [TARGET])
+        self.assertEqual(assessment.stale_consumers, [f"{URN}:store-front"])
+        self.assertIn(f"**Services to Deploy:** {TARGET}", result["evidence_report"])
+
     def test_assess_node_passes_fixed_sequence_and_ignores_llm_order(self) -> None:
         plan = DeploymentPlan(change_type=ContractChange.ADDITIVE, sequence=SEQUENCE)
         state: Any = {
@@ -310,6 +341,8 @@ class CoordinatorNodeTests(unittest.TestCase):
                 "risk_score": 0.8,
                 "approved": False,
                 "deployment_sequence": [f"{URN}:store-front", TARGET],
+                "services_to_deploy": [],
+                "stale_consumers": [],
                 "justification": "store-front must send customerId first.",
             },
         )

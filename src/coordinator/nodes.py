@@ -381,6 +381,8 @@ def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]
         upstream_services=list(state.get("upstream_services", [])),
         downstream_services=list(state.get("downstream_services", [])),
         deployment_sequence=plan.sequence,
+        services_to_deploy=plan.services_to_deploy,
+        stale_consumers=plan.stale_consumers,
         matched_edges=list(state.get("matched_edges", [])),
         telemetry=state.get("telemetry_status")
         or TelemetryStatus(source="knowledge_graph"),
@@ -395,10 +397,13 @@ def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]
 
 def build_release_assessment(state: ReleaseGraphState) -> ReleaseAssessment:
     """Return the typed verdict the control plane parses from the run."""
+    plan = state.get("deployment_plan")
     return ReleaseAssessment(
         risk_score=state["risk_score"],
         approved=state["approved"],
         deployment_sequence=state["deployment_sequence"],
+        services_to_deploy=plan.services_to_deploy if plan else [],
+        stale_consumers=plan.stale_consumers if plan else [],
         justification=state["justification"],
     )
 
@@ -418,6 +423,9 @@ def compile_evidence_node(state: ReleaseGraphState) -> dict[str, object]:
         return ", ".join(services) or "None identified"
 
     sequence = state.get("deployment_sequence", [])
+    plan = state.get("deployment_plan")
+    to_deploy = plan.services_to_deploy if plan else []
+    stale = plan.stale_consumers if plan else []
     snapshot = state.get("baseline_snapshot_id") or "None"
     if state.get("baseline_demo_mode"):
         snapshot += " (DEMO MODE: relies on mock fixture data)"
@@ -435,6 +443,9 @@ def compile_evidence_node(state: ReleaseGraphState) -> dict[str, object]:
         f"**Approved:** {'Yes' if state.get('approved') else 'No'}\n\n"
         f"**Discovery Gaps:** {_list(state.get('discovery_issues', []))}\n\n"
         f"**Recommended Sequence:** {' -> '.join(sequence) or 'Not determined'}\n\n"
+        f"**Services to Deploy:** {' -> '.join(to_deploy) or 'Not determined'}\n\n"
+        f"**Stale Consumers (breaking change, not updated by this PR):** "
+        f"{_list(stale)}\n\n"
         f"**Justification:** {state.get('justification') or 'Not provided'}"
     )
     return {

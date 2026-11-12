@@ -38,3 +38,8 @@ baselines/
 
 # Claude Code local workspace
 .claude/
+
+# Local secrets and environment overrides (copy .env.example to .env)
+.env
+.env.*
+!.env.example

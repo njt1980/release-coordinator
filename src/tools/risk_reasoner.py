@@ -54,6 +54,14 @@ subgraph, from the declared change_type):
 - breaking: consumers before providers. Upstream consumers first, so they
   already send any newly required input or accept the new message format,
   then the target, then downstream dependencies.
+- deployment_sequence covers the whole subgraph; services_to_deploy is the
+  part of it this pull request changes (the targets). The other services
+  keep running their current versions.
+- stale_consumers (breaking only) are upstream consumers this pull request
+  does not change, yet the sequence needs them on a compatible version before
+  the target deploys. Unless the diff or description shows they are already
+  compatible (for example, updated by an earlier release), treat them as
+  consumers with no compatible version to deploy first.
 
 Scoring guidance for risk_score (0.0 to 1.0):
 - Low (< 0.3): internal refactors, no contract change, few or no upstream
@@ -91,6 +99,7 @@ class RiskAssessmentRequest(BaseModel):
 
     ``deployment_sequence`` is the deterministic order computed before the
     LLM is called; the model justifies it but cannot change it.
+    ``services_to_deploy`` and ``stale_consumers`` come from the same plan.
     """
 
     pull_request: PullRequestPayload
@@ -99,6 +108,8 @@ class RiskAssessmentRequest(BaseModel):
     upstream_services: list[str]
     downstream_services: list[str]
     deployment_sequence: list[str] = Field(min_length=1)
+    services_to_deploy: list[str] = Field(default_factory=list)
+    stale_consumers: list[str] = Field(default_factory=list)
     matched_edges: list[DependencyEdge]
     telemetry: TelemetryStatus
 

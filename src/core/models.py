@@ -510,9 +510,17 @@ class RiskAssessment(BaseModel):
 
 
 class ReleaseAssessment(BaseModel):
-    """Machine-readable release verdict returned to the control plane."""
+    """Machine-readable release verdict returned to the control plane.
+
+    ``deployment_sequence`` orders the whole release subgraph;
+    ``services_to_deploy`` is the part of it the pull request changes, in the
+    same order. ``stale_consumers`` lists unchanged upstream consumers that a
+    BREAKING change needs running a compatible version before it deploys.
+    """
 
     risk_score: float = Field(ge=0.0, le=1.0)
     approved: bool
     deployment_sequence: List[str] = Field(min_length=1)
+    services_to_deploy: List[str] = Field(default_factory=list)
+    stale_consumers: List[str] = Field(default_factory=list)
     justification: str = Field(min_length=1)

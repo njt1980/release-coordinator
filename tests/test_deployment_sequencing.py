@@ -179,6 +179,35 @@ class SequenceDeploymentTests(unittest.TestCase):
             plan, sequence_deployment([TARGET], upstream, downstream, edges, ADDITIVE)
         )
 
+    def test_additive_plan_deploys_only_targets_and_has_no_stale_consumers(self) -> None:
+        plan = sequence_deployment([TARGET], UPSTREAM, DOWNSTREAM, EDGES, ADDITIVE)
+
+        self.assertEqual(plan.services_to_deploy, [TARGET])
+        self.assertEqual(
+            plan.unchanged_services, [s for s in plan.sequence if s != TARGET]
+        )
+        self.assertEqual(plan.stale_consumers, [])
+
+    def test_breaking_plan_flags_unchanged_consumers_in_sequence_order(self) -> None:
+        plan = sequence_deployment([TARGET], UPSTREAM, DOWNSTREAM, EDGES, BREAKING)
+
+        self.assertEqual(plan.services_to_deploy, [TARGET])
+        self.assertEqual(
+            plan.stale_consumers,
+            [_id("admin"), _id("store-front"), _id("api-gateway")],
+        )
+        self.assertNotIn(_id("rabbitmq"), plan.stale_consumers)
+
+    def test_changed_consumer_is_deployed_not_stale(self) -> None:
+        # store-front is changed in the same PR, so it is a target.
+        targets = [TARGET, _id("store-front")]
+        upstream = [_id("api-gateway"), _id("store-front"), _id("admin")]
+
+        plan = sequence_deployment(targets, upstream, DOWNSTREAM, EDGES, BREAKING)
+
+        self.assertEqual(plan.services_to_deploy, [_id("store-front"), TARGET])
+        self.assertEqual(plan.stale_consumers, [_id("admin"), _id("api-gateway")])
+
     def test_lone_target_and_missing_target(self) -> None:
         plan = sequence_deployment([TARGET], [], [], [], BREAKING)
         self.assertEqual(plan.sequence, [TARGET])

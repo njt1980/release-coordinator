@@ -15,6 +15,13 @@ target, upstream and downstream services (Kahn's algorithm):
 Among services that are ready at the same time, ties are broken by phase
 (the position the rule above gives the service's role) and then by service
 ID, so the same subgraph always yields the same sequence.
+
+The targets are the services the pull request changes. The sequence still
+covers the whole subgraph, so it can be checked against every edge; the plan
+also splits it into the services to deploy (the targets) and those that are
+unchanged. For a BREAKING change, upstream consumers that are not targets are
+reported as ``stale_consumers``: the rule above needs them redeployed before
+the targets, but the pull request does not change them.
 """
 
 import heapq
@@ -32,11 +39,20 @@ class DeploymentPlan(BaseModel):
     ``cyclic_services`` lists the services that were in, or blocked behind,
     a dependency cycle; when it is non-empty no order satisfies every edge
     and the part of ``sequence`` covering them is not edge-safe.
+
+    ``services_to_deploy`` and ``unchanged_services`` split ``sequence``
+    (keeping its order) into the services the pull request changes and the
+    rest of the release subgraph. ``stale_consumers`` lists, for a BREAKING
+    change only, the unchanged upstream consumers that must already run a
+    compatible version before the targets deploy.
     """
 
     change_type: ContractChange
     sequence: list[str] = Field(min_length=1)
     cyclic_services: list[str] = Field(default_factory=list)
+    services_to_deploy: list[str] = Field(default_factory=list)
+    unchanged_services: list[str] = Field(default_factory=list)
+    stale_consumers: list[str] = Field(default_factory=list)
 
     @property
     def is_acyclic(self) -> bool:
@@ -94,6 +110,23 @@ def _precedence(
     return pairs
 
 
+def _stale_consumers(
+    sequence: list[str],
+    targets: list[str],
+    upstream: list[str],
+    change_type: ContractChange,
+) -> list[str]:
+    """Return the unchanged consumers a BREAKING change needs updated first.
+
+    An ADDITIVE change keeps the target compatible with the consumers' current
+    versions, so it has none. Services are returned in ``sequence`` order.
+    """
+    if change_type is not ContractChange.BREAKING:
+        return []
+    consumers = set(upstream) - set(targets)
+    return [service for service in sequence if service in consumers]
+
+
 def sequence_deployment(
     targets: list[str],
     upstream: list[str],
@@ -107,7 +140,8 @@ def sequence_deployment(
     the subgraph has a cycle, the services still waiting when the queue
     first runs dry are recorded in ``cyclic_services``; the lowest-priority
     waiting service is then released so the sequence still covers every
-    service.
+    service. ``targets`` are the services the pull request changes; see
+    ``DeploymentPlan`` for how the sequence is split by them.
 
     Raises:
         ValueError: if ``targets`` is empty.
@@ -144,6 +178,12 @@ def sequence_deployment(
             indegree[successor] -= 1
             if indegree[successor] == 0 and successor not in placed:
                 heapq.heappush(ready, (ranks[successor], successor))
+    target_set = set(targets)
     return DeploymentPlan(
-        change_type=change_type, sequence=sequence, cyclic_services=cyclic
+        change_type=change_type,
+        sequence=sequence,
+        cyclic_services=cyclic,
+        services_to_deploy=[s for s in sequence if s in target_set],
+        unchanged_services=[s for s in sequence if s not in target_set],
+        stale_consumers=_stale_consumers(sequence, targets, upstream, change_type),
     )
