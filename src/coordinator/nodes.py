@@ -7,6 +7,7 @@ from typing import Final, Literal
 
 from pydantic import BaseModel
 
+from src.coordinator.sequencing import DeploymentPlan, sequence_deployment
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
 from src.core.models import (
@@ -41,26 +42,6 @@ def _service_name(service_id: str) -> str:
         return ServiceIdentity.parse(service_id).service_name
     except ValueError:
         return service_id
-
-
-def baseline_deployment_order(
-    targets: list[str], upstream: list[str], downstream: list[str]
-) -> list[str]:
-    """Return the order for an additive change: providers first, consumers last.
-
-    ``upstream`` and ``downstream`` are in traversal order, nearest first.
-    Downstream services (called by the target, directly or transitively) go
-    first, deepest provider first, so the target's new code finds compatible
-    dependencies; then the target; then upstream consumers, nearest first,
-    that may start using the target's new capability. For tightening or
-    breaking contract changes the consumers must go before the target; the
-    risk reasoner is instructed to reorder in that case.
-    """
-    order: list[str] = []
-    for service in [*reversed(downstream), *targets, *upstream]:
-        if service not in order:
-            order.append(service)
-    return order
 
 
 def extract_trigger_node(state: ReleaseGraphState) -> dict[str, object]:
@@ -317,50 +298,89 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     return {"telemetry_status": status, "discovery_issues": issues}
 
 
+def sequence_deployment_node(state: ReleaseGraphState) -> dict[str, object]:
+    """Compute the deterministic deployment plan before any LLM call.
+
+    Topologically sorts the release subgraph (targets, upstream, downstream
+    and the matched edges between them) for the PR's declared change type;
+    see ``sequence_deployment``.
+    """
+    pull_request: PullRequestPayload = state["pull_request"]
+    plan = sequence_deployment(
+        targets=list(state.get("target_services", [])),
+        upstream=list(state.get("upstream_services", [])),
+        downstream=list(state.get("downstream_services", [])),
+        edges=state.get("matched_edges", []),
+        change_type=pull_request.change_type,
+    )
+    return {"deployment_plan": plan, "deployment_sequence": plan.sequence}
+
+
 def discovery_gap_rejection(
-    issues: list[str], deployment_order: list[str]
+    issues: list[str], deployment_sequence: list[str]
 ) -> dict[str, object]:
     """Return the deterministic verdict for a release with discovery gaps.
 
     No LLM is consulted: a verdict over incomplete dependency evidence is not
     safe to act on, so the release is rejected at maximum risk and every gap
-    is listed. ``deployment_order`` is the unreviewed additive baseline and
-    is reported for reference only.
+    is listed. ``deployment_sequence`` is computed from incomplete evidence
+    and is reported for reference only.
     """
     gaps = " ".join(f"({index}) {issue}" for index, issue in enumerate(issues, 1))
     return {
         "risk_score": DISCOVERY_GAP_RISK_SCORE,
         "approved": False,
-        "deployment_sequence": deployment_order,
         "justification": (
             "Rejected without LLM risk assessment because discovery evidence "
             f"is incomplete. Discovery gaps: {gaps} Resolve these gaps and "
             "re-run discovery before re-assessing; the deployment sequence "
-            "shown is an unreviewed baseline."
+            "shown is computed from incomplete evidence."
+        ),
+    }
+
+
+def dependency_cycle_rejection(plan: DeploymentPlan) -> dict[str, object]:
+    """Return the deterministic verdict for a release subgraph with a cycle.
+
+    No deployment order satisfies every dependency edge, so the release is
+    rejected at maximum risk without consulting the LLM.
+    """
+    return {
+        "risk_score": DISCOVERY_GAP_RISK_SCORE,
+        "approved": False,
+        "justification": (
+            "Rejected without LLM risk assessment because the release "
+            "subgraph has a dependency cycle, so no deployment order "
+            f"satisfies every dependency for a {plan.change_type.value} "
+            "change. Services in or blocked by the cycle: "
+            f"{', '.join(plan.cyclic_services)}. The deployment sequence "
+            "shown breaks the cycle arbitrarily and needs human review."
         ),
     }
 
 
 def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Ask the LLM reasoner for a risk score, deployment order and rationale.
+    """Ask the LLM reasoner to score and justify the deterministic sequence.
 
-    When ``discovery_issues`` is non-empty the Anthropic API is not called:
-    the node short-circuits to ``discovery_gap_rejection``.
+    The deployment sequence comes from ``sequence_deployment_node`` and is
+    never changed here. The Anthropic API is not called when
+    ``discovery_issues`` is non-empty (``discovery_gap_rejection``) or the
+    subgraph has a dependency cycle (``dependency_cycle_rejection``).
     """
-    targets = list(state.get("target_services", []))
-    upstream = list(state.get("upstream_services", []))
-    downstream = list(state.get("downstream_services", []))
-    baseline_order = baseline_deployment_order(targets, upstream, downstream)
+    plan: DeploymentPlan = state["deployment_plan"]
     issues = list(state.get("discovery_issues", []))
     if issues:
-        return discovery_gap_rejection(issues, baseline_order)
+        return discovery_gap_rejection(issues, plan.sequence)
+    if not plan.is_acyclic:
+        return dependency_cycle_rejection(plan)
 
     request = RiskAssessmentRequest(
         pull_request=state["pull_request"],
-        target_services=targets,
-        upstream_services=upstream,
-        downstream_services=downstream,
-        baseline_deployment_order=baseline_order,
+        change_type=plan.change_type,
+        target_services=list(state.get("target_services", [])),
+        upstream_services=list(state.get("upstream_services", [])),
+        downstream_services=list(state.get("downstream_services", [])),
+        deployment_sequence=plan.sequence,
         matched_edges=list(state.get("matched_edges", [])),
         telemetry=state.get("telemetry_status")
         or TelemetryStatus(source="knowledge_graph"),
@@ -369,7 +389,6 @@ def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]
     return {
         "risk_score": assessment.risk_score,
         "approved": assessment.approved,
-        "deployment_sequence": assessment.deployment_order,
         "justification": assessment.justification,
     }
 

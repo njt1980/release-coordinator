@@ -2,6 +2,7 @@
 
 from typing import Required, TypedDict
 
+from src.coordinator.sequencing import DeploymentPlan
 from src.core.models import (
     DependencyEdge,
     PullRequestPayload,
@@ -24,7 +25,9 @@ class ReleaseGraphState(TypedDict, total=False):
     ``downstream_services`` hold the full transitive radius, nearest first.
     ``discovery_issues`` lists every reason the dependency evidence may be
     incomplete, including unresolved dependencies in the radius; any entry
-    rejects the release without calling the LLM.
+    rejects the release without calling the LLM. ``deployment_plan`` is the
+    deterministic topological order computed before the LLM runs;
+    ``deployment_sequence`` is its sequence, which the LLM cannot change.
     """
 
     trigger_event: Required[dict[str, object]]
@@ -40,6 +43,7 @@ class ReleaseGraphState(TypedDict, total=False):
     matched_edges: list[DependencyEdge]
     telemetry_status: TelemetryStatus
     discovery_issues: list[str]
+    deployment_plan: DeploymentPlan
     risk_score: float
     approved: bool
     deployment_sequence: list[str]

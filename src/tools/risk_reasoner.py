@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from src.core import config
 from src.core.models import (
+    ContractChange,
     DependencyEdge,
     PullRequestPayload,
     RiskAssessment,
@@ -23,9 +24,11 @@ _MAX_TOKENS = 16000
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 SYSTEM_PROMPT = """\
-You are a release-safety reviewer for a microservice platform. You assess the
-blast radius of a pull request and decide whether and in what order services
-should be deployed.
+You are a release-safety reviewer for a microservice platform. You are given
+a pull request, its dependency blast radius, and a deployment sequence that
+has ALREADY been computed deterministically. You do not choose or change the
+deployment order. Your only job is to explain why the provided sequence is
+required, and to output risk_score and approved.
 
 How to read the dependency graph you are given:
 - Each edge "A -> B" means service A calls / depends on service B.
@@ -43,6 +46,15 @@ How to read the dependency graph you are given:
 - Edges also carry provenance. Provenance "mock_fixture" (confidence 0.0)
   is demo fixture data, not observed traffic: do not treat it as evidence.
 
+How the deployment_sequence was computed (a topological sort of the
+subgraph, from the declared change_type):
+- additive: providers before consumers. Downstream dependencies first, then
+  the target, then upstream consumers that may start using the new
+  capability.
+- breaking: consumers before providers. Upstream consumers first, so they
+  already send any newly required input or accept the new message format,
+  then the target, then downstream dependencies.
+
 Scoring guidance for risk_score (0.0 to 1.0):
 - Low (< 0.3): internal refactors, no contract change, few or no upstream
   consumers, healthy telemetry.
@@ -51,54 +63,42 @@ Scoring guidance for risk_score (0.0 to 1.0):
 - High (> 0.7): breaking API, message or database schema changes with active
   upstream consumers, or elevated error rates in the radius.
 
-deployment_order rules:
-- Use only service IDs that appear in the request's target, upstream or
-  downstream lists, spelled exactly as given; include every target service.
-- First classify the contract change in the diff, then order by it:
-  - Additive or compatible (new optional fields or endpoints, old inputs and
-    messages still accepted): providers before consumers. Downstream
-    dependencies the change relies on, then the target, then upstream
-    consumers that will start using the new capability.
-  - Tightening or breaking (a field becomes required, a field or endpoint is
-    removed or renamed, validation becomes stricter, or the target publishes
-    a new message/event/schema version): every service that must change to
-    keep working goes BEFORE the target. Callers that must start sending the
-    new input, and consumers of the target's messages that must accept the
-    new format, deploy first; the target deploys after them. If those
-    services do not need a code change, say so and explain why the target can
-    still go first.
-- A service listed as upstream may in fact consume the target's messages or
-  events (for example via a queue). If the diff or PR description shows that,
-  treat it as a consumer that must accept the new format before the target
-  publishes it.
-- The request includes a baseline order built for additive changes (target
-  before its upstream consumers). It is wrong for tightening or breaking
-  changes: when the diff is one, reorder as above instead of keeping it.
-- The justification must agree with deployment_order: if it says a service
-  must be updated before the target, that service must come before the
-  target in the order.
+approved: true when the release can proceed safely by following the
+provided deployment_sequence. Set it to false when the change should be held
+for human review instead, in particular when:
+- the diff contradicts the declared change_type (for example, declared
+  additive but the diff makes a field required, removes or renames a field
+  or endpoint, tightens validation, or publishes a new message/schema
+  version; or declared breaking but the diff only adds optional
+  capability), because the provided sequence would then be wrong;
+- a breaking change's affected consumers have no compatible version to
+  deploy first;
+- error rates are elevated on services in the radius;
+- the diff is too unclear to assess.
+The justification must state the reason when approved is false.
 
-approved: true when the release can proceed safely by following
-deployment_order. Set it to false when the change should be held for human
-review instead, for example: a breaking change whose affected consumers have
-no compatible version to deploy first, elevated error rates on services in
-the radius, or a diff that is too unclear to assess. The justification must
-state the reason when approved is false.
-
-justification: 3-6 sentences that name the specific upstream/downstream
-services affected, what in the diff affects them, and how telemetry influenced
-the score. Do not invent services, endpoints or metrics that are not in the
-request."""
+justification: 3-6 sentences that explain why the provided
+deployment_sequence is required given the diff and the graph: name the
+specific upstream/downstream services affected, what in the diff affects
+them, why each must deploy before or after the target, and how telemetry
+influenced the score. Refer to the sequence exactly as given; never propose
+a different order. Do not invent services, endpoints or metrics that are
+not in the request."""
 
 
 class RiskAssessmentRequest(BaseModel):
-    """Everything the reasoner needs to assess one pull request."""
+    """Everything the reasoner needs to assess one pull request.
+
+    ``deployment_sequence`` is the deterministic order computed before the
+    LLM is called; the model justifies it but cannot change it.
+    """
 
     pull_request: PullRequestPayload
+    change_type: ContractChange
     target_services: list[str] = Field(min_length=1)
     upstream_services: list[str]
     downstream_services: list[str]
-    baseline_deployment_order: list[str]
+    deployment_sequence: list[str] = Field(min_length=1)
     matched_edges: list[DependencyEdge]
     telemetry: TelemetryStatus
 
@@ -113,38 +113,11 @@ def _render_request(request: RiskAssessmentRequest) -> str:
         indent=2, exclude={"pull_request": {"diff"}}
     )
     return (
-        "Assess the release risk of this pull request.\n\n"
+        "Assess the release risk of this pull request and justify the "
+        "provided deployment_sequence.\n\n"
         f"<context>\n{context}\n</context>\n\n"
         f"<diff>\n{request.pull_request.diff}\n</diff>"
     )
-
-
-def validate_assessment(
-    assessment: RiskAssessment, request: RiskAssessmentRequest
-) -> RiskAssessment:
-    """Reject deployment orders that drop targets or name unknown services."""
-    allowed = {
-        *request.target_services,
-        *request.upstream_services,
-        *request.downstream_services,
-    }
-    unknown = [service for service in assessment.deployment_order if service not in allowed]
-    if unknown:
-        raise RiskReasoningError(
-            f"deployment_order names services outside the release radius: {unknown}"
-        )
-    if len(set(assessment.deployment_order)) != len(assessment.deployment_order):
-        raise RiskReasoningError("deployment_order contains duplicate services")
-    missing = [
-        service
-        for service in request.target_services
-        if service not in assessment.deployment_order
-    ]
-    if missing:
-        raise RiskReasoningError(
-            f"deployment_order omits target services: {missing}"
-        )
-    return assessment
 
 
 class RiskReasoner:
@@ -174,9 +147,8 @@ class RiskReasoner:
         """Return a validated risk assessment for the request.
 
         Raises:
-            RiskReasoningError: If the model refuses, the output cannot be
-                parsed, or the deployment order is inconsistent with the
-                release radius.
+            RiskReasoningError: If the model refuses or the output cannot be
+                parsed.
             anthropic.APIError: On API, authentication, or network failures.
         """
         response = self._client.beta.messages.parse(
@@ -196,4 +168,4 @@ class RiskReasoner:
         assessment = response.parsed_output
         if assessment is None:
             raise RiskReasoningError("The model returned no structured assessment")
-        return validate_assessment(assessment, request)
+        return assessment

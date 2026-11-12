@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from src.coordinator import nodes as coordinator_nodes
 from src.core.models import (
     UNRESOLVED_ID_PREFIX,
+    ContractChange,
     DependencyEdge,
     DiscoveryIncompleteError,
     DiscoveryMethod,
@@ -429,7 +430,11 @@ class StaticRadiusTests(_StoreTestCase):
             unresolved=[external],
         )
         pull_request = PullRequestPayload(
-            pr_id="PR-9", title="t", target_service=TARGET, diff="d"
+            pr_id="PR-9",
+            title="t",
+            target_service=TARGET,
+            change_type=ContractChange.ADDITIVE,
+            diff="d",
         )
         state: Any = {
             "tenant": "acme",
@@ -440,6 +445,7 @@ class StaticRadiusTests(_StoreTestCase):
         }
         state.update(coordinator_nodes.calculate_static_radius_node(state))
         state.update(coordinator_nodes.validate_runtime_telemetry_node(state))
+        state.update(coordinator_nodes.sequence_deployment_node(state))
         with patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls:
             state.update(coordinator_nodes.assess_risk_and_sequence_node(state))
         reasoner_cls.assert_not_called()

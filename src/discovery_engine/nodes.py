@@ -6,6 +6,8 @@ from urllib.parse import urlsplit
 from src.core import config
 from src.core.models import (
     LABEL_SEPARATOR,
+    REPOSITORY_METADATA_KEY,
+    SERVICE_ROOT_METADATA_KEY,
     UNKNOWN_LABEL,
     DependencyEdge,
     DiscoveryIncompleteError,
@@ -102,7 +104,8 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     ``release-coord.yaml`` are returned even without dependencies), and its
     edges originate from that microservice, not from the repository.
     Services are registered under a FQURI whose environment, cluster and
-    namespace are ``unknown``. Endpoint URLs are reduced to their hostnames
+    namespace are ``unknown``, with their repository and repository-relative
+    root directory in metadata (used to map PR file changes to services). Endpoint URLs are reduced to their hostnames
     and environment variables to ``env:<service>/<VARIABLE>`` before being
     stored as dependency targets; both ends are resolved against the
     inventory later, during reconciliation.
@@ -143,7 +146,8 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
                         metadata={
                             "source": DiscoveryMethod.STATIC_CODE.value,
                             "devops_project": state["devops_project"],
-                            "repository": repo_name,
+                            REPOSITORY_METADATA_KEY: repo_name,
+                            SERVICE_ROOT_METADATA_KEY: scan.service.root,
                         },
                     )
                 )

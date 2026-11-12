@@ -7,7 +7,9 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from src.coordinator import nodes as coordinator_nodes
+from src.coordinator.sequencing import DeploymentPlan
 from src.core.models import (
+    ContractChange,
     DependencyEdge,
     DiscoveryMethod,
     DiscoveryResult,
@@ -29,8 +31,10 @@ PR = PullRequestPayload(
     pr_id="PR-1",
     title="Change order schema",
     target_service=TARGET,
+    change_type=ContractChange.ADDITIVE,
     diff="--- a\n+++ b\n",
 )
+SEQUENCE = [f"{URN}:rabbitmq", TARGET, f"{URN}:store-front"]
 
 
 def _edge(source: str, target: str, method: DiscoveryMethod) -> DependencyEdge:
@@ -46,10 +50,11 @@ def _edge(source: str, target: str, method: DiscoveryMethod) -> DependencyEdge:
 def _request() -> RiskAssessmentRequest:
     return RiskAssessmentRequest(
         pull_request=PR,
+        change_type=ContractChange.ADDITIVE,
         target_services=[TARGET],
         upstream_services=[f"{URN}:store-front"],
         downstream_services=[f"{URN}:rabbitmq"],
-        baseline_deployment_order=[f"{URN}:rabbitmq", TARGET, f"{URN}:store-front"],
+        deployment_sequence=SEQUENCE,
         matched_edges=[],
         telemetry=TelemetryStatus(source="knowledge_graph"),
     )
@@ -64,11 +69,10 @@ def _fake_client(stop_reason: str, parsed: RiskAssessment | None) -> MagicMock:
 
 
 class RiskReasonerTests(unittest.TestCase):
-    def test_returns_validated_assessment_and_sends_diff(self) -> None:
+    def test_returns_assessment_and_sends_diff_and_fixed_sequence(self) -> None:
         verdict = RiskAssessment(
             risk_score=0.75,
             approved=True,
-            deployment_order=[f"{URN}:rabbitmq", TARGET, f"{URN}:store-front"],
             justification="store-front posts orders without customerId.",
         )
         client = _fake_client("end_turn", verdict)
@@ -79,55 +83,21 @@ class RiskReasonerTests(unittest.TestCase):
         kwargs = client.beta.messages.parse.call_args.kwargs
         self.assertEqual(kwargs["model"], "test-model")
         self.assertIs(kwargs["output_format"], RiskAssessment)
-        self.assertIn("<diff>\n--- a\n+++ b\n", kwargs["messages"][0]["content"])
+        content = kwargs["messages"][0]["content"]
+        self.assertIn("<diff>\n--- a\n+++ b\n", content)
+        self.assertIn('"deployment_sequence"', content)
+        self.assertIn('"change_type": "additive"', content)
 
-    def test_rejects_unknown_or_missing_services(self) -> None:
-        for order in [[f"{URN}:ghost", TARGET], [f"{URN}:store-front"]]:
-            with self.subTest(order=order):
-                client = _fake_client(
-                    "end_turn",
-                    RiskAssessment(
-                        risk_score=0.1, approved=True, deployment_order=order, justification="x"
-                    ),
-                )
-                with self.assertRaises(RiskReasoningError):
-                    RiskReasoner(model="m", client=client).assess(_request())
+    def test_llm_output_schema_has_no_deployment_order(self) -> None:
+        fields = set(RiskAssessment.model_json_schema()["properties"])
+        self.assertEqual(fields, {"risk_score", "approved", "justification"})
 
-    def test_accepts_consumers_first_order_for_breaking_change(self) -> None:
-        """PR-2048 shape: customerId becomes required and the queue message
-        gains schemaVersion 2, so callers and the queue consumer must deploy
-        before the target. The validator must not force the additive baseline."""
-        consumers = [
-            f"{URN}:makeline-service",
-            f"{URN}:store-admin",
-            f"{URN}:store-front",
-        ]
-        request = RiskAssessmentRequest(
-            pull_request=PR,
-            target_services=[TARGET],
-            upstream_services=consumers,
-            downstream_services=[],
-            baseline_deployment_order=[TARGET, *consumers],
-            matched_edges=[],
-            telemetry=TelemetryStatus(source="knowledge_graph"),
-        )
-        verdict = RiskAssessment(
-            risk_score=0.8,
-            approved=False,
-            deployment_order=[*consumers, TARGET],
-            justification="Callers must send customerId before it is required.",
-        )
-        client = _fake_client("end_turn", verdict)
-
-        result = RiskReasoner(model="m", client=client).assess(request)
-
-        self.assertEqual(result.deployment_order, [*consumers, TARGET])
-
-    def test_system_prompt_orders_breaking_changes_consumers_first(self) -> None:
+    def test_system_prompt_restricts_llm_to_justifying_given_sequence(self) -> None:
         prompt = SYSTEM_PROMPT.lower()
-        self.assertIn("tightening or breaking", prompt)
-        self.assertIn("goes before the target", prompt)
-        self.assertNotIn("deviate from it only", prompt)
+        self.assertIn("you do not choose or change the", prompt)
+        self.assertIn("never propose\na different order", prompt)
+        self.assertIn("contradicts the declared change_type", prompt)
+        self.assertNotIn("deployment_order", prompt)
 
     def test_refusal_and_missing_output_raise(self) -> None:
         for stop_reason in ["refusal", "end_turn"]:
@@ -164,7 +134,28 @@ class CoordinatorNodeTests(unittest.TestCase):
             ),
         )
 
-    def test_assess_node_passes_radius_and_baseline_to_reasoner(self) -> None:
+    def test_sequence_node_sorts_before_llm_for_declared_change(self) -> None:
+        state: Any = {
+            "pull_request": PR,
+            "target_services": [TARGET],
+            "upstream_services": [f"{URN}:store-front"],
+            "downstream_services": [f"{URN}:rabbitmq"],
+            "matched_edges": [
+                _edge(f"{URN}:store-front", TARGET, DiscoveryMethod.STATIC_CODE),
+                _edge(TARGET, f"{URN}:rabbitmq", DiscoveryMethod.STATIC_CODE),
+            ],
+        }
+        additive = coordinator_nodes.sequence_deployment_node(state)
+        self.assertEqual(additive["deployment_sequence"], SEQUENCE)
+
+        state["pull_request"] = PR.model_copy(
+            update={"change_type": ContractChange.BREAKING}
+        )
+        breaking = coordinator_nodes.sequence_deployment_node(state)
+        self.assertEqual(breaking["deployment_sequence"], list(reversed(SEQUENCE)))
+
+    def test_assess_node_passes_fixed_sequence_and_ignores_llm_order(self) -> None:
+        plan = DeploymentPlan(change_type=ContractChange.ADDITIVE, sequence=SEQUENCE)
         state: Any = {
             "pull_request": PR,
             "target_services": [TARGET],
@@ -172,30 +163,19 @@ class CoordinatorNodeTests(unittest.TestCase):
             "downstream_services": [f"{URN}:rabbitmq"],
             "matched_edges": [],
             "telemetry_status": TelemetryStatus(source="knowledge_graph"),
+            "deployment_plan": plan,
+            "deployment_sequence": SEQUENCE,
         }
-        verdict = RiskAssessment(
-            risk_score=0.4,
-            approved=True,
-            deployment_order=[TARGET, f"{URN}:store-front"],
-            justification="why",
-        )
+        verdict = RiskAssessment(risk_score=0.4, approved=True, justification="why")
         with patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls:
             reasoner_cls.return_value.assess.return_value = verdict
             result = coordinator_nodes.assess_risk_and_sequence_node(state)
 
         request = reasoner_cls.return_value.assess.call_args.args[0]
+        self.assertEqual(request.deployment_sequence, SEQUENCE)
+        self.assertIs(request.change_type, ContractChange.ADDITIVE)
         self.assertEqual(
-            request.baseline_deployment_order,
-            [f"{URN}:rabbitmq", TARGET, f"{URN}:store-front"],
-        )
-        self.assertEqual(
-            result,
-            {
-                "risk_score": 0.4,
-                "approved": True,
-                "deployment_sequence": [TARGET, f"{URN}:store-front"],
-                "justification": "why",
-            },
+            result, {"risk_score": 0.4, "approved": True, "justification": "why"}
         )
 
     def test_assess_node_short_circuits_without_calling_llm(self) -> None:
@@ -213,21 +193,43 @@ class CoordinatorNodeTests(unittest.TestCase):
             "telemetry_status": TelemetryStatus(source="live"),
             "discovery_issues": issues,
         }
+        state.update(coordinator_nodes.sequence_deployment_node(state))
         with patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls:
             result = coordinator_nodes.assess_risk_and_sequence_node(state)
 
         reasoner_cls.assert_not_called()
         self.assertEqual(result["risk_score"], 1.0)
         self.assertIs(result["approved"], False)
-        self.assertEqual(
-            result["deployment_sequence"],
-            [f"{URN}:rabbitmq", TARGET, f"{URN}:store-front"],
-        )
+        self.assertEqual(state["deployment_sequence"], SEQUENCE)
         justification = result["justification"]
         assert isinstance(justification, str)
         self.assertIn("without LLM risk assessment", justification)
         self.assertIn(f"(1) {issues[0]}", justification)
         self.assertIn(f"(2) {issues[1]}", justification)
+
+    def test_dependency_cycle_rejects_without_calling_llm(self) -> None:
+        state: Any = {
+            "pull_request": PR,
+            "target_services": [TARGET],
+            "upstream_services": [f"{URN}:store-front"],
+            "downstream_services": [f"{URN}:store-front"],
+            "matched_edges": [
+                _edge(f"{URN}:store-front", TARGET, DiscoveryMethod.STATIC_CODE),
+                _edge(TARGET, f"{URN}:store-front", DiscoveryMethod.STATIC_CODE),
+            ],
+        }
+        state.update(coordinator_nodes.sequence_deployment_node(state))
+        with patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls:
+            state.update(coordinator_nodes.assess_risk_and_sequence_node(state))
+
+        reasoner_cls.assert_not_called()
+        assessment = coordinator_nodes.compile_evidence_node(state)["release_assessment"]
+        self.assertFalse(assessment.approved)
+        self.assertEqual(assessment.risk_score, 1.0)
+        self.assertIn("dependency cycle", assessment.justification)
+        self.assertCountEqual(
+            assessment.deployment_sequence, [TARGET, f"{URN}:store-front"]
+        )
 
     def test_short_circuit_verdict_is_a_valid_release_assessment(self) -> None:
         state: Any = {
@@ -235,6 +237,7 @@ class CoordinatorNodeTests(unittest.TestCase):
             "target_services": [TARGET],
             "discovery_issues": ["RUNTIME_TELEMETRY PARTIAL: ns-b: 403"],
         }
+        state.update(coordinator_nodes.sequence_deployment_node(state))
         with patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls:
             state.update(coordinator_nodes.assess_risk_and_sequence_node(state))
         reasoner_cls.assert_not_called()
@@ -263,18 +266,6 @@ class CoordinatorNodeTests(unittest.TestCase):
         self.assertEqual(
             result["discovery_issues"],
             ["existing issue", "Live telemetry FAILED: query timed out"],
-        )
-
-    def test_baseline_order_deploys_deepest_providers_first(self) -> None:
-        # Traversal order is nearest first: TARGET -> queue -> storage.
-        order = coordinator_nodes.baseline_deployment_order(
-            [TARGET],
-            upstream=[f"{URN}:store-front", f"{URN}:web"],
-            downstream=[f"{URN}:queue", f"{URN}:storage"],
-        )
-        self.assertEqual(
-            order,
-            [f"{URN}:storage", f"{URN}:queue", TARGET, f"{URN}:store-front", f"{URN}:web"],
         )
 
     def test_live_metrics_are_filtered_by_fquri_service_name(self) -> None:

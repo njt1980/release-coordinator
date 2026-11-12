@@ -91,7 +91,11 @@ class ServiceIdentityTests(unittest.TestCase):
             ServiceNode(service_id="default/order-service", name="order-service")
         with self.assertRaises(ValidationError):
             PullRequestPayload(
-                pr_id="1", title="t", target_service="default/order-service", diff="d"
+                pr_id="1",
+                title="t",
+                target_service="default/order-service",
+                change_type="additive",
+                diff="d",
             )
 
 

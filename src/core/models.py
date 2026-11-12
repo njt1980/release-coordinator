@@ -205,6 +205,13 @@ def is_fquri(value: str) -> bool:
     return True
 
 
+# ServiceNode.metadata keys recorded by static-code discovery: the source
+# repository a service lives in, and its repository-relative root directory
+# ("" for the repository root). Used to map changed files to services.
+REPOSITORY_METADATA_KEY: Final[str] = "repository"
+SERVICE_ROOT_METADATA_KEY: Final[str] = "service_root"
+
+
 class ServiceNode(BaseModel):
     """A microservice node and its identifying metadata in the dependency graph.
 
@@ -418,16 +425,34 @@ def ensure_complete_baseline(graph: KnowledgeGraph) -> None:
         raise DiscoveryIncompleteError(problems)
 
 
+class ContractChange(str, Enum):
+    """How a pull request changes the target services' contracts.
+
+    ADDITIVE: compatible change (new optional fields or endpoints; old
+        inputs and messages still accepted). Providers deploy before
+        consumers.
+    BREAKING: tightening or breaking change (a field becomes required, is
+        removed or renamed, validation becomes stricter, or a new message
+        schema version is published). Consumers deploy before providers.
+    """
+
+    ADDITIVE = "additive"
+    BREAKING = "breaking"
+
+
 class PullRequestPayload(BaseModel):
     """A pull request that triggers a release impact assessment.
 
     ``target_service`` is a FQURI; segments left ``unknown`` act as
     wildcards when the target is resolved against the baseline inventory.
+    ``change_type`` is declared by the caller (for example from a PR label)
+    and decides the deterministic deployment order.
     """
 
     pr_id: str = Field(min_length=1)
     title: str = Field(min_length=1)
     target_service: str = Field(min_length=1)
+    change_type: ContractChange
     source_branch: str = ""
     target_branch: str = "main"
     description: str = ""
@@ -454,11 +479,14 @@ class TelemetryStatus(BaseModel):
 
 
 class RiskAssessment(BaseModel):
-    """LLM-produced release risk verdict for a pull request."""
+    """LLM-produced release risk verdict for a pull request.
+
+    The deployment sequence is computed deterministically before the LLM is
+    called, so the model only scores, approves and justifies it.
+    """
 
     risk_score: float = Field(ge=0.0, le=1.0)
     approved: bool
-    deployment_order: List[str] = Field(min_length=1)
     justification: str = Field(min_length=1)
 
 

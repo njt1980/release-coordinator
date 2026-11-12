@@ -456,6 +456,7 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
                         "source": "STATIC_CODE",
                         "devops_project": "proj",
                         "repository": "repo-a",
+                        "service_root": f"src/{name}",
                     },
                 )
                 # ledger has no dependencies but is still in the inventory.

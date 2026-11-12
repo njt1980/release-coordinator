@@ -278,7 +278,8 @@ class VerifyEndpointTests(unittest.TestCase):
             TelemetryVerificationRequest(workspace_id="   ")
 
     def test_routes_are_registered(self) -> None:
-        paths = {route.path for route in api.app.routes}
+        # Included routers are not flattened into app.routes, so read the schema.
+        paths = set(api.app.openapi()["paths"])
         self.assertTrue(
             {
                 "/api/verify/devops",

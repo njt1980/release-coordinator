@@ -15,6 +15,8 @@ MOCK_PULL_REQUEST: dict[str, object] = {
     "title": "Require customerId on POST /order and persist order priority",
     # FQURI; unknown environment/cluster segments match any registered value.
     "target_service": "urn:release-coord:default:unknown:unknown:default:order-service",
+    # customerId becomes required: consumers must deploy before the target.
+    "change_type": "breaking",
     "source_branch": "feature/order-priority",
     "target_branch": "main",
     "description": (
