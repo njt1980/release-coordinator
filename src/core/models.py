@@ -73,5 +73,15 @@ class RiskAssessment(BaseModel):
     """LLM-produced release risk verdict for a pull request."""
 
     risk_score: float = Field(ge=0.0, le=1.0)
+    approved: bool
     deployment_order: List[str] = Field(min_length=1)
+    justification: str = Field(min_length=1)
+
+
+class ReleaseAssessment(BaseModel):
+    """Machine-readable release verdict returned to the control plane."""
+
+    risk_score: float = Field(ge=0.0, le=1.0)
+    approved: bool
+    deployment_sequence: List[str] = Field(min_length=1)
     justification: str = Field(min_length=1)

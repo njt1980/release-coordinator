@@ -10,6 +10,7 @@ from src.core.models import (
     DependencyEdge,
     DiscoveryMethod,
     PullRequestPayload,
+    ReleaseAssessment,
     TelemetryStatus,
 )
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
@@ -28,11 +29,13 @@ def _service_name(service_id: str) -> str:
 def baseline_deployment_order(
     targets: list[str], upstream: list[str], downstream: list[str]
 ) -> list[str]:
-    """Return a dependency-safe order: providers first, consumers last.
+    """Return the order for an additive change: providers first, consumers last.
 
     Downstream services (called by the target) go first so the target's new
     code finds compatible dependencies, then the target, then upstream
-    consumers that may need to adopt the target's changes.
+    consumers that may start using the target's new capability. For
+    tightening or breaking contract changes the consumers must go before the
+    target; the risk reasoner is instructed to reorder in that case.
     """
     order: list[str] = []
     for service in [*downstream, *targets, *upstream]:
@@ -153,13 +156,28 @@ def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]
     assessment = RiskReasoner().assess(request)
     return {
         "risk_score": assessment.risk_score,
+        "approved": assessment.approved,
         "deployment_sequence": assessment.deployment_order,
         "justification": assessment.justification,
     }
 
 
+def build_release_assessment(state: ReleaseGraphState) -> ReleaseAssessment:
+    """Return the typed verdict the control plane parses from the run."""
+    return ReleaseAssessment(
+        risk_score=state["risk_score"],
+        approved=state["approved"],
+        deployment_sequence=state["deployment_sequence"],
+        justification=state["justification"],
+    )
+
+
 def compile_evidence_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Render the graph evidence and the LLM verdict as a Markdown report."""
+    """Emit the typed verdict and render the evidence as a Markdown report.
+
+    ``release_assessment`` is the machine-readable output for the control
+    plane; ``evidence_report`` is the human-readable summary.
+    """
     pull_request = state.get("pull_request")
     pr_text = (
         f"{pull_request.pr_id}: {pull_request.title}" if pull_request else "Unknown"
@@ -179,7 +197,11 @@ def compile_evidence_node(state: ReleaseGraphState) -> dict[str, object]:
         "- **Downstream (called by the target):** "
         f"{_list(state.get('downstream_services', []))}\n\n"
         f"**Risk Score:** {state.get('risk_score', 0.0):.2f}\n\n"
+        f"**Approved:** {'Yes' if state.get('approved') else 'No'}\n\n"
         f"**Recommended Sequence:** {' -> '.join(sequence) or 'Not determined'}\n\n"
         f"**Justification:** {state.get('justification') or 'Not provided'}"
     )
-    return {"evidence_report": evidence_report}
+    return {
+        "evidence_report": evidence_report,
+        "release_assessment": build_release_assessment(state),
+    }

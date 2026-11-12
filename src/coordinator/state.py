@@ -2,7 +2,12 @@
 
 from typing import Required, TypedDict
 
-from src.core.models import DependencyEdge, PullRequestPayload, TelemetryStatus
+from src.core.models import (
+    DependencyEdge,
+    PullRequestPayload,
+    ReleaseAssessment,
+    TelemetryStatus,
+)
 
 
 class ReleaseGraphState(TypedDict, total=False):
@@ -22,6 +27,8 @@ class ReleaseGraphState(TypedDict, total=False):
     matched_edges: list[DependencyEdge]
     telemetry_status: TelemetryStatus
     risk_score: float
+    approved: bool
     deployment_sequence: list[str]
     justification: str
     evidence_report: str
+    release_assessment: ReleaseAssessment

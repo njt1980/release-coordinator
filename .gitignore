@@ -30,3 +30,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 knowledge_graph.json
+
+# Local dev server pid files and logs (start-app skill)
+.run/

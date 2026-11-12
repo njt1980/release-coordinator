@@ -48,10 +48,36 @@ Scoring guidance for risk_score (0.0 to 1.0):
 deployment_order rules:
 - Use only service IDs that appear in the request's target, upstream or
   downstream lists, spelled exactly as given; include every target service.
-- Providers before consumers: downstream dependencies the change relies on,
-  then the target, then upstream consumers that must adopt the change.
-- The request includes a dependency-safe baseline order; deviate from it only
-  when the diff gives a concrete reason, and say why.
+- First classify the contract change in the diff, then order by it:
+  - Additive or compatible (new optional fields or endpoints, old inputs and
+    messages still accepted): providers before consumers. Downstream
+    dependencies the change relies on, then the target, then upstream
+    consumers that will start using the new capability.
+  - Tightening or breaking (a field becomes required, a field or endpoint is
+    removed or renamed, validation becomes stricter, or the target publishes
+    a new message/event/schema version): every service that must change to
+    keep working goes BEFORE the target. Callers that must start sending the
+    new input, and consumers of the target's messages that must accept the
+    new format, deploy first; the target deploys after them. If those
+    services do not need a code change, say so and explain why the target can
+    still go first.
+- A service listed as upstream may in fact consume the target's messages or
+  events (for example via a queue). If the diff or PR description shows that,
+  treat it as a consumer that must accept the new format before the target
+  publishes it.
+- The request includes a baseline order built for additive changes (target
+  before its upstream consumers). It is wrong for tightening or breaking
+  changes: when the diff is one, reorder as above instead of keeping it.
+- The justification must agree with deployment_order: if it says a service
+  must be updated before the target, that service must come before the
+  target in the order.
+
+approved: true when the release can proceed safely by following
+deployment_order. Set it to false when the change should be held for human
+review instead, for example: a breaking change whose affected consumers have
+no compatible version to deploy first, elevated error rates on services in
+the radius, or a diff that is too unclear to assess. The justification must
+state the reason when approved is false.
 
 justification: 3-6 sentences that name the specific upstream/downstream
 services affected, what in the diff affects them, and how telemetry influenced
