@@ -1,5 +1,6 @@
 """State schema for release orchestration."""
 
+from datetime import datetime
 from typing import Required, TypedDict
 
 from src.coordinator.policy import ReleaseVerdict
@@ -7,11 +8,14 @@ from src.coordinator.sequencing import DeploymentPlan
 from src.core.models import (
     DependencyEdge,
     EvidenceIssue,
+    Exemption,
     PullRequestPayload,
     ReleaseAssessment,
     RiskAssessment,
+    RuntimeEvidenceState,
     TelemetryStatus,
 )
+from src.tools.policy_store import LoadedPolicy
 
 
 class ReleaseGraphState(TypedDict, total=False):
@@ -24,8 +28,13 @@ class ReleaseGraphState(TypedDict, total=False):
     to ``default``). ``baseline_snapshot_id`` pins the snapshot to assess
     against; when it is not supplied, the newest complete snapshot is used
     and recorded here. ``baseline_demo_mode`` records whether that snapshot
-    relies on mock data. ``unmapped_files`` are changed files no registered
-    service owns.
+    relies on mock data, ``baseline_created_at`` when it was written, and
+    ``baseline_runtime_state`` the runtime evidence it provides on its own.
+    ``project_policy`` is the project's release policy (None when it is
+    missing or invalid, which is itself a discovery issue).
+    ``unmapped_files`` are changed files no registered service owns and the
+    policy does not exempt; ``exempted_files`` and ``exempted_dependencies``
+    record what the policy exempted.
     ``target_services`` are FQURIs; the radius node replaces them with the
     registered FQURIs they resolve to. ``upstream_services`` and
     ``downstream_services`` hold the full transitive radius, nearest first.
@@ -44,8 +53,13 @@ class ReleaseGraphState(TypedDict, total=False):
     tenant: str
     project_id: str
     baseline_snapshot_id: str
+    baseline_created_at: datetime | None
     baseline_demo_mode: bool
+    baseline_runtime_state: RuntimeEvidenceState
+    project_policy: LoadedPolicy | None
     unmapped_files: list[str]
+    exempted_files: list[Exemption]
+    exempted_dependencies: list[Exemption]
     pull_request: PullRequestPayload
     target_services: list[str]
     upstream_services: list[str]

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 # One path segment: no separators, no leading dot, so ``..`` cannot escape.
 PATH_SEGMENT_PATTERN: Final[str] = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 _SNAPSHOT_SUFFIX: Final[str] = ".json"
+_SNAPSHOT_TIME_FORMAT: Final[str] = "%Y%m%dT%H%M%S%fZ"
 
 
 class BaselineScope(BaseModel):
@@ -56,6 +57,25 @@ class StoredBaseline(BaseModel):
         """Whether this baseline relies on mock fixture evidence."""
         return self.graph.uses_mock_data
 
+    @property
+    def created_at(self) -> datetime | None:
+        """When the snapshot was written (see ``snapshot_created_at``)."""
+        return snapshot_created_at(self.snapshot_id)
+
+
+def snapshot_created_at(snapshot_id: str) -> datetime | None:
+    """Return the UTC time encoded in ``snapshot_id``, or None.
+
+    IDs from ``new_snapshot_id`` start with that time; any other ID (for
+    example a hand-named file) has no known age and returns None.
+    """
+    stamp = snapshot_id.split("-", 1)[0]
+    try:
+        moment = datetime.strptime(stamp, _SNAPSHOT_TIME_FORMAT)
+    except ValueError:
+        return None
+    return moment.replace(tzinfo=timezone.utc)
+
 
 def ensure_scope_identities(scope: BaselineScope, graph: KnowledgeGraph) -> None:
     """Raise unless every service FQURI in ``graph`` belongs to ``scope``'s tenant.
@@ -77,7 +97,7 @@ def ensure_scope_identities(scope: BaselineScope, graph: KnowledgeGraph) -> None
 def new_snapshot_id(now: datetime | None = None) -> str:
     """Return a sortable, collision-resistant snapshot ID."""
     moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    return f"{moment.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid4().hex[:8]}"
+    return f"{moment.strftime(_SNAPSHOT_TIME_FORMAT)}-{uuid4().hex[:8]}"
 
 
 class BaselineStore:

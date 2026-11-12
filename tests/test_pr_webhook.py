@@ -3,7 +3,7 @@
 import asyncio
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -25,9 +25,11 @@ from src.core.models import (
     ReasonCode,
     ReleaseAssessment,
     RiskAssessment,
+    RuntimeEvidenceState,
     ServiceNode,
 )
 from src.tools.baseline_store import BaselineScope, BaselineStore
+from src.tools.policy_store import LoadedPolicy, PolicyStore
 from src.webhooks import PrAssessmentJob, PullRequestWebhook
 
 URN = "urn:release-coord:acme:unknown:unknown:shop"
@@ -60,6 +62,18 @@ REPORTS = [
     DiscoveryStageReport(source=method, status=DiscoveryStatus.SUCCESS)
     for method in DiscoveryMethod
 ]
+
+POLICY_YAML = """\
+policy_version: 3
+tenant: acme
+project_id: shop
+required_sources: [STATIC_CODE, K8S_MANIFEST, RUNTIME_TELEMETRY]
+runtime_evidence: baseline
+exemptions:
+  files:
+    - pattern: "docs/*"
+      reason: "Documentation only"
+"""
 
 
 class MapChangedFilesTests(unittest.TestCase):
@@ -184,6 +198,19 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         store_patch.start()
         self.addCleanup(store_patch.stop)
         self.scope = BaselineScope(tenant="acme", project_id="shop")
+        policies = tempfile.TemporaryDirectory()
+        self.addCleanup(policies.cleanup)
+        self.policy_store = PolicyStore(Path(policies.name))
+        policy_patch = patch.object(coordinator_nodes, "POLICY_STORE", self.policy_store)
+        policy_patch.start()
+        self.addCleanup(policy_patch.stop)
+        self.policy = self._write_policy(POLICY_YAML)
+
+    def _write_policy(self, text: str) -> LoadedPolicy:
+        path = self.policy_store.policy_path(self.scope)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return self.policy_store.load(self.scope)
 
     def _write_baseline(self) -> str:
         edge = DependencyEdge(
@@ -330,9 +357,15 @@ class PrAssessmentWebhookTests(unittest.TestCase):
                 base_sha="3f1c2aa",
                 head_sha="9b7e410c0ffee",
                 baseline_snapshot_id=snapshot_id,
+                baseline_created_at=final["baseline_created_at"],
                 changed_files=["src/order-service/routes/root.js"],
+                runtime_evidence=RuntimeEvidenceState.BASELINE,
+                policy_version=3,
+                policy_sha256=self.policy.sha256,
             ),
         )
+        self.assertIsNotNone(assessment.evidence.baseline_created_at)
+        self.assertIn("**Release Policy:** version 3", final["evidence_report"])
 
     def test_unmapped_files_block_assessment_without_llm(self) -> None:
         self._write_baseline()
@@ -346,8 +379,63 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         self.assertFalse(assessment.actionable)
         self.assertIsNone(assessment.risk_score)
         self.assertIn(ReasonCode.UNMAPPED_FILES, assessment.reason_codes)
+        # The policy exempts docs/*, but a traversal path is never exempt.
         self.assertEqual(assessment.evidence.unmapped_files, ["docs/../../x"])
+        self.assertEqual(assessment.evidence.exempted_files, [])
         self.assertIn("docs/../../x", assessment.justification)
+
+    def test_missing_policy_blocks_assessment_without_llm(self) -> None:
+        self._write_baseline()
+        self.policy_store.policy_path(self.scope).unlink()
+        verdict = RiskAssessment(risk_score=0.1, approved=True, justification="why")
+        payload = _payload(changed_files=["src/order-service/routes/root.js"])
+
+        final, reasoner_cls = self._run_graph(payload, verdict)
+
+        reasoner_cls.assert_not_called()
+        assessment = final["release_assessment"]
+        self.assertFalse(assessment.approved)
+        self.assertFalse(assessment.actionable)
+        self.assertIn(ReasonCode.POLICY_MISSING, assessment.reason_codes)
+        self.assertIsNone(assessment.evidence.policy_version)
+        self.assertIn("**Release Policy:** None loaded", final["evidence_report"])
+
+    def test_invalid_policy_blocks_assessment(self) -> None:
+        self._write_baseline()
+        path = self.policy_store.policy_path(self.scope)
+        path.write_text(POLICY_YAML + "approve_everything: true\n", encoding="utf-8")
+        verdict = RiskAssessment(risk_score=0.1, approved=True, justification="why")
+        payload = _payload(changed_files=["src/order-service/routes/root.js"])
+
+        final, reasoner_cls = self._run_graph(payload, verdict)
+
+        reasoner_cls.assert_not_called()
+        self.assertIn(
+            ReasonCode.POLICY_INVALID, final["release_assessment"].reason_codes
+        )
+
+    def test_stale_pinned_baseline_blocks_assessment(self) -> None:
+        self._write_baseline()
+        tasks = BackgroundTasks()
+        webhooks.pr_assessment_webhook(
+            _payload(changed_files=["src/order-service/routes/root.js"]), tasks
+        )
+        state = tasks.tasks[0].args[2]
+        later = datetime.now(timezone.utc) + timedelta(hours=25)
+        with (
+            patch.object(coordinator_nodes, "BASELINE_STORE", self.store),
+            patch.object(coordinator_nodes, "utc_now", return_value=later),
+            patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls,
+        ):
+            final = webhooks.coordinator_app.invoke(state)
+
+        reasoner_cls.assert_not_called()
+        assessment = final["release_assessment"]
+        self.assertFalse(assessment.actionable)
+        self.assertEqual(
+            assessment.reason_codes,
+            [ReasonCode.BASELINE_STALE, ReasonCode.COMPATIBILITY_UNVERIFIED],
+        )
 
     def test_assessment_stays_pinned_when_newer_baseline_appears(self) -> None:
         pinned = self._write_baseline()
