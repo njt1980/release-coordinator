@@ -7,6 +7,7 @@ from src.core.models import (
     DiscoveryResult,
     DiscoveryStageReport,
     DiscoveryStatus,
+    ScannedRevision,
     ServiceNode,
     UnresolvedEntityKind,
 )
@@ -18,9 +19,12 @@ from src.tools.devops_extractor import (
     DevOpsExtractor,
     EndpointReference,
     ReferenceKind,
+    RepositoryScan,
     ServiceBoundary,
     ServiceScan,
 )
+
+HEAD_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
 class ScannablePathTests(unittest.TestCase):
@@ -208,20 +212,29 @@ class EnvironmentVariableExtractionTests(unittest.TestCase):
         )
 
 
-def _extractor_with_files(files: dict[str, str]) -> DevOpsExtractor:
+def _extractor_with_files(
+    files: dict[str, str],
+    default_branch: str | None = "refs/heads/main",
+    head_sha: str = HEAD_SHA,
+) -> DevOpsExtractor:
     with patch.object(devops_extractor, "DefaultAzureCredential"):
         extractor = DevOpsExtractor(
             org_url="https://dev.azure.com/org", project="proj", repositories=[]
         )
     git_client = MagicMock()
     git_client.get_repositories.return_value = [
-        SimpleNamespace(name="repo-a", id="id-a")
+        SimpleNamespace(name="repo-a", id="id-a", default_branch=default_branch)
+    ]
+    # A prefix filter also returns longer branch names; only the exact ref counts.
+    git_client.get_refs.return_value = [
+        SimpleNamespace(name="refs/heads/main-old", object_id="f" * 40),
+        SimpleNamespace(name="refs/heads/main", object_id=head_sha),
     ]
     git_client.get_items.return_value = [
         SimpleNamespace(path=path, is_folder=False) for path in files
     ]
     git_client.get_item_content.side_effect = (
-        lambda _repo_id, path, project: files[path].encode()
+        lambda _repo_id, path, project, version_descriptor=None: files[path].encode()
     )
     extractor._get_clients = MagicMock(  # type: ignore[method-assign]
         return_value=(MagicMock(), git_client, "proj")
@@ -229,13 +242,19 @@ def _extractor_with_files(files: dict[str, str]) -> DevOpsExtractor:
     return extractor
 
 
-def _summary(result: DiscoveryResult[ServiceScan]) -> list[tuple[str, list[tuple[str, str]]]]:
+def _services(result: DiscoveryResult[RepositoryScan]) -> list[ServiceScan]:
+    return [scan for repository in result.items for scan in repository.services]
+
+
+def _summary(
+    result: DiscoveryResult[RepositoryScan],
+) -> list[tuple[str, list[tuple[str, str]]]]:
     return [
         (
             scan.service.name,
             [(r.kind.value, r.endpoint) for r in scan.references],
         )
-        for scan in result.items
+        for scan in _services(result)
     ]
 
 
@@ -287,7 +306,7 @@ class ScanRepositoryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            {s.service.source for s in result.items}, {BoundarySource.MARKER}
+            {s.service.source for s in _services(result)}, {BoundarySource.MARKER}
         )
 
     def test_manifest_defines_boundaries_and_registers_idle_services(self) -> None:
@@ -329,7 +348,7 @@ class ScanRepositoryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            [(s.service.root, s.service.source) for s in result.items],
+            [(s.service.root, s.service.source) for s in _services(result)],
             [
                 ("backend/payments", BoundarySource.MANIFEST),
                 ("backend/ledger", BoundarySource.MANIFEST),
@@ -362,6 +381,51 @@ class ScanRepositoryTests(unittest.TestCase):
         self.assertEqual(result.items, [])
         self.assertIn("repo-a: invalid release-coord.yaml", result.errors[0])
 
+    def test_scan_records_and_pins_the_default_branch_head(self) -> None:
+        extractor = _extractor_with_files(
+            {"/release-coord.yaml": "services:\n  - name: api\n", "/app.py": "x"},
+            head_sha=HEAD_SHA.upper(),
+        )
+
+        result = extractor.scan_repository("repo-a")
+
+        self.assertEqual(result.status, DiscoveryStatus.SUCCESS)
+        self.assertEqual(
+            result.items[0].revision,
+            ScannedRevision(repository="repo-a", branch="main", commit_sha=HEAD_SHA),
+        )
+        git_client = extractor._get_clients()[1]  # type: ignore[operator]
+        git_client.get_refs.assert_called_once_with(
+            "id-a", project="proj", filter="heads/main"
+        )
+        listing = git_client.get_items.call_args.kwargs["version_descriptor"]
+        self.assertEqual((listing.version, listing.version_type), (HEAD_SHA, "commit"))
+        reads = git_client.get_item_content.call_args_list
+        self.assertEqual(len(reads), 2)
+        for call in reads:
+            descriptor = call.kwargs["version_descriptor"]
+            self.assertEqual(
+                (descriptor.version, descriptor.version_type), (HEAD_SHA, "commit")
+            )
+
+    def test_repository_without_a_head_commit_fails(self) -> None:
+        cases = {
+            "no default branch": _extractor_with_files({"/a.py": "x"}, default_branch=None),
+            "branch without commit": _extractor_with_files(
+                {"/a.py": "x"}, default_branch="refs/heads/trunk"
+            ),
+        }
+        for name, extractor in cases.items():
+            with self.subTest(name), self.assertLogs(
+                devops_extractor.logger, level="WARNING"
+            ):
+                result = extractor.scan_repository("repo-a")
+                self.assertEqual(result.status, DiscoveryStatus.FAILED)
+                self.assertEqual(result.items, [])
+                self.assertIn("repo-a", result.errors[0])
+                git_client = extractor._get_clients()[1]  # type: ignore[operator]
+                git_client.get_items.assert_not_called()
+
     def test_missing_repository_is_failed_not_empty(self) -> None:
         extractor = _extractor_with_files({})
         result = extractor.scan_repository("missing")
@@ -378,14 +442,18 @@ class ScanRepositoryTests(unittest.TestCase):
         self.assertIn("401", result.errors[0])
 
 
-# FQURI prefix of a statically registered service: namespace not yet known.
-UNKNOWN_URN = "urn:release-coord:default:unknown:unknown:unknown"
+# FQURI prefix of a statically registered service: onboarded environment and
+# cluster, namespace not yet known.
+UNKNOWN_URN = "urn:release-coord:default:prod:aks-1:unknown"
+REVISION_A = ScannedRevision(repository="repo-a", branch="main", commit_sha=HEAD_SHA)
 
 
 def _devops_state() -> DiscoveryGraphState:
     return {
         "tenant": "default",
         "project_id": "default",
+        "environment": "prod",
+        "cluster": "aks-1",
         "workspace_id": "",
         "devops_org_url": "https://dev.azure.com/org",
         "devops_project": "proj",
@@ -395,6 +463,7 @@ def _devops_state() -> DiscoveryGraphState:
         "static_edges": [],
         "runtime_edges": [],
         "discovery_reports": [],
+        "scanned_revisions": [],
         "reconciled_graph": {},
         "baseline_snapshot_id": "",
     }
@@ -417,6 +486,12 @@ def _scan(
     )
 
 
+def _repository_result(*scans: ServiceScan) -> DiscoveryResult[RepositoryScan]:
+    return DiscoveryResult[RepositoryScan].success(
+        [RepositoryScan(revision=REVISION_A, services=list(scans))]
+    )
+
+
 URL = ReferenceKind.URL
 ENV = ReferenceKind.ENV_VAR
 
@@ -425,23 +500,21 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
     def test_edges_originate_from_microservices_not_repositories(self) -> None:
         with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
             devops_cls.return_value.scan_repository.side_effect = [
-                DiscoveryResult[ServiceScan].success(
-                    [
-                        _scan(
-                            "store-front",
-                            ("http://order-service:3000/order", URL),
-                            ("http://product-service:3002/", URL),
-                            ("AI_SERVICE_URL", ENV),
-                        ),
-                        _scan(
-                            "order-service",
-                            ("http://rabbitmq:5672", URL),
-                            ("http://10.0.0.12:5432", URL),
-                        ),
-                        _scan("ledger", source=BoundarySource.MANIFEST),
-                    ]
+                _repository_result(
+                    _scan(
+                        "store-front",
+                        ("http://order-service:3000/order", URL),
+                        ("http://product-service:3002/", URL),
+                        ("AI_SERVICE_URL", ENV),
+                    ),
+                    _scan(
+                        "order-service",
+                        ("http://rabbitmq:5672", URL),
+                        ("http://10.0.0.12:5432", URL),
+                    ),
+                    _scan("ledger", source=BoundarySource.MANIFEST),
                 ),
-                DiscoveryResult[ServiceScan].failed("repo-b: not found"),
+                DiscoveryResult[RepositoryScan].failed("repo-b: not found"),
             ]
             result = discovery_nodes.extract_static_code_baseline(_devops_state())
 
@@ -477,6 +550,8 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
             ],
         )
         self.assertEqual({e.provenance for e in edges}, {"azure_devops"})
+        # Only the repository that was actually scanned has a revision.
+        self.assertEqual(result["scanned_revisions"], [REVISION_A])
         # repo-b failed, so the stage is PARTIAL rather than a clean SUCCESS.
         self.assertEqual(
             result["discovery_reports"],
@@ -493,19 +568,15 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
     def test_env_and_private_targets_reconcile_to_unresolved_entities(self) -> None:
         state = _devops_state()
         with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
-            devops_cls.return_value.scan_repository.return_value = DiscoveryResult[
-                ServiceScan
-            ].success(
-                [
-                    _scan(
-                        "store-front",
-                        ("http://ledger:8080", URL),
-                        ("https://payments.internal.example.com/v1", URL),
-                        ("http://10.0.0.12:5432", URL),
-                        ("AI_SERVICE_URL", ENV),
-                    ),
-                    _scan("ledger", source=BoundarySource.MANIFEST),
-                ]
+            devops_cls.return_value.scan_repository.return_value = _repository_result(
+                _scan(
+                    "store-front",
+                    ("http://ledger:8080", URL),
+                    ("https://payments.internal.example.com/v1", URL),
+                    ("http://10.0.0.12:5432", URL),
+                    ("AI_SERVICE_URL", ENV),
+                ),
+                _scan("ledger", source=BoundarySource.MANIFEST),
             )
             state.update(discovery_nodes.extract_static_code_baseline(state))  # type: ignore[typeddict-item]
         graph = discovery_nodes.reconcile_knowledge_graph(state)["reconciled_graph"]

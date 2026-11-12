@@ -26,13 +26,27 @@ from src.core.models import (
     ReleaseAssessment,
     RiskAssessment,
     RuntimeEvidenceState,
+    ScanContext,
+    ScannedRevision,
     ServiceNode,
 )
-from src.tools.baseline_store import BaselineScope, BaselineStore
+from src.tools.baseline_store import BaselineScope, BaselineStore, new_snapshot_id
 from src.tools.policy_store import LoadedPolicy, PolicyStore
 from src.webhooks import PrAssessmentJob, PullRequestWebhook
 
-URN = "urn:release-coord:acme:unknown:unknown:shop"
+URN = "urn:release-coord:acme:prod:aks-1:shop"
+SHOP_REVISION = ScannedRevision(
+    repository="Shop", branch="main", commit_sha="3f1c2aa" + "0" * 33
+)
+SCAN = ScanContext(
+    environment="prod",
+    cluster="aks-1",
+    namespaces=["shop"],
+    scanned_revisions=[
+        SHOP_REVISION,
+        ScannedRevision(repository="other-repo", branch="main", commit_sha="a" * 40),
+    ],
+)
 
 
 def _id(name: str) -> str:
@@ -67,6 +81,8 @@ POLICY_YAML = """\
 policy_version: 3
 tenant: acme
 project_id: shop
+environment: prod
+cluster: aks-1
 required_sources: [STATIC_CODE, K8S_MANIFEST, RUNTIME_TELEMETRY]
 runtime_evidence: baseline
 exemptions:
@@ -201,9 +217,10 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         policies = tempfile.TemporaryDirectory()
         self.addCleanup(policies.cleanup)
         self.policy_store = PolicyStore(Path(policies.name))
-        policy_patch = patch.object(coordinator_nodes, "POLICY_STORE", self.policy_store)
-        policy_patch.start()
-        self.addCleanup(policy_patch.stop)
+        for module in (coordinator_nodes, webhooks):
+            policy_patch = patch.object(module, "POLICY_STORE", self.policy_store)
+            policy_patch.start()
+            self.addCleanup(policy_patch.stop)
         self.policy = self._write_policy(POLICY_YAML)
 
     def _write_policy(self, text: str) -> LoadedPolicy:
@@ -212,7 +229,7 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return self.policy_store.load(self.scope)
 
-    def _write_baseline(self) -> str:
+    def _graph(self, scan: ScanContext | None = SCAN) -> KnowledgeGraph:
         edge = DependencyEdge(
             source_service_id=_id("store-front"),
             target_service_id=_id("order-service"),
@@ -220,8 +237,20 @@ class PrAssessmentWebhookTests(unittest.TestCase):
             confidence_score=0.7,
             last_observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
-        graph = KnowledgeGraph(services=SERVICES, edges=[edge], discovery=REPORTS)
-        return self.store.write(self.scope, graph).snapshot_id
+        return KnowledgeGraph(services=SERVICES, edges=[edge], discovery=REPORTS, scan=scan)
+
+    def _write_baseline(self) -> str:
+        return self.store.write(self.scope, self._graph()).snapshot_id
+
+    def _write_legacy_baseline(self) -> str:
+        """Write a snapshot as 2a did, without a scan context."""
+        snapshot_id = new_snapshot_id()
+        directory = self.store.project_dir(self.scope)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{snapshot_id}.json").write_text(
+            self._graph(scan=None).model_dump_json(), encoding="utf-8"
+        )
+        return snapshot_id
 
     def test_maps_files_and_schedules_coordinator_run(self) -> None:
         snapshot_id = self._write_baseline()
@@ -236,6 +265,7 @@ class PrAssessmentWebhookTests(unittest.TestCase):
             {_id("order-service"): ["src/order-service/routes/root.js"]},
         )
         self.assertEqual(response.unmapped_files, ["docs/../../x"])
+        self.assertEqual(response.exempted_files, [])
         self.assertEqual(
             webhooks._assessment_jobs[response.job_id],
             PrAssessmentJob(job_id=response.job_id, pr_id="PR-2048", status="queued"),
@@ -362,10 +392,19 @@ class PrAssessmentWebhookTests(unittest.TestCase):
                 runtime_evidence=RuntimeEvidenceState.BASELINE,
                 policy_version=3,
                 policy_sha256=self.policy.sha256,
+                baseline_environment="prod",
+                baseline_cluster="aks-1",
+                scanned_revisions=SCAN.scanned_revisions,
             ),
         )
         self.assertIsNotNone(assessment.evidence.baseline_created_at)
-        self.assertIn("**Release Policy:** version 3", final["evidence_report"])
+        report = final["evidence_report"]
+        self.assertIn("**Release Policy:** version 3", report)
+        self.assertIn("**Baseline Environment/Cluster:** prod/aks-1", report)
+        # The PR's repository is "shop"; the scanned one is "Shop", so the
+        # base comparison is not made, and both revisions are cited.
+        self.assertIn(f"Shop@{SHOP_REVISION.commit_sha} (main)", report)
+        self.assertIn(f"other-repo@{'a' * 40} (main)", report)
 
     def test_unmapped_files_block_assessment_without_llm(self) -> None:
         self._write_baseline()
@@ -458,6 +497,93 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         self.assertEqual(
             final["release_assessment"].evidence.baseline_snapshot_id, pinned
         )
+
+    def test_response_reports_exempt_files_separately(self) -> None:
+        self._write_baseline()
+        # other-repo has no root-level service, so docs/ is owned by nobody.
+        files = ["src/order-service/a.js", "docs/guide.md", "docs/a/b.md"]
+
+        response = webhooks.pr_assessment_webhook(
+            _payload(repository="other-repo", changed_files=files), BackgroundTasks()
+        )
+
+        # docs/* covers one directory level only.
+        self.assertEqual(response.unmapped_files, ["docs/a/b.md"])
+        self.assertEqual(
+            [(e.subject, e.rule) for e in response.exempted_files],
+            [("docs/guide.md", "docs/*")],
+        )
+
+    def test_response_exempts_nothing_without_a_usable_policy(self) -> None:
+        self._write_baseline()
+        files = ["src/order-service/a.js", "docs/guide.md"]
+        path = self.policy_store.policy_path(self.scope)
+        for name, write in [
+            ("missing", path.unlink),
+            ("invalid", lambda: path.write_text("policy_version: [", encoding="utf-8")),
+        ]:
+            with self.subTest(name):
+                write()
+                response = webhooks.pr_assessment_webhook(
+                    _payload(repository="other-repo", changed_files=files),
+                    BackgroundTasks(),
+                )
+                self.assertEqual(response.unmapped_files, ["docs/guide.md"])
+                self.assertEqual(response.exempted_files, [])
+
+    def test_legacy_snapshot_without_scan_context_blocks_assessment(self) -> None:
+        snapshot_id = self._write_legacy_baseline()
+        verdict = RiskAssessment(risk_score=0.1, approved=True, justification="why")
+        payload = _payload(changed_files=["src/order-service/routes/root.js"])
+
+        final, reasoner_cls = self._run_graph(payload, verdict)
+
+        reasoner_cls.assert_not_called()
+        assessment = final["release_assessment"]
+        self.assertEqual(assessment.evidence.baseline_snapshot_id, snapshot_id)
+        self.assertFalse(assessment.actionable)
+        self.assertIn(ReasonCode.BASELINE_SCOPE_MISMATCH, assessment.reason_codes)
+        self.assertIsNone(assessment.evidence.baseline_environment)
+        self.assertEqual(assessment.evidence.scanned_revisions, [])
+        self.assertIn("Not recorded", final["evidence_report"])
+
+    def test_baseline_from_another_cluster_blocks_assessment(self) -> None:
+        self._write_baseline()
+        self.policy = self._write_policy(
+            POLICY_YAML.replace("cluster: aks-1", "cluster: aks-2")
+        )
+        verdict = RiskAssessment(risk_score=0.1, approved=True, justification="why")
+        payload = _payload(changed_files=["src/order-service/routes/root.js"])
+
+        final, reasoner_cls = self._run_graph(payload, verdict)
+
+        reasoner_cls.assert_not_called()
+        assessment = final["release_assessment"]
+        self.assertEqual(
+            assessment.reason_codes,
+            [ReasonCode.BASELINE_SCOPE_MISMATCH, ReasonCode.COMPATIBILITY_UNVERIFIED],
+        )
+        issue = assessment.issues[0]
+        self.assertIn("scanned prod/aks-1", issue.detail)
+        self.assertIn("releases to prod/aks-2", issue.detail)
+
+    def test_report_flags_a_pr_base_other_than_the_scanned_revision(self) -> None:
+        self._write_baseline()
+        verdict = RiskAssessment(risk_score=0.1, approved=True, justification="why")
+        same_base = _payload(
+            repository="Shop", changed_files=["src/order-service/routes/root.js"]
+        )
+        other_base = _payload(
+            repository="Shop",
+            base_sha="beefcafe",
+            changed_files=["src/order-service/routes/root.js"],
+        )
+
+        same, _ = self._run_graph(same_base, verdict)
+        other, _ = self._run_graph(other_base, verdict)
+
+        self.assertNotIn("differs", same["evidence_report"])
+        self.assertIn("[PR base beefcafe differs]", other["evidence_report"])
 
     def test_coordinator_state_is_a_valid_pull_request(self) -> None:
         state = webhooks.build_coordinator_state(

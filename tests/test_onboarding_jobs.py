@@ -18,12 +18,14 @@ from src.core.models import (
     DiscoveryStageReport,
     DiscoveryStatus,
     KnowledgeGraph,
+    ScanContext,
     ServiceNode,
 )
 from src.core.service_ids import unresolved_entity
-from src.tools.baseline_store import BaselineScope, BaselineStore
+from src.tools.baseline_store import BaselineScope, BaselineStore, snapshot_created_at
 
-URN = "urn:release-coord:acme:unknown:unknown:payments"
+URN = "urn:release-coord:acme:prod:aks-1:payments"
+SCAN = ScanContext(environment="prod", cluster="aks-1", namespaces=["payments"])
 
 
 REPORTS = [
@@ -63,13 +65,20 @@ class OnboardingJobTests(unittest.TestCase):
     def _state(self) -> api.DiscoveryGraphState:
         return api.build_discovery_state(
             OnboardingPayload(
-                tenant="acme", project_id="shop", target_namespaces=["payments"]
+                tenant="acme",
+                project_id="shop",
+                environment="prod",
+                cluster="aks-1",
+                target_namespaces=["payments"],
             )
         )
 
     def test_onboard_registers_queued_job_and_schedules_wrapper(self) -> None:
         tasks = BackgroundTasks()
-        response = api.onboard(OnboardingPayload(workspace_id="ws-1"), tasks)
+        response = api.onboard(
+            OnboardingPayload(environment="prod", cluster="aks-1", workspace_id="ws-1"),
+            tasks,
+        )
 
         self.assertEqual(
             api._jobs[response.job_id],
@@ -107,6 +116,7 @@ class OnboardingJobTests(unittest.TestCase):
                 edges=edges,
                 discovery=REPORTS,
                 unresolved_entities=[external],
+                scan=SCAN,
             )
             stored = self.store.write(scope, graph)
             snapshot_ids.append(stored.snapshot_id)
@@ -129,7 +139,10 @@ class OnboardingJobTests(unittest.TestCase):
                     tenant="acme",
                     project_id="shop",
                     snapshot_id=snapshot_ids[0],
+                    created_at=snapshot_created_at(snapshot_ids[0]),
                     demo_mode=False,
+                    environment="prod",
+                    cluster="aks-1",
                     service_count=3,
                     edge_count=2,
                     unresolved_count=1,
@@ -220,13 +233,41 @@ class OnboardingJobTests(unittest.TestCase):
         )
         stored = self.store.write(
             self.scope,
-            KnowledgeGraph(services=services, edges=[mock_edge], discovery=REPORTS),
+            KnowledgeGraph(
+                services=services, edges=[mock_edge], discovery=REPORTS, scan=SCAN
+            ),
         )
 
         results = api.get_latest_baseline("acme", "shop")
 
         self.assertTrue(results.demo_mode)
         self.assertEqual(results.snapshot_id, stored.snapshot_id)
+        self.assertEqual((results.environment, results.cluster), ("prod", "aks-1"))
+        self.assertEqual(results.created_at, stored.created_at)
+
+    def test_latest_baseline_endpoint_reports_unrecorded_scan(self) -> None:
+        legacy = KnowledgeGraph(
+            services=[ServiceNode(service_id=f"{URN}:a", name="a")],
+            edges=[],
+            discovery=REPORTS,
+        )
+        self._write_raw("20261112T000000000000Z-legacy00", legacy.model_dump_json())
+
+        results = api.get_latest_baseline("acme", "shop")
+
+        self.assertIsNone(results.environment)
+        self.assertIsNone(results.cluster)
+        self.assertEqual(results.scanned_revisions, [])
+
+    def test_store_refuses_to_write_without_scan_context(self) -> None:
+        graph = KnowledgeGraph(
+            services=[ServiceNode(service_id=f"{URN}:a", name="a")],
+            edges=[],
+            discovery=REPORTS,
+        )
+        with self.assertRaisesRegex(ValueError, "scan context"):
+            self.store.write(self.scope, graph)
+        self.assertEqual(list(self.root.rglob("*.json")), [])
 
     def test_latest_baseline_endpoint_errors(self) -> None:
         for tenant, project_id, code in [("acme", "none", 404), ("..", "shop", 422)]:

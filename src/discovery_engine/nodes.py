@@ -15,6 +15,8 @@ from src.core.models import (
     DiscoveryStageReport,
     DiscoveryStatus,
     KnowledgeGraph,
+    ScanContext,
+    ScannedRevision,
     ServiceEnvironment,
     ServiceIdentity,
     ServiceNode,
@@ -56,14 +58,15 @@ def _append_report(
 def identity_context(state: DiscoveryGraphState) -> IdentityContext:
     """Return the identity segments known for this discovery run.
 
-    Environment and cluster are not known to static or namespace-scoped
-    extraction, so they are ``unknown``. The single scanned namespace, if
-    exactly one was configured, is the default for bare service names.
+    Environment and cluster come from onboarding (``unknown`` when not
+    given). The single scanned namespace, if exactly one was configured, is
+    the default for bare service names.
     """
-    namespaces = list(state.get("target_namespaces") or [])
-    return IdentityContext(
+    return IdentityContext.for_scan(
         tenant=state.get("tenant") or config.DEFAULT_TENANT,
-        default_namespace=namespaces[0] if len(namespaces) == 1 else None,
+        namespaces=list(state.get("target_namespaces") or []),
+        environment=state.get("environment") or UNKNOWN_LABEL,
+        cluster=state.get("cluster") or UNKNOWN_LABEL,
     )
 
 
@@ -106,8 +109,8 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     extractor returns is registered as a service node (services declared in
     ``release-coord.yaml`` are returned even without dependencies), and its
     edges originate from that microservice, not from the repository.
-    Services are registered under a FQURI whose environment, cluster and
-    namespace are ``unknown``, with their repository and repository-relative
+    Services are registered under a FQURI carrying the onboarded
+    environment and cluster and an ``unknown`` namespace, with their repository and repository-relative
     root directory in metadata (used to map PR file changes to services). Endpoint URLs are reduced to their hostnames
     and environment variables to ``env:<service>/<VARIABLE>`` before being
     stored as dependency targets; both ends are resolved against the
@@ -116,7 +119,8 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     configured, and FAILED when they are configured but no repositories are
     selected. A repository that cannot be scanned makes the stage PARTIAL
     (or FAILED if no repository could be scanned) instead of silently
-    contributing no edges.
+    contributing no edges. Each scanned repository's pinned commit is added
+    to ``scanned_revisions``.
     """
     if not state.get("devops_org_url") or not state.get("devops_project"):
         return _skipped(state, DiscoveryMethod.STATIC_CODE)
@@ -130,6 +134,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     static_edges = list(state.get("static_edges", []))
     discovered_services = list(state.get("discovered_services", []))
     registered = {service.service_id for service in discovered_services}
+    scanned_revisions: list[ScannedRevision] = list(state.get("scanned_revisions", []))
     statuses: list[DiscoveryStatus] = []
     errors: list[str] = []
     edge_count = 0
@@ -139,7 +144,11 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
         result = extractor.scan_repository(repo_name)
         statuses.append(result.status)
         errors.extend(result.errors)
-        for scan in result.items:
+        scans = []
+        for repository_scan in result.items:
+            scanned_revisions.append(repository_scan.revision)
+            scans.extend(repository_scan.services)
+        for scan in scans:
             source_id = context.identity(scan.service.name).uri
             if source_id not in registered:
                 registered.add(source_id)
@@ -187,6 +196,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     return {
         "static_edges": static_edges,
         "discovered_services": discovered_services,
+        "scanned_revisions": scanned_revisions,
         "discovery_reports": _append_report(state, report),
     }
 
@@ -436,11 +446,28 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
     }
 
 
+def scan_context(state: DiscoveryGraphState) -> ScanContext:
+    """Return what this run scanned, to be recorded in its snapshot.
+
+    Raises:
+        pydantic.ValidationError: if the run's environment or cluster is
+            missing or ``unknown``; such a run cannot become a baseline.
+    """
+    return ScanContext(
+        environment=state.get("environment") or UNKNOWN_LABEL,
+        cluster=state.get("cluster") or UNKNOWN_LABEL,
+        namespaces=list(state.get("target_namespaces") or []),
+        telemetry_workspace_id=(state.get("workspace_id") or "").strip(),
+        scanned_revisions=list(state.get("scanned_revisions", [])),
+    )
+
+
 def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
     """Persist the reconciled Day-Zero graph as a new versioned snapshot.
 
-    The reconciled services, dependency edges, unresolved entities and
-    per-stage discovery reports are written to ``baselines/{tenant}/{project_id}/{snapshot_id}.json``.
+    The reconciled services, dependency edges, unresolved entities,
+    per-stage discovery reports and the scan context (environment, cluster,
+    namespaces, telemetry workspace and scanned revisions) are written to ``baselines/{tenant}/{project_id}/{snapshot_id}.json``.
     Every run writes its own immutable file, so concurrent runs cannot
     overwrite each other and the Release Coordinator reads the newest
     complete snapshot for its project.
@@ -452,6 +479,9 @@ def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
         DiscoveryIncompleteError: if any stage FAILED, was PARTIAL, or did not
             report. Nothing is written, so an incomplete crawl never becomes
             the project's latest baseline.
+        ValueError: if the scan context is incomplete (environment or
+            cluster unknown, a service outside them, or a repository with no
+            scanned revision); nothing is written.
     """
     reports = list(state.get("discovery_reports", []))
     problems = baseline_problems(reports)
@@ -465,6 +495,7 @@ def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
             "edges": reconciled_graph.get("edges", []),
             "unresolved_entities": reconciled_graph.get("unresolved_entities", []),
             "discovery": reports,
+            "scan": scan_context(state),
         }
     )
     scope = BaselineScope(

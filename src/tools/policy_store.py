@@ -8,15 +8,28 @@ coordinator blocks the release.
 """
 
 import hashlib
+import re
 from enum import Enum
 from pathlib import Path
 from typing import Final, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from src.core import config
-from src.core.models import UNRESOLVED_ID_PREFIX, DiscoveryMethod
+from src.core.models import (
+    IDENTITY_SEGMENT_PATTERN,
+    UNKNOWN_LABEL,
+    UNRESOLVED_ID_PREFIX,
+    DiscoveryMethod,
+)
 from src.tools.baseline_store import BaselineScope
 
 _POLICY_SUFFIX: Final[str] = ".yaml"
@@ -38,15 +51,67 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+_GLOB_FORBIDDEN: Final[frozenset[str]] = frozenset("[]\\")
+
+
+def compile_path_glob(pattern: str) -> re.Pattern[str]:
+    """Compile a repository path glob into a full-match regular expression.
+
+    Matching is per path segment and case-sensitive: ``*`` matches any run
+    of characters within one segment and ``?`` one character, neither ever
+    matching ``/``. A segment that is exactly ``**`` matches any number of
+    whole segments (zero or more in the middle or at the start, one or more
+    at the end). So ``docs/*`` matches ``docs/a.md`` but not
+    ``docs/a/b.md``, which ``docs/**`` matches.
+
+    Raises:
+        ValueError: if the pattern is absolute, has empty, ``.`` or ``..``
+            segments, uses ``[``, ``]`` or ``\\``, or mixes ``**`` with other
+            characters in one segment.
+    """
+    if not pattern or pattern.startswith("/"):
+        raise ValueError(f"pattern must be a relative path: {pattern!r}")
+    if _GLOB_FORBIDDEN.intersection(pattern):
+        raise ValueError(f"pattern must not use '[', ']' or '\\': {pattern!r}")
+    segments = pattern.split("/")
+    parts: list[str] = []
+    for position, segment in enumerate(segments):
+        last = position == len(segments) - 1
+        if segment in ("", ".", ".."):
+            raise ValueError(f"pattern has an empty, '.' or '..' segment: {pattern!r}")
+        if segment == "**":
+            parts.append("(?:[^/]+/)*[^/]+" if last else "(?:[^/]+/)*")
+            continue
+        if "**" in segment:
+            raise ValueError(f"'**' must be a whole segment: {pattern!r}")
+        body = "".join(
+            "[^/]*" if char == "*" else "[^/]" if char == "?" else re.escape(char)
+            for char in segment
+        )
+        parts.append(body if last else f"{body}/")
+    return re.compile("".join(parts))
+
+
 class FileExemption(_StrictModel):
     """Changed files matching ``pattern`` need not be owned by a service.
 
-    ``pattern`` uses ``fnmatch`` syntax, matched case-sensitively against
-    the repository-relative path; ``*`` also matches ``/``.
+    ``pattern`` is a path glob (see ``compile_path_glob``) matched against
+    the repository-relative path: ``*`` and ``?`` stay within one segment,
+    and a ``**`` segment spans directories.
     """
 
     pattern: str = Field(min_length=1)
     reason: str = Field(min_length=1)
+
+    @field_validator("pattern")
+    @classmethod
+    def _valid_glob(cls, value: str) -> str:
+        compile_path_glob(value)
+        return value
+
+    def matches(self, path: str) -> bool:
+        """Whether ``path`` matches this exemption's pattern."""
+        return compile_path_glob(self.pattern).fullmatch(path) is not None
 
 
 class DependencyExemption(_StrictModel):
@@ -76,12 +141,16 @@ class ProjectPolicy(_StrictModel):
 
     ``required_sources`` must each have SUCCEEDED in the baseline snapshot
     (a SKIPPED stage does not count). ``max_baseline_age_hours`` bounds the
-    snapshot's age at assessment time.
+    snapshot's age at assessment time. ``environment`` and ``cluster`` name
+    the one deployment target the project releases to; the baseline must
+    have scanned exactly that target.
     """
 
     policy_version: int = Field(ge=1)
     tenant: str
     project_id: str
+    environment: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
+    cluster: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
     max_baseline_age_hours: int = Field(
         default=config.MAX_BASELINE_AGE_HOURS,
         ge=1,
@@ -90,6 +159,13 @@ class ProjectPolicy(_StrictModel):
     required_sources: list[DiscoveryMethod] = Field(min_length=1)
     runtime_evidence: RuntimeEvidenceRequirement
     exemptions: Exemptions = Field(default_factory=Exemptions)
+
+    @field_validator("environment", "cluster")
+    @classmethod
+    def _reject_unknown(cls, value: str) -> str:
+        if value == UNKNOWN_LABEL:
+            raise ValueError(f"must name a real deployment target, not {UNKNOWN_LABEL!r}")
+        return value
 
     @model_validator(mode="after")
     def _sources_are_unique(self) -> Self:

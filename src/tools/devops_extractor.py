@@ -11,11 +11,12 @@ from urllib.parse import urlsplit
 import yaml
 
 from azure.devops.connection import Connection
+from azure.devops.released.git import GitVersionDescriptor  # type: ignore[import-untyped]
 from azure.identity import DefaultAzureCredential
 from msrest.authentication import BasicTokenAuthentication
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from src.core.models import DiscoveryResult
+from src.core.models import DiscoveryResult, ScannedRevision
 from src.core.service_ids import is_private_dns_host
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
@@ -167,6 +168,47 @@ class ServiceScan(BaseModel):
 
     service: ServiceBoundary
     references: list[EndpointReference] = Field(default_factory=list)
+
+
+class RepositoryScan(BaseModel):
+    """Every service found in one repository, read at one pinned commit."""
+
+    revision: ScannedRevision
+    services: list[ServiceScan] = Field(default_factory=list)
+
+
+_HEADS_PREFIX: Final[str] = "refs/heads/"
+
+
+def _commit_version(commit_sha: str) -> GitVersionDescriptor:
+    """Return the descriptor that pins a read to ``commit_sha``."""
+    return GitVersionDescriptor(version=commit_sha, version_type="commit")
+
+
+def resolve_default_branch_head(
+    git_client: Any, repository: Any, project: str, repo_name: str
+) -> ScannedRevision:
+    """Return the commit the repository's default branch points at.
+
+    Raises:
+        ValueError: if the repository has no default branch, or the branch
+            has no commit (for example an empty repository).
+    """
+    ref_name = getattr(repository, "default_branch", None) or ""
+    if not ref_name.startswith(_HEADS_PREFIX):
+        raise ValueError(f"{repo_name}: repository has no default branch")
+    refs = git_client.get_refs(
+        repository.id, project=project, filter=ref_name[len("refs/") :]
+    )
+    head = next((ref for ref in refs or [] if ref.name == ref_name), None)
+    commit_sha = (getattr(head, "object_id", None) or "").lower()
+    if not commit_sha:
+        raise ValueError(f"{repo_name}: default branch {ref_name} has no commit")
+    return ScannedRevision(
+        repository=repo_name,
+        branch=ref_name[len(_HEADS_PREFIX) :],
+        commit_sha=commit_sha,
+    )
 
 
 class ServiceDeclaration(BaseModel):
@@ -478,9 +520,22 @@ class DevOpsExtractor:
 
     @staticmethod
     def _read_item_content(
-        git_client: Any, repository_id: str, path: str, project: str
+        git_client: Any,
+        repository_id: str,
+        path: str,
+        project: str,
+        commit_sha: str | None = None,
     ) -> str:
-        content = git_client.get_item_content(repository_id, path, project=project)
+        """Read one file, at ``commit_sha`` when given (else the default branch)."""
+        if commit_sha is None:
+            content = git_client.get_item_content(repository_id, path, project=project)
+        else:
+            content = git_client.get_item_content(
+                repository_id,
+                path,
+                project=project,
+                version_descriptor=_commit_version(commit_sha),
+            )
         if isinstance(content, (bytes, bytearray)):
             return bytes(content).decode("utf-8", errors="replace")
         return b"".join(content).decode("utf-8", errors="replace")
@@ -620,6 +675,7 @@ class DevOpsExtractor:
         project: str,
         repo_name: str,
         file_paths: list[str],
+        commit_sha: str,
     ) -> list[ServiceBoundary]:
         """Return the repository's service boundaries.
 
@@ -631,13 +687,17 @@ class DevOpsExtractor:
         """
         if RELEASE_COORD_MANIFEST_PATH in file_paths:
             content = self._read_item_content(
-                git_client, repository.id, RELEASE_COORD_MANIFEST_PATH, project
+                git_client, repository.id, RELEASE_COORD_MANIFEST_PATH, project, commit_sha
             )
             return _boundaries_from_manifest(parse_release_coord_manifest(content))
         return _infer_service_boundaries(file_paths, repo_name)
 
-    def scan_repository(self, repo_name: str) -> DiscoveryResult[ServiceScan]:
+    def scan_repository(self, repo_name: str) -> DiscoveryResult[RepositoryScan]:
         """Find the services in a repository and the dependencies they reference.
+
+        The default branch is first resolved to one commit, and every file
+        is listed and read at that commit, so the recorded revision is
+        exactly what was scanned even if the branch moves meanwhile.
 
         Service boundaries come from ``release-coord.yaml`` when the
         repository has one, otherwise from directories (the root and its
@@ -656,21 +716,34 @@ class DevOpsExtractor:
             repo_name: Name of the repository to inspect.
 
         Returns:
-            SUCCESS with one ``ServiceScan`` per service, each with its
-            unique references in discovery order, or FAILED if the repository
-            could not be found or scanned or its manifest is invalid.
+            SUCCESS with one ``RepositoryScan`` holding the scanned revision
+            and one ``ServiceScan`` per service, each with its unique
+            references in discovery order, or FAILED if the repository could
+            not be found or scanned, has no default branch commit, or its
+            manifest is invalid.
         """
         try:
             _, git_client, project = self._get_clients()
             repository = self._find_repository(git_client, project, repo_name)
             if repository is None:
                 logger.warning("Azure DevOps repository %s was not found", repo_name)
-                return DiscoveryResult[ServiceScan].failed(
+                return DiscoveryResult[RepositoryScan].failed(
                     f"{repo_name}: repository was not found"
                 )
+            try:
+                revision = resolve_default_branch_head(
+                    git_client, repository, project, repo_name
+                )
+            except ValueError as error:
+                logger.warning("Cannot pin %s to a commit: %s", repo_name, error)
+                return DiscoveryResult[RepositoryScan].failed(str(error))
+            commit_sha = revision.commit_sha
 
             items = git_client.get_items(
-                repository.id, project=project, recursion_level="Full"
+                repository.id,
+                project=project,
+                recursion_level="Full",
+                version_descriptor=_commit_version(commit_sha),
             )
             file_paths = [
                 getattr(item, "path", "")
@@ -679,11 +752,11 @@ class DevOpsExtractor:
             ]
             try:
                 boundaries = self._repository_boundaries(
-                    git_client, repository, project, repo_name, file_paths
+                    git_client, repository, project, repo_name, file_paths, commit_sha
                 )
             except ValueError as error:
                 logger.warning("Invalid release-coord.yaml in %s: %s", repo_name, error)
-                return DiscoveryResult[ServiceScan].failed(
+                return DiscoveryResult[RepositoryScan].failed(
                     f"{repo_name}: invalid release-coord.yaml: {error}"
                 )
 
@@ -697,7 +770,7 @@ class DevOpsExtractor:
                 if owner is None:
                     continue
                 content = self._read_item_content(
-                    git_client, repository.id, path, project
+                    git_client, repository.id, path, project, commit_sha
                 )
                 for reference in _extract_references(content, owner.name, path):
                     references[owner.root].setdefault(
@@ -711,9 +784,11 @@ class DevOpsExtractor:
                 )
                 for boundary in boundaries
             ]
-            return DiscoveryResult[ServiceScan].success(scans)
+            return DiscoveryResult[RepositoryScan].success(
+                [RepositoryScan(revision=revision, services=scans)]
+            )
         except Exception as error:
             logger.exception("Failed to scan repository %s", repo_name)
-            return DiscoveryResult[ServiceScan].failed(
+            return DiscoveryResult[RepositoryScan].failed(
                 f"{repo_name}: repository scan failed: {error}"
             )

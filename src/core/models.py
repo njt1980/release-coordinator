@@ -352,6 +352,53 @@ class DiscoveryIncompleteError(RuntimeError):
         self.problems = problems
 
 
+GIT_COMMIT_SHA_PATTERN: Final[str] = r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
+
+
+class ScannedRevision(BaseModel, frozen=True):
+    """The exact commit discovery read one repository at.
+
+    ``branch`` is the ref the commit was resolved from (the repository's
+    default branch); ``commit_sha`` is a full, lower-case SHA-1 or SHA-256.
+    """
+
+    repository: str = Field(min_length=1)
+    branch: str = Field(min_length=1)
+    commit_sha: str = Field(pattern=GIT_COMMIT_SHA_PATTERN)
+
+
+class ScanContext(BaseModel):
+    """What one discovery run scanned, recorded in its baseline snapshot.
+
+    ``environment`` and ``cluster`` are the deployment target the operator
+    onboarded (never ``unknown``); every service FQURI in the snapshot
+    carries them. ``namespaces`` are the Kubernetes namespaces scanned,
+    ``telemetry_workspace_id`` the telemetry workspace queried (blank when
+    none), and ``scanned_revisions`` one entry per repository read.
+    """
+
+    environment: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
+    cluster: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
+    namespaces: List[str] = Field(default_factory=list)
+    telemetry_workspace_id: str = ""
+    scanned_revisions: List[ScannedRevision] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_scope(self) -> Self:
+        if UNKNOWN_LABEL in (self.environment, self.cluster):
+            raise ValueError("environment and cluster must be known")
+        repositories = [revision.repository for revision in self.scanned_revisions]
+        if len(set(repositories)) != len(repositories):
+            raise ValueError("scanned_revisions must list each repository once")
+        return self
+
+    def revision_for(self, repository: str) -> ScannedRevision | None:
+        """Return the revision scanned for ``repository``, if any."""
+        return next(
+            (r for r in self.scanned_revisions if r.repository == repository), None
+        )
+
+
 class DependencyEdge(BaseModel):
     """A directed, evidence-backed relationship between two service nodes.
 
@@ -391,12 +438,43 @@ class KnowledgeGraph(BaseModel):
     written with the older ``<namespace>/<name>`` IDs) fail validation.
     ``discovery`` is None for graphs written before discovery outcomes were
     recorded; such a graph cannot prove its discovery was complete.
+    ``scan`` is None for graphs written before the scanned environment,
+    cluster and revisions were recorded. When present, every service FQURI
+    must carry its environment and cluster, and every service found in a
+    repository must name a repository with a scanned revision.
     """
 
     services: List[ServiceNode]
     edges: List[DependencyEdge]
     discovery: Optional[List[DiscoveryStageReport]] = None
     unresolved_entities: List[UnresolvedEntity] = Field(default_factory=list)
+    scan: Optional[ScanContext] = None
+
+    @model_validator(mode="after")
+    def _services_match_scan(self) -> Self:
+        if self.scan is None:
+            return self
+        target = (self.scan.environment, self.scan.cluster)
+        outside = sorted(
+            service.service_id
+            for service in self.services
+            if (service.identity.environment, service.identity.cluster) != target
+        )
+        if outside:
+            raise ValueError(
+                f"services are not in {target[0]}/{target[1]}: {outside}"
+            )
+        unscanned = sorted(
+            {
+                repository
+                for service in self.services
+                if (repository := service.metadata.get(REPOSITORY_METADATA_KEY))
+                and self.scan.revision_for(repository) is None
+            }
+        )
+        if unscanned:
+            raise ValueError(f"repositories have no scanned revision: {unscanned}")
+        return self
 
     @model_validator(mode="after")
     def _edges_join_to_nodes(self) -> Self:
@@ -510,6 +588,17 @@ class RuntimeEvidenceState(str, Enum):
     NONE = "none"
 
 
+class ObservedEdge(BaseModel):
+    """A dependency live telemetry observed, resolved against the baseline.
+
+    Endpoints are registered service FQURIs or unresolved entity IDs.
+    """
+
+    source_id: str = Field(min_length=1)
+    target_id: str = Field(min_length=1)
+    last_observed_at: datetime
+
+
 class TelemetryStatus(BaseModel):
     """Runtime evidence available for the services in a release radius.
 
@@ -519,13 +608,15 @@ class TelemetryStatus(BaseModel):
     was answered from the demo fixture instead (its metrics are not real).
     ``runtime_evidence`` classifies that evidence (see
     ``RuntimeEvidenceState``); it defaults to NONE so an unclassified status
-    never counts as runtime evidence.
+    never counts as runtime evidence. ``unbaselined_edges`` are live edges
+    touching the release radius that the baseline does not have.
     """
 
     source: Literal["knowledge_graph", "live", "mock"]
     runtime_evidence: RuntimeEvidenceState = RuntimeEvidenceState.NONE
     runtime_observed_edges: List[str] = Field(default_factory=list)
     runtime_metrics: Dict[str, Dict[str, float]] = Field(default_factory=dict)
+    unbaselined_edges: List[ObservedEdge] = Field(default_factory=list)
 
 
 class RiskAssessment(BaseModel):
@@ -560,6 +651,10 @@ class ReasonCode(str, Enum):
     REQUIRED_SOURCE_MISSING: an evidence source the policy requires did not
         succeed in the baseline, or the runtime evidence is weaker than the
         policy requires.
+    BASELINE_DRIFT: live telemetry observed a dependency touching the
+        release radius that the baseline does not have; re-run discovery.
+    BASELINE_SCOPE_MISMATCH: the baseline does not record the environment
+        and cluster it scanned, or they differ from the project policy's.
 
     Every code except MODEL_REJECTED makes the assessment non-actionable: the
     evidence is insufficient to rely on the verdict, which is different from
@@ -577,6 +672,8 @@ class ReasonCode(str, Enum):
     POLICY_INVALID = "POLICY_INVALID"
     BASELINE_STALE = "BASELINE_STALE"
     REQUIRED_SOURCE_MISSING = "REQUIRED_SOURCE_MISSING"
+    BASELINE_DRIFT = "BASELINE_DRIFT"
+    BASELINE_SCOPE_MISMATCH = "BASELINE_SCOPE_MISMATCH"
 
     @property
     def limits_actionability(self) -> bool:
@@ -616,6 +713,10 @@ class AssessmentEvidence(BaseModel):
     policy exempted. ``demo_mode`` is true when any evidence came from mock
     fixture data. ``policy_version`` and ``policy_sha256`` identify the
     project policy applied (None when it could not be loaded).
+    ``baseline_environment``, ``baseline_cluster`` and ``scanned_revisions``
+    are what the baseline snapshot scanned (None and empty for snapshots
+    that predate scan recording). ``unbaselined_edges`` are live edges in
+    the release radius missing from the baseline.
     """
 
     pr_id: str = Field(min_length=1)
@@ -632,6 +733,10 @@ class AssessmentEvidence(BaseModel):
     runtime_evidence: RuntimeEvidenceState = RuntimeEvidenceState.NONE
     policy_version: Optional[int] = None
     policy_sha256: Optional[str] = None
+    baseline_environment: Optional[str] = None
+    baseline_cluster: Optional[str] = None
+    scanned_revisions: List[ScannedRevision] = Field(default_factory=list)
+    unbaselined_edges: List[ObservedEdge] = Field(default_factory=list)
 
 
 class ReleaseAssessment(BaseModel):

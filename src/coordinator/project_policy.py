@@ -1,15 +1,15 @@
 """Per-project release eligibility checks.
 
 Pure functions that compare an assessment's evidence with the project's
-``ProjectPolicy``: baseline freshness, required evidence sources, the
-runtime evidence requirement, and the exemption allowlist. Each failed
+``ProjectPolicy``: the baseline's environment and cluster, baseline
+freshness, required evidence sources, the runtime evidence requirement,
+and the exemption allowlist. Each failed
 check is an ``EvidenceIssue`` whose reason code limits actionability, so
 the advisory model is not consulted and the release is not approved.
 """
 
 from collections.abc import Iterable
 from datetime import datetime, timedelta
-from fnmatch import fnmatchcase
 
 from src.core.models import (
     DiscoveryMethod,
@@ -19,6 +19,7 @@ from src.core.models import (
     Exemption,
     ReasonCode,
     RuntimeEvidenceState,
+    ScanContext,
 )
 from src.tools.policy_store import ProjectPolicy, RuntimeEvidenceRequirement
 
@@ -28,6 +29,32 @@ _ACCEPTED_RUNTIME: dict[RuntimeEvidenceRequirement, frozenset[RuntimeEvidenceSta
         {RuntimeEvidenceState.LIVE, RuntimeEvidenceState.BASELINE}
     ),
 }
+
+
+def baseline_scope_issue(
+    policy: ProjectPolicy, snapshot_id: str, scan: ScanContext | None
+) -> EvidenceIssue | None:
+    """Return a BASELINE_SCOPE_MISMATCH issue unless the snapshot scanned the
+    policy's environment and cluster.
+
+    A snapshot that does not record its scan context (written before it was
+    recorded) cannot show what it scanned, so it fails too.
+    """
+    expected = f"{policy.environment}/{policy.cluster}"
+    if scan is None:
+        detail = (
+            f"Baseline snapshot {snapshot_id} does not record the environment, "
+            f"cluster or revisions it scanned, so it cannot be shown to describe "
+            f"{expected}. Re-run discovery."
+        )
+    elif (scan.environment, scan.cluster) != (policy.environment, policy.cluster):
+        detail = (
+            f"Baseline snapshot {snapshot_id} scanned {scan.environment}/"
+            f"{scan.cluster}, but the project policy releases to {expected}."
+        )
+    else:
+        return None
+    return EvidenceIssue(code=ReasonCode.BASELINE_SCOPE_MISMATCH, detail=detail)
 
 
 def baseline_freshness_issue(
@@ -140,7 +167,7 @@ def partition_exempt_files(
     exempted: list[Exemption] = []
     for path in files:
         candidates = rules if is_normalized_relative_path(path) else []
-        rule = next((r for r in candidates if fnmatchcase(path, r.pattern)), None)
+        rule = next((r for r in candidates if r.matches(path)), None)
         if rule is None:
             remaining.append(path)
         else:

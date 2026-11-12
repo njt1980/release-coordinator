@@ -9,6 +9,7 @@ from src.core.models import (
     DependencyEdge,
     EvidenceIssue,
     Exemption,
+    KnowledgeGraph,
     PullRequestPayload,
     ReleaseAssessment,
     RiskAssessment,
@@ -30,6 +31,8 @@ class ReleaseGraphState(TypedDict, total=False):
     and recorded here. ``baseline_demo_mode`` records whether that snapshot
     relies on mock data, ``baseline_created_at`` when it was written, and
     ``baseline_runtime_state`` the runtime evidence it provides on its own.
+    ``baseline_graph`` is the loaded snapshot's graph (None when none could
+    be loaded); live telemetry is compared with it to detect drift.
     ``project_policy`` is the project's release policy (None when it is
     missing or invalid, which is itself a discovery issue).
     ``unmapped_files`` are changed files no registered service owns and the
@@ -56,6 +59,7 @@ class ReleaseGraphState(TypedDict, total=False):
     baseline_created_at: datetime | None
     baseline_demo_mode: bool
     baseline_runtime_state: RuntimeEvidenceState
+    baseline_graph: KnowledgeGraph | None
     project_policy: LoadedPolicy | None
     unmapped_files: list[str]
     exempted_files: list[Exemption]

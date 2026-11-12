@@ -92,6 +92,28 @@ class IdentityContext(BaseModel):
     cluster: str = Field(default=UNKNOWN_LABEL, pattern=IDENTITY_SEGMENT_PATTERN)
     default_namespace: str | None = None
 
+    @classmethod
+    def for_scan(
+        cls,
+        tenant: str,
+        namespaces: list[str],
+        environment: str = UNKNOWN_LABEL,
+        cluster: str = UNKNOWN_LABEL,
+    ) -> "IdentityContext":
+        """Return the context of a discovery run over ``namespaces``.
+
+        The single scanned namespace, if exactly one was scanned, is the
+        default for bare service names. Discovery and the release
+        coordinator both build their contexts here, so live telemetry is
+        resolved exactly as discovery resolved it.
+        """
+        return cls(
+            tenant=tenant,
+            environment=environment or UNKNOWN_LABEL,
+            cluster=cluster or UNKNOWN_LABEL,
+            default_namespace=namespaces[0] if len(namespaces) == 1 else None,
+        )
+
     def identity(self, service_name: str, namespace: str | None = None) -> ServiceIdentity:
         """Return the identity of ``service_name`` within this context.
 

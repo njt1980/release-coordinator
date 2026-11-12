@@ -65,6 +65,18 @@ class DecideReleaseTests(unittest.TestCase):
         self.assertEqual(verdict.reason_codes, [ReasonCode.DEMO_EVIDENCE])
         self.assertIn("[DEMO_EVIDENCE] mock fixture", verdict.justification)
 
+    def test_drift_and_scope_mismatch_block_without_the_model(self) -> None:
+        for code in (ReasonCode.BASELINE_DRIFT, ReasonCode.BASELINE_SCOPE_MISMATCH):
+            with self.subTest(code=code):
+                issue = EvidenceIssue(code=code, detail="detail")
+                self.assertTrue(code.limits_actionability)
+                self.assertFalse(needs_model([issue], VERIFIED))
+                verdict = decide_release([issue], VERIFIED, None)
+                self.assertFalse(verdict.approved)
+                self.assertFalse(verdict.actionable)
+                self.assertIsNone(verdict.risk_score)
+                self.assertEqual(verdict.reason_codes, [code])
+
     def test_reason_codes_are_unique_and_ordered(self) -> None:
         issues = [
             EvidenceIssue(code=ReasonCode.DISCOVERY_GAP, detail="a"),
