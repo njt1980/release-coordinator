@@ -560,7 +560,8 @@ class PolicyNodeTests(unittest.TestCase):
         )
 
         cases = [
-            (DiscoveryResult.success([]), False, RuntimeEvidenceState.LIVE),
+            # No baseline graph: live rows can't be resolved or cover anything.
+            (DiscoveryResult.success([]), False, RuntimeEvidenceState.LIVE_UNCOVERED),
             (DiscoveryResult.failed("x"), False, RuntimeEvidenceState.LIVE_INCOMPLETE),
             (DiscoveryResult.success([]), True, RuntimeEvidenceState.MOCK),
         ]
@@ -572,6 +573,7 @@ class PolicyNodeTests(unittest.TestCase):
                 extractor.is_mock = is_mock
                 extractor.get_active_dependencies.return_value = result_value
                 extractor.get_runtime_metrics.return_value = {}
+                extractor.dropped_records = {}
                 live: Any = {"workspace_id": "ws", "project_policy": loaded}
 
                 result = coordinator_nodes.validate_runtime_telemetry_node(live)

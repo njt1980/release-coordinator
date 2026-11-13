@@ -7,7 +7,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from azure.identity import DefaultAzureCredential
 from azure.monitor.query import (
@@ -26,6 +26,7 @@ from src.core.models import (
     DiscoveryResult,
     TelemetryClusterFilter,
 )
+from src.tools.telemetry_normalization import normalize_edges
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
     VERIFY_TIMEOUT_SECONDS,
@@ -37,6 +38,8 @@ logger = logging.getLogger(__name__)
 RuntimeMetrics: TypeAlias = dict[str, dict[str, int | float]]
 _REQUIRED_COLUMNS = frozenset({"Source", "Target", "LastObservedAt"})
 _NAMESPACE_COLUMN = "SourceNamespace"
+_CALLS_COLUMN = "Calls"
+_FAILURES_COLUMN = "Failures"
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 # OpenTelemetry resource attributes, as Application Insights stores them in
 # Properties: the workload's own name, and the Kubernetes namespace it runs
@@ -78,6 +81,7 @@ class TelemetryExtractor:
             raise ValueError("TELEMETRY_SOURCE must be either 'mock' or 'azure'")
 
         self._runtime_metrics: RuntimeMetrics = {}
+        self._dropped_records: dict[str, int] = {}
         self._credential: DefaultAzureCredential | None = None
         self._client: LogsQueryClient | None = None
         if self._source == "azure":
@@ -143,6 +147,10 @@ class TelemetryExtractor:
         ``environment="mock"`` with a confidence of 0.0: they are demo data,
         not evidence of real traffic.
 
+        Targets are normalized and noise is dropped (see
+        ``telemetry_normalization``); ``dropped_records`` counts what was
+        dropped from the last call.
+
         Returns:
             SUCCESS with every observed edge, PARTIAL when some records or
             tables could not be used (or Azure reported a partial error), or
@@ -151,11 +159,23 @@ class TelemetryExtractor:
         if days_back <= 0:
             raise ValueError("days_back must be a positive integer")
         if self._source == "mock":
-            return self._get_active_dependencies_from_mock()
-        return self._get_active_dependencies_from_azure(days_back, cluster_filter)
+            result = self._get_active_dependencies_from_mock()
+        else:
+            result = self._get_active_dependencies_from_azure(days_back, cluster_filter)
+        edges, self._dropped_records = normalize_edges(result.items)
+        return result.model_copy(update={"items": edges})
+
+    @property
+    def dropped_records(self) -> dict[str, int]:
+        """Rows the last query dropped as noise, counted per reason."""
+        return dict(self._dropped_records)
 
     def get_runtime_metrics(self) -> RuntimeMetrics:
-        """Return metrics derived from the most recently loaded mock records."""
+        """Return per-source call metrics from the most recent query.
+
+        Keyed by the source reference the edges use; each entry has
+        ``request_count`` and ``error_rate``.
+        """
         return {
             service: metrics.copy()
             for service, metrics in self._runtime_metrics.items()
@@ -239,6 +259,7 @@ class TelemetryExtractor:
     ) -> DiscoveryResult[DependencyEdge]:
         """Query Azure Monitor for observed dependency edges."""
         query = build_dependency_query(days_back, cluster_filter)
+        self._runtime_metrics = {}
         try:
             if self._client is None:
                 raise RuntimeError("Azure telemetry client was not initialized")
@@ -252,7 +273,7 @@ class TelemetryExtractor:
             return DiscoveryResult[DependencyEdge].failed(
                 f"Telemetry query failed: {error}"
             )
-        return parse_dependency_response(response)
+        return parse_dependency_response(response, self._runtime_metrics)
 
 
 def build_dependency_query(
@@ -282,9 +303,11 @@ def build_dependency_query(
         f'| extend SourceName = coalesce(tostring(Properties["{_SERVICE_NAME_PROPERTY}"]), AppRoleName),\n'
         f'    {_NAMESPACE_COLUMN} = tostring(Properties["{_NAMESPACE_PROPERTY}"])\n'
         "| where isnotempty(SourceName) and isnotempty(Target)\n"
-        "| summarize LastObservedAt=max(TimeGenerated)\n"
+        f"| summarize LastObservedAt=max(TimeGenerated), {_CALLS_COLUMN}=count(),\n"
+        f"    {_FAILURES_COLUMN}=countif(Success == false)\n"
         f"    by Source=SourceName, {_NAMESPACE_COLUMN}, Target\n"
-        f"| project Source, {_NAMESPACE_COLUMN}, Target, LastObservedAt\n"
+        f"| project Source, {_NAMESPACE_COLUMN}, Target, LastObservedAt, "
+        f"{_CALLS_COLUMN}, {_FAILURES_COLUMN}\n"
     )
 
 
@@ -322,15 +345,34 @@ def _parse_observed_at(value: object) -> datetime:
     raise ValueError(f"unsupported LastObservedAt value: {value!r}")
 
 
+def _count(row: Any, index: int | None) -> int:
+    """Read an optional non-negative count column (0 when absent)."""
+    if index is None or row[index] is None:
+        return 0
+    value = int(str(row[index]))
+    if value < 0:
+        raise ValueError(f"negative count {value}")
+    return value
+
+
+def _add_metrics(metrics: RuntimeMetrics, calls: dict[str, tuple[int, int]]) -> None:
+    """Turn per-source (calls, failures) totals into request_count/error_rate."""
+    for source, (total, failures) in calls.items():
+        if total:
+            metrics[source] = {"request_count": total, "error_rate": failures / total}
+
+
 def _parse_dependency_table(
     table: LogsTable,
+    calls: dict[str, tuple[int, int]] | None = None,
 ) -> tuple[list[DependencyEdge], list[str]]:
     """Parse one result table into edges and per-row errors.
 
     ``LogsTable.columns`` is a list of column-name strings in
     azure-monitor-query; row values are read by the matching index. The
     ``SourceNamespace`` column is optional; when present it qualifies the
-    source (see ``source_reference``).
+    source (see ``source_reference``). The optional ``Calls`` and
+    ``Failures`` columns are summed per source into ``calls``.
 
     Raises:
         ValueError: if the table does not have the expected columns.
@@ -348,6 +390,8 @@ def _parse_dependency_table(
         )
 
     namespace_index = column_indexes.get(_NAMESPACE_COLUMN)
+    calls_index = column_indexes.get(_CALLS_COLUMN)
+    failures_index = column_indexes.get(_FAILURES_COLUMN)
     edges: list[DependencyEdge] = []
     bad_rows = 0
     for row in table.rows:
@@ -359,7 +403,12 @@ def _parse_dependency_table(
                 raise ValueError("empty Source or Target")
             namespace = row[namespace_index] if namespace_index is not None else None
             reference = source_reference(str(source), str(namespace or ""))
+            row_calls = _count(row, calls_index)
+            row_failures = _count(row, failures_index)
             edges.append(_runtime_edge(reference, str(target), observed_at))
+            if calls is not None:
+                total, failed = calls.get(reference, (0, 0))
+                calls[reference] = (total + row_calls, failed + row_failures)
         except (IndexError, ValueError, ValidationError) as error:
             logger.warning("Skipping malformed telemetry row: %s", error)
             bad_rows += 1
@@ -373,12 +422,14 @@ def _parse_dependency_table(
 
 def parse_dependency_response(
     response: LogsQueryResult | LogsQueryPartialResult,
+    metrics: RuntimeMetrics | None = None,
 ) -> DiscoveryResult[DependencyEdge]:
     """Turn a ``query_workspace`` response into an explicit discovery result.
 
     A ``LogsQueryResult`` exposes ``tables``; a ``LogsQueryPartialResult``
     exposes ``partial_data`` and ``partial_error``. Partial responses keep
     whatever edges were returned but are marked PARTIAL, never SUCCESS.
+    When ``metrics`` is given, per-source call metrics are written into it.
     """
     status = getattr(response, "status", None)
     errors: list[str] = []
@@ -403,10 +454,11 @@ def parse_dependency_response(
         )
 
     edges: list[DependencyEdge] = []
+    calls: dict[str, tuple[int, int]] = {}
     parsed_tables = 0
     for table in tables:
         try:
-            table_edges, table_errors = _parse_dependency_table(table)
+            table_edges, table_errors = _parse_dependency_table(table, calls)
         except ValueError as error:
             logger.error("Unusable telemetry result table: %s", error)
             errors.append(str(error))
@@ -417,4 +469,6 @@ def parse_dependency_response(
 
     if parsed_tables == 0:
         return DiscoveryResult[DependencyEdge].failed("; ".join(errors))
+    if metrics is not None:
+        _add_metrics(metrics, calls)
     return DiscoveryResult[DependencyEdge].from_items(edges, errors)

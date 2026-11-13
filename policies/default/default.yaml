@@ -7,7 +7,7 @@
 # succeeded in a baseline under 24h old that scanned the environment and
 # cluster below, runtime evidence must come from a live telemetry query,
 # and nothing is exempt.
-policy_version: 3
+policy_version: 4
 tenant: default
 project_id: default
 
@@ -32,11 +32,25 @@ max_baseline_age_hours: 24
 # Discovery stages that must have SUCCEEDED (SKIPPED does not count).
 required_sources: [STATIC_CODE, K8S_MANIFEST, RUNTIME_TELEMETRY]
 
-# live: a completed live telemetry query for this assessment.
+# live: a completed live telemetry query for this assessment whose newest
+#   row is fresh and which observed every service in the release radius.
 # baseline: live, or runtime edges from the baseline snapshot.
 # Only live evidence can detect dependencies the baseline is missing
 # (BASELINE_DRIFT); with "baseline" that check never runs.
 runtime_evidence: live
+
+# Days of telemetry every query reads (1..30), at onboarding and assessment.
+runtime_lookback_days: 7
+# Live evidence counts only if every service in the release radius was seen
+# within this many minutes (5..1440), unless listed in silent_services.
+max_telemetry_age_minutes: 60
+
+# External destinations called on purpose. Each rule names exactly one of
+# host, host_suffix (".example.com") or cidr, with a reason. Host rules
+# never match a bare IP, so an IP-only sighting of npm still blocks.
+egress:
+  - host: registry.npmjs.org
+    reason: "npm's update check when a Node.js container starts"
 
 # Explicit, justified allowlist. Example entries:
 #   files:
@@ -47,6 +61,12 @@ runtime_evidence: live
 #   dependencies:
 #     - entity_id: "unresolved:api.stripe.com"
 #       reason: "External payment API, contract monitored separately"
+#   silent_services:   # radius services allowed to be quiet for longer
+#     - service: "default/nightly-report"
+#       reason: "Runs once a day"
+#       max_quiet_days: 2          # must still be seen within 2 days
+#       expires_on: 2026-12-31     # re-review by then; ignored afterwards
 exemptions:
   files: []
   dependencies: []
+  silent_services: []

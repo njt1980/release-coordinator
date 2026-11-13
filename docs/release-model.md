@@ -33,7 +33,8 @@ Every source of evidence (code, manifests, telemetry) names services
 differently; all of them are resolved to this URI. A reference that does not
 match exactly one registered service stays an **unresolved entity**, with a
 kind: IP address, private DNS, external DNS, unregistered service,
-unresolved environment variable, or ambiguous service.
+unresolved environment variable, unset environment variable, or ambiguous
+service.
 
 Identity is namespace-safe:
 
@@ -98,9 +99,22 @@ workspace.
 2. **Mapping**: map changed files to services by their directories.
 3. **Radius**: walk the baseline from the changed services to every
    upstream consumer and downstream dependency.
-4. **Live check**: query telemetry for the same workspace. An observed edge
-   in the radius that the baseline lacks means the baseline no longer
-   describes the system (drift).
+4. **Live check**: query telemetry for the same workspace, cluster filter
+   and lookback (`runtime_lookback_days`). Noise is dropped in the backend
+   and counted: loopback calls, targets with no host (an HTTP method or a
+   span name), and targets on an ephemeral port (32768 and up: a reply or
+   a broker delivery reported backwards). The result is **live** evidence
+   only when the query returned rows and **each** radius service was seen
+   within `max_telemetry_age_minutes`, judged per service so one busy
+   service can't make a quiet one look fresh. A service that is quiet by
+   nature can be listed in `exemptions.silent_services` with a reason, an
+   `expires_on` date (expired entries are ignored and reported) and
+   optionally `max_quiet_days` (it must still be seen within that many
+   days). Otherwise it is
+   `live_empty`, `live_stale` or `live_uncovered`, and a policy requiring
+   live evidence blocks with the reason. An observed edge in the radius
+   that the baseline lacks means the baseline no longer describes the
+   system (drift).
 5. **Sequence**: order the deployment deterministically. For an additive
    change, providers deploy before consumers. For a breaking change,
    consumers deploy first, and consumers the PR doesn't change are reported
@@ -116,9 +130,9 @@ workspace.
 | --- | --- |
 | `POLICY_MISSING`, `POLICY_INVALID` | No usable policy for the project |
 | `BASELINE_UNAVAILABLE`, `BASELINE_STALE`, `BASELINE_SCOPE_MISMATCH` | No baseline, too old, or scanned for another environment/cluster (or not provably the policy's cluster) |
-| `REQUIRED_SOURCE_MISSING` | A discovery source the policy requires did not succeed |
+| `REQUIRED_SOURCE_MISSING` | A discovery source the policy requires did not succeed, or runtime evidence is weaker than required (e.g. live telemetry empty, stale or not covering the radius) |
 | `UNMAPPED_FILES` | Changed files no service owns and the policy doesn't exempt |
-| `DISCOVERY_GAP` | An unresolved entity in the release radius |
+| `DISCOVERY_GAP` | An unresolved entity in the release radius that the policy doesn't exempt or allow as egress (an unset environment variable counts only without live evidence) |
 | `BASELINE_DRIFT` | Live telemetry shows an edge in the radius that the baseline lacks |
 | `DEPENDENCY_CYCLE` | No safe deployment order exists |
 | `COMPATIBILITY_UNVERIFIED` | No evidence that the contract change is compatible |
@@ -131,12 +145,12 @@ a platform capability, not a lab fix.
 
 | # | Gap | Why it matters | Proposed capability |
 | --- | --- | --- | --- |
-| G1 | Telemetry noise is only filtered in our collector (loopback calls, reversed broker deliveries, failed connects, path-only URLs, exporter quirks) | Teams that bring their own telemetry won't run our collector, so the noise reaches the backend and blocks releases | Normalize in the backend's telemetry adapter as well; the collector is an optimization |
-| G2 | Every unresolved external call blocks (e.g. npm's update check at container start) | Real applications call package registries, cloud APIs and SaaS; exempting entity by entity is fragile (IPs change) | **Egress policy**: allow external destinations by host pattern, CIDR or category, each with a reason |
-| G3 | Fixed telemetry lookback (30 days at onboarding, 7 at assessment) | Bad or removed edges linger for a month | `runtime_lookback_days` in the project policy |
+| G1 | Telemetry noise is only filtered in our collector (loopback calls, reversed broker deliveries, failed connects, path-only URLs, exporter quirks) | Teams that bring their own telemetry won't run our collector, so the noise reaches the backend and blocks releases | Normalize in the backend's telemetry adapter as well; the collector is an optimization. **Done (PR 2a-2).** |
+| G2 | Every unresolved external call blocks (e.g. npm's update check at container start) | Real applications call package registries, cloud APIs and SaaS; exempting entity by entity is fragile (IPs change) | **Egress policy**: allow external destinations by host pattern, CIDR or category, each with a reason. **Done (PR 2a-2)** for `host`, `host_suffix` and `cidr`; categories later. |
+| G3 | Fixed telemetry lookback (30 days at onboarding, 7 at assessment) | Bad or removed edges linger for a month | `runtime_lookback_days` in the project policy. **Done (PR 2a-2).** |
 | G4 | Telemetry only from Azure Monitor `AppDependencies` | Teams use Datadog, Grafana Tempo, Prometheus and others | Telemetry adapter interface; Azure Monitor first |
 | G5 | Code only from Azure DevOps | Many teams use GitHub or GitLab | Code-host adapter interface |
-| G6 | A service's evidence isn't reconciled across sources (an environment variable the code scan can't resolve vs the endpoint telemetry observes; differing service names) | Gaps that other evidence already answers still block | Record each edge's sources, and resolve environment-variable references with observed endpoints |
+| G6 | A service's evidence isn't reconciled across sources (an environment variable the code scan can't resolve vs the endpoint telemetry observes; differing service names) | Gaps that other evidence already answers still block | Record each edge's sources, and resolve environment-variable references with observed endpoints. **Partly done (PR 2a-2):** a variable that Kubernetes provably doesn't set (`ENVIRONMENT_VARIABLE_UNSET`) is accepted only with live evidence, where drift catches wherever the code's default points. Secret-backed or imported variables are never treated as unset. |
 | G7 | Messaging is modeled as service → broker | The release risk is producer → queue/topic → consumer | Queues and topics as dependency nodes |
 | G8 | No contract analysis | Nothing can be approved (`COMPATIBILITY_UNVERIFIED`) | Compare API and message schemas (OpenAPI, protobuf, JSON Schema) between base and head |
 | G9 | The agent bundle is a lab directory with fixed names | Every cluster differs | A versioned, parameterized bundle (namespaces, connection string) with documented known issues |
@@ -149,7 +163,7 @@ fit for an engineer-reviewed pilot, not for gating releases:
 | --- | --- | --- | --- | --- |
 | G11 | The cluster was a caller-supplied label; the scan used whatever kubeconfig was current, and telemetry wasn't scoped by cluster | A baseline could describe another cluster than the one it is labeled with | The policy names the API server and a telemetry cluster filter; the snapshot records both and they must match | Done (PR 2a-1) |
 | G12 | Same-named services merged: code services had an unknown namespace, and the lab collector dropped the telemetry namespace | Two services could share one node, hiding a dependency | Declared namespaces, ambiguous services, targets resolved in the caller's namespace, namespaced telemetry sources | Done (PR 2a-1) |
-| G13 | A live query with zero rows counted as live evidence; the reported runtime edges came from the baseline; real metrics were empty | "Live" didn't prove the radius was observed | Live evidence states (empty, stale, uncovered), live edges in the report, metrics from the query | PR 2a-2 |
+| G13 | A live query with zero rows counted as live evidence; the reported runtime edges came from the baseline; real metrics were empty | "Live" didn't prove the radius was observed | Live evidence states (empty, stale, uncovered), live edges in the report, metrics from the query | Done (PR 2a-2) |
 | G14 | One PR-wide additive/breaking flag | A PR changes several interfaces, each with its own compatibility | Per-interface change classification, from contract analysis (G8) | After G8 |
 | G15 | The PR's base and head commits aren't verified, and the head isn't scanned for new dependencies; no evidence of what is deployed | The assessment may describe code other than what will ship | Verify base ancestry and scan the head; record deployed versions | PR 2b |
 | G16 | The static scanner is heuristic and `SUCCESS` doesn't mean full coverage; pipeline variables are discarded | A missed reference looks like a missing dependency | Coverage accounting per service directory; read pipeline variables | PR 2b |
