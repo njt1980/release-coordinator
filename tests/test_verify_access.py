@@ -213,6 +213,10 @@ class TelemetryVerifyAccessTests(unittest.TestCase):
             self.assertEqual(extractor.verify_access(), (False, TIMEOUT_MESSAGE))
 
 
+# A valid deployment target for onboarding payloads.
+TARGET = {"environment": "prod", "cluster": "aks-1"}
+
+
 class VerifyEndpointTests(unittest.TestCase):
     def test_devops_endpoint_maps_result(self) -> None:
         payload = DevOpsVerificationRequest(
@@ -238,6 +242,7 @@ class VerifyEndpointTests(unittest.TestCase):
 
     def test_onboarding_state_carries_devops_scope(self) -> None:
         payload = OnboardingPayload(
+            **TARGET,
             devops_org_url="https://dev.azure.com/org",
             devops_project="proj",
             target_repositories=["repo-a"],
@@ -245,6 +250,8 @@ class VerifyEndpointTests(unittest.TestCase):
             workspace_id="ws-1",
         )
         state = api.build_discovery_state(payload)
+        self.assertEqual((state["environment"], state["cluster"]), ("prod", "aks-1"))
+        self.assertEqual(state["scanned_revisions"], [])
         self.assertEqual(state["devops_org_url"], "https://dev.azure.com/org")
         self.assertEqual(state["devops_project"], "proj")
 
@@ -291,8 +298,24 @@ class VerifyEndpointTests(unittest.TestCase):
 
 
 class OnboardingPayloadTests(unittest.TestCase):
+    def test_requires_a_known_environment_and_cluster(self) -> None:
+        scope = {"workspace_id": "ws-1"}
+        for target in [
+            {},
+            {"environment": "prod"},
+            {"cluster": "aks-1"},
+            {"environment": "unknown", "cluster": "aks-1"},
+            {"environment": "prod", "cluster": "unknown"},
+            {"environment": "prod:eu", "cluster": "aks-1"},
+            {"environment": " prod", "cluster": "aks-1"},
+        ]:
+            with self.subTest(target=target):
+                with self.assertRaises(ValidationError):
+                    OnboardingPayload.model_validate({**scope, **target})
+
     def test_accepts_devops_only(self) -> None:
         payload = OnboardingPayload(
+            **TARGET,
             devops_org_url=" https://dev.azure.com/org ",
             devops_project="proj",
             target_repositories=["repo-a", " ", ""],
@@ -303,19 +326,20 @@ class OnboardingPayloadTests(unittest.TestCase):
         self.assertEqual(payload.workspace_id, "")
 
     def test_accepts_kubernetes_only(self) -> None:
-        payload = OnboardingPayload(target_namespaces=[" default ", ""])
+        payload = OnboardingPayload(**TARGET, target_namespaces=[" default ", ""])
         self.assertEqual(payload.target_namespaces, ["default"])
         self.assertFalse(payload.has_devops)
 
     def test_accepts_telemetry_only(self) -> None:
-        payload = OnboardingPayload.model_validate({"workspace_id": " ws-1 "})
+        payload = OnboardingPayload.model_validate({**TARGET, "workspace_id": " ws-1 "})
         self.assertEqual(payload.workspace_id, "ws-1")
 
     def test_rejects_empty_payload(self) -> None:
         with self.assertRaises(ValidationError):
-            OnboardingPayload.model_validate({})
+            OnboardingPayload.model_validate(TARGET)
         with self.assertRaises(ValidationError):
             OnboardingPayload(
+                **TARGET,
                 devops_org_url=" ",
                 target_namespaces=[" "],
                 workspace_id="  ",
@@ -324,21 +348,23 @@ class OnboardingPayloadTests(unittest.TestCase):
     def test_rejects_org_url_without_project(self) -> None:
         with self.assertRaises(ValidationError):
             OnboardingPayload(
+                **TARGET,
                 devops_org_url="https://dev.azure.com/org",
                 workspace_id="ws-1",
             )
 
     def test_rejects_project_without_org_url(self) -> None:
         with self.assertRaises(ValidationError):
-            OnboardingPayload(devops_project="proj", workspace_id="ws-1")
+            OnboardingPayload(**TARGET, devops_project="proj", workspace_id="ws-1")
 
     def test_rejects_repositories_without_devops_scope(self) -> None:
         with self.assertRaises(ValidationError):
-            OnboardingPayload(target_repositories=["repo-a"], workspace_id="ws-1")
+            OnboardingPayload(**TARGET, target_repositories=["repo-a"], workspace_id="ws-1")
 
     def test_rejects_devops_scope_without_repositories(self) -> None:
         with self.assertRaises(ValidationError) as raised:
             OnboardingPayload(
+                **TARGET,
                 devops_org_url="https://dev.azure.com/org",
                 devops_project="proj",
                 target_repositories=[" "],

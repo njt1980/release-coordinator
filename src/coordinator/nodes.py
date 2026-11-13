@@ -11,11 +11,19 @@ from pydantic import BaseModel
 from src.coordinator.policy import decide_release, needs_model
 from src.coordinator.project_policy import (
     baseline_freshness_issue,
+    baseline_scope_issue,
     baseline_runtime_state,
     dependency_exemption,
     partition_exempt_files,
     required_source_issues,
     runtime_evidence_issue,
+)
+from src.coordinator.runtime_drift import (
+    baseline_identity_context,
+    drift_issue,
+    resolve_live_edges,
+    unbaselined_edges,
+    workspace_mismatch_issue,
 )
 from src.coordinator.sequencing import DeploymentPlan, sequence_deployment
 from src.coordinator.state import ReleaseGraphState
@@ -28,6 +36,7 @@ from src.core.models import (
     EvidenceIssue,
     Exemption,
     KnowledgeGraph,
+    ObservedEdge,
     PullRequestPayload,
     ReasonCode,
     ReleaseAssessment,
@@ -290,20 +299,21 @@ def unresolved_gaps(
 def policy_baseline_issues(
     policy: ProjectPolicy | None, baseline: StoredBaseline, now: datetime
 ) -> list[EvidenceIssue]:
-    """Return the project policy's freshness and required-source issues.
+    """Return the project policy's scope, freshness and required-source issues.
 
     Without a policy there are none here: the missing policy is already an
     issue of its own (see ``load_policy_node``).
     """
     if policy is None:
         return []
+    scope = baseline_scope_issue(policy, baseline.snapshot_id, baseline.graph.scan)
     stale = baseline_freshness_issue(
         policy, baseline.snapshot_id, baseline.created_at, now
     )
     sources = required_source_issues(
         policy, baseline.snapshot_id, baseline.graph.discovery
     )
-    return [*([stale] if stale else []), *sources]
+    return [*([scope] if scope else []), *([stale] if stale else []), *sources]
 
 
 def resolve_targets(
@@ -382,8 +392,9 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     ``discovery_issues``, which rejects the release without calling the LLM:
     no usable baseline, a target that does not resolve, an unresolved
     dependency anywhere in the radius that the project policy does not
-    exempt, a baseline relying on mock data, a baseline older than the
-    policy allows, or a required evidence source that did not succeed.
+    exempt, a baseline relying on mock data, a baseline that did not scan
+    the policy's environment and cluster, a baseline older than the policy
+    allows, or a required evidence source that did not succeed.
     """
     scope = _scope(state)
     policy = _policy(state)
@@ -397,6 +408,7 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
             "matched_edges": [],
             "discovery_issues": [*issues, problem],
             "baseline_runtime_state": RuntimeEvidenceState.NONE,
+            "baseline_graph": None,
         }
 
     targets, target_issues = resolve_targets(
@@ -428,6 +440,7 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         "baseline_created_at": baseline.created_at,
         "baseline_demo_mode": baseline.demo_mode,
         "baseline_runtime_state": baseline_runtime_state(baseline.graph.discovery),
+        "baseline_graph": baseline.graph,
     }
 
 
@@ -444,6 +457,11 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     The status's ``runtime_evidence`` classifies the result (see
     ``RuntimeEvidenceState``); when it is weaker than the project policy
     requires, a REQUIRED_SOURCE_MISSING issue is added.
+
+    Real (non-mock) live edges are compared with the baseline (see
+    ``live_drift_issues``): a workspace other than the baseline's is a
+    DISCOVERY_GAP, and edges touching the radius that the baseline lacks
+    are BASELINE_DRIFT.
     """
     observed_edges = [
         f"{edge.source_service_id} -> {edge.target_service_id}"
@@ -491,13 +509,50 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         for service, metrics in extractor.get_runtime_metrics().items()
         if _service_name(service) in radius
     }
+    drift: list[ObservedEdge] = []
+    if not is_mock:
+        drift_issues, drift = live_drift_issues(state, workspace_id, result.items)
+        issues.extend(drift_issues)
     status = TelemetryStatus(
         source="mock" if is_mock else "live",
         runtime_evidence=_live_runtime_state(is_mock, result.status.is_incomplete),
         runtime_observed_edges=observed_edges,
         runtime_metrics=runtime_metrics,
+        unbaselined_edges=drift,
     )
     return _apply_runtime_policy(state, status, issues)
+
+
+def live_drift_issues(
+    state: ReleaseGraphState, workspace_id: str, live_edges: list[DependencyEdge]
+) -> tuple[list[EvidenceIssue], list[ObservedEdge]]:
+    """Compare real live edges with the baseline.
+
+    Returns the issues and the unbaselined edges. Nothing is compared when
+    there is no baseline (already BASELINE_UNAVAILABLE) or the live
+    workspace is not the baseline's (a DISCOVERY_GAP: the edges are not
+    comparable). Edges to an unresolved entity the project policy exempts
+    are not drift.
+    """
+    graph = state.get("baseline_graph")
+    if graph is None:
+        return [], []
+    mismatch = workspace_mismatch_issue(graph, workspace_id)
+    if mismatch is not None:
+        return [mismatch], []
+    policy = _policy(state)
+    exempt = {rule.entity_id for rule in policy.exemptions.dependencies} if policy else set()
+    radius = {
+        *state.get("target_services", []),
+        *state.get("upstream_services", []),
+        *state.get("downstream_services", []),
+    }
+    observed = resolve_live_edges(
+        graph, baseline_identity_context(_scope(state).tenant, graph), live_edges
+    )
+    drift = unbaselined_edges(graph, radius, observed, exempt)
+    issue = drift_issue(state.get("baseline_snapshot_id") or "unknown", drift)
+    return ([issue] if issue else []), drift
 
 
 def _live_runtime_state(is_mock: bool, incomplete: bool) -> RuntimeEvidenceState:
@@ -575,6 +630,8 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
     pull_request: PullRequestPayload = state["pull_request"]
     telemetry = state.get("telemetry_status")
     loaded = state.get("project_policy")
+    graph = state.get("baseline_graph")
+    scan = graph.scan if graph else None
     return AssessmentEvidence(
         pr_id=pull_request.pr_id,
         repository=pull_request.repository,
@@ -593,6 +650,10 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         ),
         policy_version=loaded.policy.policy_version if loaded else None,
         policy_sha256=loaded.sha256 if loaded else None,
+        baseline_environment=scan.environment if scan else None,
+        baseline_cluster=scan.cluster if scan else None,
+        scanned_revisions=list(scan.scanned_revisions) if scan else [],
+        unbaselined_edges=list(telemetry.unbaselined_edges) if telemetry else [],
     )
 
 
@@ -658,14 +719,34 @@ def _render_report(assessment: ReleaseAssessment, state: ReleaseGraphState) -> s
         f"{item.subject} ({item.reason})"
         for item in [*evidence.exempted_files, *evidence.exempted_dependencies]
     ]
+    target = (
+        f"{evidence.baseline_environment}/{evidence.baseline_cluster}"
+        if evidence.baseline_environment and evidence.baseline_cluster
+        else "Not recorded"
+    )
+    revisions = [
+        f"{revision.repository}@{revision.commit_sha} ({revision.branch})"
+        + (
+            f" [PR base {evidence.base_sha} differs]"
+            if revision.repository == evidence.repository
+            and evidence.base_sha
+            and not revision.commit_sha.startswith(evidence.base_sha.lower())
+            else ""
+        )
+        for revision in evidence.scanned_revisions
+    ]
+    drift = [f"{edge.source_id} -> {edge.target_id}" for edge in evidence.unbaselined_edges]
     return (
         "## Release Impact Assessment\n\n"
         f"**Pull Request:** {pull_request.pr_id}: {pull_request.title}\n\n"
         f"**Revision:** {revision}\n\n"
         f"**Baseline Snapshot:** {snapshot}\n\n"
         f"**Baseline Created:** {created}\n\n"
+        f"**Baseline Environment/Cluster:** {target}\n\n"
+        f"**Scanned Revisions:** {_list(revisions)}\n\n"
         f"**Release Policy:** {policy}\n\n"
         f"**Runtime Evidence:** {evidence.runtime_evidence.value}\n\n"
+        f"**Live Edges Missing From Baseline:** {_list(drift)}\n\n"
         f"**Policy Exemptions:** {_list(exemptions)}\n\n"
         f"**Target Services:** {_list(state.get('target_services', []))}\n\n"
         f"**Unmapped Files:** {_list(evidence.unmapped_files)}\n\n"

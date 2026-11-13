@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from src.coordinator import nodes as coordinator_nodes
 from src.coordinator.project_policy import (
     baseline_freshness_issue,
+    baseline_scope_issue,
     baseline_runtime_state,
     dependency_exemption,
     is_normalized_relative_path,
@@ -29,6 +30,7 @@ from src.core.models import (
     PullRequestPayload,
     ReasonCode,
     RuntimeEvidenceState,
+    ScanContext,
 )
 from src.tools.baseline_store import BaselineScope, snapshot_created_at
 from src.tools.policy_store import (
@@ -39,6 +41,7 @@ from src.tools.policy_store import (
     PolicyStore,
     ProjectPolicy,
     RuntimeEvidenceRequirement,
+    compile_path_glob,
     parse_policy,
 )
 
@@ -47,12 +50,14 @@ POLICY_YAML = """\
 policy_version: 2
 tenant: acme
 project_id: shop
+environment: prod
+cluster: aks-1
 max_baseline_age_hours: 12
 required_sources: [STATIC_CODE, RUNTIME_TELEMETRY]
 runtime_evidence: live
 exemptions:
   files:
-    - pattern: "docs/*"
+    - pattern: "docs/**"
       reason: "Documentation only"
     - pattern: "*.md"
       reason: "Markdown"
@@ -124,6 +129,18 @@ class PolicyStoreTests(unittest.TestCase):
             "entity without prefix": POLICY_YAML.replace(
                 "unresolved:api.stripe.com", "api.stripe.com"
             ),
+            "missing environment": POLICY_YAML.replace("environment: prod\n", ""),
+            "missing cluster": POLICY_YAML.replace("cluster: aks-1\n", ""),
+            "unknown environment": POLICY_YAML.replace(
+                "environment: prod", "environment: unknown"
+            ),
+            "unknown cluster": POLICY_YAML.replace("cluster: aks-1", "cluster: unknown"),
+            "environment with colon": POLICY_YAML.replace(
+                "environment: prod", 'environment: "prod:eu"'
+            ),
+            "glob character class": POLICY_YAML.replace('"docs/**"', '"docs/[ab]*"'),
+            "glob traversal": POLICY_YAML.replace('"docs/**"', '"../docs/*"'),
+            "partial double star": POLICY_YAML.replace('"docs/**"', '"docs/**.md"'),
         }
         for name, text in cases.items():
             with self.subTest(name):
@@ -147,6 +164,29 @@ class PolicyStoreTests(unittest.TestCase):
         self.assertIs(policy.runtime_evidence, RuntimeEvidenceRequirement.LIVE)
         self.assertEqual(policy.exemptions.files, [])
         self.assertEqual(policy.exemptions.dependencies, [])
+        self.assertEqual((policy.environment, policy.cluster), ("local", "local"))
+
+
+class BaselineScopeTests(unittest.TestCase):
+    def test_matching_scan_has_no_issue(self) -> None:
+        scan = ScanContext(environment="prod", cluster="aks-1")
+        self.assertIsNone(baseline_scope_issue(POLICY, "snap", scan))
+
+    def test_snapshot_without_scan_context_is_a_mismatch(self) -> None:
+        issue = baseline_scope_issue(POLICY, "snap", None)
+        assert issue is not None
+        self.assertIs(issue.code, ReasonCode.BASELINE_SCOPE_MISMATCH)
+        self.assertIn("does not record", issue.detail)
+
+    def test_other_environment_or_cluster_is_a_mismatch(self) -> None:
+        for environment, cluster in [("staging", "aks-1"), ("prod", "aks-2")]:
+            with self.subTest(environment=environment, cluster=cluster):
+                scan = ScanContext(environment=environment, cluster=cluster)
+                issue = baseline_scope_issue(POLICY, "snap", scan)
+                assert issue is not None
+                self.assertIs(issue.code, ReasonCode.BASELINE_SCOPE_MISMATCH)
+                self.assertIn(f"{environment}/{cluster}", issue.detail)
+                self.assertIn("prod/aks-1", issue.detail)
 
 
 class FreshnessTests(unittest.TestCase):
@@ -248,11 +288,40 @@ class ExemptionTests(unittest.TestCase):
             exempted,
             [
                 Exemption(
-                    subject="docs/a/README.md", rule="docs/*", reason="Documentation only"
+                    subject="docs/a/README.md", rule="docs/**", reason="Documentation only"
                 ),
                 Exemption(subject="CHANGELOG.md", rule="*.md", reason="Markdown"),
             ],
         )
+
+    def test_globs_match_within_path_segments(self) -> None:
+        cases = [
+            ("docs/*", "docs/a.md", True),
+            ("docs/*", "docs/a/b.md", False),
+            ("docs/**", "docs/a/b.md", True),
+            ("docs/**", "docs", False),
+            ("*.md", "README.md", True),
+            ("*.md", "docs/README.md", False),
+            ("**/*.md", "README.md", True),
+            ("**/*.md", "a/b/README.md", True),
+            ("src/**/test_?.py", "src/test_a.py", True),
+            ("src/**/test_?.py", "src/x/y/test_ab.py", False),
+            ("a.b", "aXb", False),
+            ("Docs/*", "docs/a.md", False),
+        ]
+        for pattern, path, expected in cases:
+            with self.subTest(pattern=pattern, path=path):
+                self.assertEqual(
+                    compile_path_glob(pattern).fullmatch(path) is not None, expected
+                )
+
+    def test_single_star_no_longer_exempts_nested_files(self) -> None:
+        policy = parse_policy(POLICY_YAML.replace('"docs/**"', '"docs/*"'), SCOPE)
+        remaining, exempted = partition_exempt_files(
+            policy, ["docs/guide.txt", "docs/a/b.txt"]
+        )
+        self.assertEqual(remaining, ["docs/a/b.txt"])
+        self.assertEqual([e.subject for e in exempted], ["docs/guide.txt"])
 
     def test_unnormalized_paths_are_never_exempt(self) -> None:
         paths = [

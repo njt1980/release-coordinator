@@ -7,7 +7,10 @@ suffix, so concurrent runs never write the same file. Writes go to a hidden
 temporary file that is atomically renamed into place, so readers never see a
 half-written snapshot. Readers pick the newest snapshot that parses and
 records a complete discovery; older good snapshots are never overwritten.
-Every service FQURI in a snapshot must name the snapshot's tenant.
+Every service FQURI in a snapshot must name the snapshot's tenant. New
+snapshots must record their scan context (environment, cluster and scanned
+revisions); snapshots written before that was recorded still load, and the
+release coordinator refuses to approve against them.
 """
 
 import logging
@@ -116,11 +119,13 @@ class BaselineStore:
         Raises:
             DiscoveryIncompleteError: if ``graph`` does not record a complete
                 discovery; nothing is written.
-            ValueError: if a service FQURI names another tenant; nothing is
-                written.
+            ValueError: if a service FQURI names another tenant, or the
+                graph does not record its scan context; nothing is written.
         """
         ensure_complete_baseline(graph)
         ensure_scope_identities(scope, graph)
+        if graph.scan is None:
+            raise ValueError("baseline must record its scan context")
         stored = StoredBaseline(scope=scope, snapshot_id=new_snapshot_id(), graph=graph)
         directory = self.project_dir(scope)
         directory.mkdir(parents=True, exist_ok=True)

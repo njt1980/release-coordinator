@@ -1,5 +1,6 @@
 """FastAPI boundary that lets a frontend trigger the Day-Zero discovery engine."""
 
+from datetime import datetime
 from typing import Literal, Self
 from uuid import uuid4
 
@@ -9,8 +10,11 @@ from starlette.concurrency import run_in_threadpool
 
 from src.core import config
 from src.core.models import (
+    IDENTITY_SEGMENT_PATTERN,
+    UNKNOWN_LABEL,
     DependencyEdge,
     DiscoveryStageReport,
+    ScannedRevision,
     ServiceNode,
     UnresolvedEntity,
 )
@@ -41,13 +45,17 @@ class OnboardingPayload(BaseModel):
     Azure DevOps is configured when both the organization URL and project are
     given, Kubernetes when at least one namespace is given, and telemetry when
     a workspace ID is given. ``tenant`` and ``project_id`` select where the
-    run's baseline snapshot is stored.
+    run's baseline snapshot is stored. ``environment`` and ``cluster`` name
+    the deployment target being scanned; they are required, recorded in the
+    snapshot and checked against the project's release policy.
     """
 
     tenant: str = Field(default=config.DEFAULT_TENANT, pattern=PATH_SEGMENT_PATTERN)
     project_id: str = Field(
         default=config.DEFAULT_PROJECT_ID, pattern=PATH_SEGMENT_PATTERN
     )
+    environment: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
+    cluster: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
     devops_org_url: str = ""
     devops_project: str = ""
     target_repositories: list[str] = Field(default_factory=list)
@@ -68,6 +76,13 @@ class OnboardingPayload(BaseModel):
     def has_devops(self) -> bool:
         """Whether a complete Azure DevOps scope was supplied."""
         return bool(self.devops_org_url and self.devops_project)
+
+    @field_validator("environment", "cluster")
+    @classmethod
+    def _reject_unknown(cls, value: str) -> str:
+        if value == UNKNOWN_LABEL:
+            raise ValueError(f"must name a real deployment target, not {UNKNOWN_LABEL!r}")
+        return value
 
     @model_validator(mode="after")
     def _require_coherent_scope(self) -> Self:
@@ -112,12 +127,19 @@ class CrawlResults(BaseModel):
     ``unresolved_entities`` lists endpoints that matched no registered
     service. ``demo_mode`` is true when
     the baseline relies on mock fixture data rather than real evidence.
+    ``environment``, ``cluster`` and ``scanned_revisions`` are what the
+    snapshot scanned (None and empty for snapshots that predate scan
+    recording); ``created_at`` is when it was written, if known.
     """
 
     tenant: str
     project_id: str
     snapshot_id: str
+    created_at: datetime | None = None
     demo_mode: bool
+    environment: str | None = None
+    cluster: str | None = None
+    scanned_revisions: list[ScannedRevision] = Field(default_factory=list)
     service_count: int = Field(ge=0)
     edge_count: int = Field(ge=0)
     unresolved_count: int = Field(ge=0)
@@ -224,6 +246,8 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
     return {
         "tenant": payload.tenant,
         "project_id": payload.project_id,
+        "environment": payload.environment,
+        "cluster": payload.cluster,
         "workspace_id": payload.workspace_id,
         "devops_org_url": payload.devops_org_url,
         "devops_project": payload.devops_project,
@@ -234,6 +258,7 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
         "static_edges": [],
         "runtime_edges": [],
         "discovery_reports": [],
+        "scanned_revisions": [],
         "reconciled_graph": {},
         "baseline_snapshot_id": "",
     }
@@ -242,11 +267,16 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
 def summarize_baseline(baseline: StoredBaseline) -> CrawlResults:
     """Summarize a stored baseline snapshot for the frontend."""
     graph = baseline.graph
+    scan = graph.scan
     return CrawlResults(
         tenant=baseline.scope.tenant,
         project_id=baseline.scope.project_id,
         snapshot_id=baseline.snapshot_id,
+        created_at=baseline.created_at,
         demo_mode=baseline.demo_mode,
+        environment=scan.environment if scan else None,
+        cluster=scan.cluster if scan else None,
+        scanned_revisions=list(scan.scanned_revisions) if scan else [],
         service_count=len(graph.services),
         edge_count=len(graph.edges),
         unresolved_count=len(graph.unresolved_entities),

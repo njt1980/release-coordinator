@@ -24,6 +24,7 @@ from src.core.models import (
     PullRequestPayload,
     ReasonCode,
     RuntimeEvidenceState,
+    ScanContext,
     ServiceNode,
     UnresolvedEntity,
 )
@@ -33,7 +34,7 @@ from src.tools.baseline_store import BaselineScope, BaselineStore
 
 COMPLETE = {DiscoveryStatus.SUCCESS, DiscoveryStatus.SKIPPED}
 SCOPE = BaselineScope(tenant="acme", project_id="shop")
-URN = "urn:release-coord:acme:unknown:unknown:shop"
+URN = "urn:release-coord:acme:prod:aks-1:shop"
 TARGET = f"{URN}:payment-service"
 
 
@@ -101,6 +102,8 @@ class _StoreTestCase(unittest.TestCase):
         state: Any = {
             "tenant": scope.tenant,
             "project_id": scope.project_id,
+            "environment": "prod",
+            "cluster": "aks-1",
             "discovery_reports": _reports() if reports is None else reports,
             "reconciled_graph": {
                 "services": [
@@ -140,7 +143,12 @@ class BaselinePersistenceTests(_StoreTestCase):
         )
 
     def test_persist_defaults_scope_when_state_names_none(self) -> None:
-        state: Any = {"discovery_reports": _reports(), "reconciled_graph": {}}
+        state: Any = {
+            "environment": "prod",
+            "cluster": "aks-1",
+            "discovery_reports": _reports(),
+            "reconciled_graph": {},
+        }
         discovery_nodes.persist_to_graph_db(state)
         self.assertEqual(len(self._snapshot_files(BaselineScope())), 1)
 
@@ -248,6 +256,7 @@ class BaselinePersistenceTests(_StoreTestCase):
             services=[ServiceNode(service_id=TARGET, name="payment-service")],
             edges=[],
             discovery=_reports(),
+            scan=ScanContext(environment="prod", cluster="aks-1"),
         )
         with self.assertRaises(ValueError):
             self.store.write(BaselineScope(tenant="other", project_id="shop"), graph)
@@ -574,6 +583,7 @@ class StaticRadiusTests(_StoreTestCase):
                 "downstream_services": [],
                 "matched_edges": [],
                 "baseline_runtime_state": RuntimeEvidenceState.NONE,
+                "baseline_graph": None,
                 "discovery_issues": [
                     EvidenceIssue(
                         code=ReasonCode.BASELINE_UNAVAILABLE,

@@ -16,14 +16,27 @@ from starlette.concurrency import run_in_threadpool
 
 from src.coordinator.file_mapping import ChangedFileMapping, map_changed_files
 from src.coordinator.graph import app as coordinator_app
+from src.coordinator.project_policy import partition_exempt_files
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
-from src.core.models import ContractChange, PullRequestPayload, ReleaseAssessment
+from src.core.models import (
+    ContractChange,
+    Exemption,
+    PullRequestPayload,
+    ReleaseAssessment,
+)
 from src.tools.baseline_store import PATH_SEGMENT_PATTERN, BaselineScope, default_store
+from src.tools.policy_store import (
+    PolicyInvalidError,
+    PolicyMissingError,
+    ProjectPolicy,
+    default_policy_store,
+)
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
 
 BASELINE_STORE = default_store()
+POLICY_STORE = default_policy_store()
 
 _GIT_SHA_PATTERN = r"^[0-9a-fA-F]{7,64}$"
 
@@ -64,7 +77,12 @@ class PullRequestWebhook(BaseModel):
 
 
 class PrAssessmentAccepted(BaseModel):
-    """Acknowledgement for a scheduled PR assessment."""
+    """Acknowledgement for a scheduled PR assessment.
+
+    ``unmapped_files`` are changed files no registered service owns and the
+    project policy does not exempt; ``exempted_files`` are those it exempts.
+    Without a usable policy nothing is exempt.
+    """
 
     job_id: str
     pr_id: str
@@ -72,6 +90,7 @@ class PrAssessmentAccepted(BaseModel):
     target_services: list[str] = Field(min_length=1)
     files_by_service: dict[str, list[str]]
     unmapped_files: list[str]
+    exempted_files: list[Exemption] = Field(default_factory=list)
 
 
 AssessmentJobStatus = Literal["queued", "running", "completed", "failed"]
@@ -91,6 +110,18 @@ class PrAssessmentJob(BaseModel):
 # In-memory job registry; records are lost when the server restarts. Only
 # mutated from the event loop, so no locking is needed.
 _assessment_jobs: dict[str, PrAssessmentJob] = {}
+
+
+def _load_policy(scope: BaselineScope) -> ProjectPolicy | None:
+    """Return the project's policy, or None when it is missing or invalid.
+
+    The assessment itself reports why (POLICY_MISSING or POLICY_INVALID);
+    here a missing policy only means nothing is exempt.
+    """
+    try:
+        return POLICY_STORE.load(scope).policy
+    except (PolicyMissingError, PolicyInvalidError):
+        return None
 
 
 def build_coordinator_state(
@@ -202,6 +233,9 @@ def pr_assessment_webhook(
                 "unmapped_files": mapping.unmapped_files,
             },
         )
+    unmapped, exempted = partition_exempt_files(
+        _load_policy(scope), mapping.unmapped_files
+    )
     job_id = str(uuid4())
     _assessment_jobs[job_id] = PrAssessmentJob(
         job_id=job_id, pr_id=payload.pr_id, status="queued"
@@ -218,7 +252,8 @@ def pr_assessment_webhook(
         baseline_snapshot_id=baseline.snapshot_id,
         target_services=mapping.target_services,
         files_by_service=mapping.files_by_service,
-        unmapped_files=mapping.unmapped_files,
+        unmapped_files=unmapped,
+        exempted_files=exempted,
     )
 
 
