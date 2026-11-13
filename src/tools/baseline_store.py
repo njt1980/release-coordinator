@@ -22,12 +22,13 @@ from pathlib import Path
 from typing import Final
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 from src.core import config
 from src.core.models import (
     DiscoveryIncompleteError,
     KnowledgeGraph,
+    RunEvent,
     ensure_complete_baseline,
 )
 
@@ -36,6 +37,8 @@ logger = logging.getLogger(__name__)
 # One path segment: no separators, no leading dot, so ``..`` cannot escape.
 PATH_SEGMENT_PATTERN: Final[str] = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 _SNAPSHOT_SUFFIX: Final[str] = ".json"
+_RUN_LOG_DIR: Final[str] = "run-logs"
+_RUN_LOG_ADAPTER: Final[TypeAdapter[list[RunEvent]]] = TypeAdapter(list[RunEvent])
 _SNAPSHOT_TIME_FORMAT: Final[str] = "%Y%m%dT%H%M%S%fZ"
 
 
@@ -166,6 +169,37 @@ class BaselineStore:
         ensure_complete_baseline(graph)
         ensure_scope_identities(scope, graph)
         return StoredBaseline(scope=scope, snapshot_id=snapshot_id, graph=graph)
+
+    def run_log_path(self, scope: BaselineScope, snapshot_id: str) -> Path:
+        """Where the log of the run that built ``snapshot_id`` is kept.
+
+        A subdirectory, so the snapshot listing (``*.json`` in the project
+        directory) never mistakes a log for a snapshot.
+
+        Raises:
+            ValueError: if ``snapshot_id`` is not a single safe path segment.
+        """
+        if not re.fullmatch(PATH_SEGMENT_PATTERN, snapshot_id):
+            raise ValueError(f"invalid snapshot ID: {snapshot_id!r}")
+        return self.project_dir(scope) / _RUN_LOG_DIR / f"{snapshot_id}{_SNAPSHOT_SUFFIX}"
+
+    def write_run_log(
+        self, scope: BaselineScope, snapshot_id: str, events: list[RunEvent]
+    ) -> None:
+        """Keep the onboarding run's log next to the snapshot it built."""
+        path = self.run_log_path(scope, snapshot_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = _RUN_LOG_ADAPTER.dump_json(events, indent=2).decode("utf-8")
+        temp_path = path.with_name(f".{path.name}.tmp")
+        temp_path.write_text(payload, encoding="utf-8")
+        os.replace(temp_path, path)
+
+    def read_run_log(self, scope: BaselineScope, snapshot_id: str) -> list[RunEvent] | None:
+        """Return the log of the run that built ``snapshot_id``, if kept."""
+        path = self.run_log_path(scope, snapshot_id)
+        if not path.is_file():
+            return None
+        return _RUN_LOG_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
 
     def snapshot_ids(self, scope: BaselineScope) -> list[str]:
         """Return the scope's snapshot IDs, newest first."""

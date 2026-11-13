@@ -59,7 +59,11 @@ class OnboardingJobTests(unittest.TestCase):
 
     def _invoke_returning(self, snapshot_id: str) -> MagicMock:
         return MagicMock(
-            invoke=MagicMock(return_value={"baseline_snapshot_id": snapshot_id})
+            # Jobs run the graph step by step (stream), logging each step.
+            invoke=MagicMock(return_value={"baseline_snapshot_id": snapshot_id}),
+            stream=lambda state, stream_mode: iter(
+                [{"persist_to_graph_db": {"baseline_snapshot_id": snapshot_id}}]
+            ),
         )
 
     def _state(self) -> api.DiscoveryGraphState:
@@ -126,7 +130,12 @@ class OnboardingJobTests(unittest.TestCase):
             )
             return {"baseline_snapshot_id": stored.snapshot_id}
 
-        with patch.object(api, "discovery_app", MagicMock(invoke=fake_invoke)):
+        streaming = MagicMock(
+            stream=lambda state, stream_mode: iter(
+                [{"persist_to_graph_db": fake_invoke(state)}]
+            )
+        )
+        with patch.object(api, "discovery_app", streaming):
             asyncio.run(api.run_discovery_job("job-1", self._state()))
 
         self.assertEqual(observed, ["running"])
@@ -158,7 +167,7 @@ class OnboardingJobTests(unittest.TestCase):
         error = DiscoveryIncompleteError(
             ["RUNTIME_TELEMETRY FAILED: query timed out"]
         )
-        failing = MagicMock(invoke=MagicMock(side_effect=error))
+        failing = MagicMock(stream=MagicMock(side_effect=error))
         with patch.object(api, "discovery_app", failing):
             asyncio.run(api.run_discovery_job("job-7", self._state()))
 
@@ -212,7 +221,11 @@ class OnboardingJobTests(unittest.TestCase):
         self.assertIsNone(api._jobs["job-5"].results)
 
     def test_wrapper_fails_when_run_reports_no_snapshot(self) -> None:
-        with patch.object(api, "discovery_app", MagicMock(invoke=lambda s: {})):
+        with patch.object(
+            api,
+            "discovery_app",
+            MagicMock(invoke=lambda s: {}, stream=lambda s, stream_mode: iter([])),
+        ):
             asyncio.run(api.run_discovery_job("job-10", self._state()))
 
         record = api._jobs["job-10"]
@@ -277,7 +290,7 @@ class OnboardingJobTests(unittest.TestCase):
                 self.assertEqual(caught.exception.status_code, code)
 
     def test_wrapper_records_failure_message(self) -> None:
-        failing = MagicMock(invoke=MagicMock(side_effect=RuntimeError("boom")))
+        failing = MagicMock(stream=MagicMock(side_effect=RuntimeError("boom")))
         with patch.object(api, "discovery_app", failing):
             asyncio.run(api.run_discovery_job("job-2", self._state()))
 

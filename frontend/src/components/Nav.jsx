@@ -16,6 +16,7 @@ export function LogoMark({ className = "" }) {
 const LINKS = [
   { path: ROUTES.home, label: "Overview" },
   { path: ROUTES.howItWorks, label: "How it works" },
+  { path: ROUTES.runs, label: "Runs" },
 ];
 
 export default function Nav({ path, tone = "dark" }) {

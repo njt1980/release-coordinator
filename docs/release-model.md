@@ -124,6 +124,17 @@ workspace.
    block.
 7. **Verdict**: `approved` only when no blocking reason applies.
 
+### Every run is logged
+
+Each onboarding and assessment writes a live, plain-language log: one line
+per step saying what was read or checked and what it found (passed,
+warning, blocked or failed), with details such as IDs and errors. The app
+shows it as the crawl runs and on the Runs page
+(`GET /api/runs/{run_id}/events?after=N`). Logs live in memory; the log of
+the onboarding that built a baseline is kept beside the snapshot
+(`GET /api/baselines/{tenant}/{project}/{snapshot}/run-log`). Logs never
+contain credentials.
+
 ### Blocking reasons
 
 | Code | Meaning |

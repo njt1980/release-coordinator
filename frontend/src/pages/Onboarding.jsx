@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import ScopeInputCard from "../components/ScopeInputCard.jsx";
 import Nav from "../components/Nav.jsx";
 import Stepper from "../components/Stepper.jsx";
+import RunLog, { EventTimeline } from "../components/RunLog.jsx";
 import { ROUTES } from "../lib/router.js";
 
 function TextField({ id, label, value, onChange, placeholder, hint, error }) {
@@ -230,6 +231,51 @@ function DetailRow({ label, children }) {
 
 // What the loaded baseline snapshot scanned: the evidence a release
 // assessment against it will cite.
+// The log of the onboarding run that built a snapshot, fetched on demand.
+function BaselineRunLog({ baseline }) {
+  const [log, setLog] = useState({ status: "idle" });
+  const load = async () => {
+    setLog({ status: "loading" });
+    try {
+      const response = await fetch(
+        `/api/baselines/${encodeURIComponent(baseline.tenant)}/${encodeURIComponent(
+          baseline.project_id,
+        )}/${encodeURIComponent(baseline.snapshot_id)}/run-log`,
+      );
+      if (response.status === 404) {
+        setLog({ status: "missing" });
+        return;
+      }
+      if (!response.ok) throw new Error(`Request failed with status ${response.status}`);
+      setLog({ status: "loaded", events: await response.json() });
+    } catch (error) {
+      setLog({ status: "error", message: error.message });
+    }
+  };
+  return (
+    <details
+      className="rounded-md border border-slate-200 bg-white"
+      onToggle={(event) => event.currentTarget.open && log.status === "idle" && load()}
+    >
+      <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium text-slate-800">
+        How this baseline was built
+      </summary>
+      <div className="border-t border-slate-100 px-3 py-3">
+        {log.status === "loading" && <p className="text-sm text-slate-500">Loading…</p>}
+        {log.status === "missing" && (
+          <p className="text-sm text-slate-500">
+            No log was kept for this snapshot (it predates run logs).
+          </p>
+        )}
+        {log.status === "error" && (
+          <p role="alert" className="text-sm text-red-700">{log.message}</p>
+        )}
+        {log.status === "loaded" && <EventTimeline events={log.events} />}
+      </div>
+    </details>
+  );
+}
+
 function BaselineDetails({ baseline }) {
   const scanRecorded = Boolean(baseline.environment && baseline.cluster);
   return (
@@ -268,6 +314,7 @@ function BaselineDetails({ baseline }) {
           )}
         </DetailRow>
       </dl>
+      <BaselineRunLog key={baseline.snapshot_id} baseline={baseline} />
       <DiscoveryLedger services={baseline.services ?? []} edges={baseline.edges ?? []} />
     </div>
   );
@@ -342,6 +389,8 @@ export default function Onboarding() {
   const [crawlMessage, setCrawlMessage] = useState(null);
   // Services and edges extracted by the last completed crawl, or null.
   const [ledger, setLedger] = useState(null);
+  // The onboarding run whose live log is shown, once a crawl starts.
+  const [activeRun, setActiveRun] = useState(null);
   // The baseline view for the selected tenant/project:
   // { status: "idle" | "loading" | "loaded" | "missing" | "error", data?, message? }
   const [baseline, setBaseline] = useState({ status: "idle" });
@@ -506,6 +555,7 @@ export default function Onboarding() {
     setLedger(null);
     try {
       const response = await postJson("/api/onboard", buildPayload(config, tests));
+      setActiveRun(response.job_id);
       setCrawlMessage(jobBanner({ job_id: response.job_id, status: "queued" }));
       pollJob(response.job_id);
     } catch (error) {
@@ -679,6 +729,21 @@ export default function Onboarding() {
               />
             </ScopeInputCard>
           </section>
+
+          {activeRun && (
+            <section aria-labelledby="activity-heading" className={CARD}>
+              <header className="mb-5">
+                <h2 id="activity-heading" className="text-lg font-semibold text-slate-900">
+                  Activity
+                </h2>
+                <p className="mt-1 text-sm text-slate-600">
+                  Each step of the crawl as it happens: what was read, what was checked, and
+                  what it found. Every run is also listed on the Runs page.
+                </p>
+              </header>
+              <RunLog key={activeRun} runId={activeRun} />
+            </section>
+          )}
 
           <section aria-labelledby="baseline-heading" className={CARD}>
             <StepHeading

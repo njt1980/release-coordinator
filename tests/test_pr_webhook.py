@@ -322,15 +322,21 @@ class PrAssessmentWebhookTests(unittest.TestCase):
             evidence=AssessmentEvidence(pr_id="PR-2048"),
         )
         coordinator = MagicMock()
-        coordinator.invoke.return_value = {
-            "release_assessment": assessment,
-            "evidence_report": "## report",
-        }
+        coordinator.stream.return_value = iter(
+            [
+                {
+                    "compile_evidence_node": {
+                        "release_assessment": assessment,
+                        "evidence_report": "## report",
+                    }
+                }
+            ]
+        )
         state = webhooks.build_coordinator_state(_payload(), "snap-1", _mapping())
         with patch.object(webhooks, "coordinator_app", coordinator):
             asyncio.run(webhooks.run_assessment_job("job-1", "PR-2048", state))
 
-        coordinator.invoke.assert_called_once_with(state)
+        coordinator.stream.assert_called_once_with(state, stream_mode="updates")
         record = webhooks.get_pr_assessment("job-1")
         self.assertEqual(record.status, "completed")
         self.assertEqual(record.assessment, assessment)
@@ -338,7 +344,7 @@ class PrAssessmentWebhookTests(unittest.TestCase):
 
     def test_job_records_failure_and_unknown_job_is_404(self) -> None:
         coordinator = MagicMock()
-        coordinator.invoke.side_effect = RuntimeError("anthropic down")
+        coordinator.stream.side_effect = RuntimeError("anthropic down")
         state = webhooks.build_coordinator_state(_payload(), "snap-1", _mapping())
         with patch.object(webhooks, "coordinator_app", coordinator):
             asyncio.run(webhooks.run_assessment_job("job-2", "PR-2048", state))
