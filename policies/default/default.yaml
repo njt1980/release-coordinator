@@ -74,11 +74,17 @@ egress:
 #       reason: "Runs once a day"
 #       max_quiet_days: 2          # must still be seen within 2 days
 #       expires_on: 2026-12-31     # re-review by then; ignored afterwards
-#   unscanned_files:   # source the scanner can't read (e.g. Rust), reviewed
+#   unscanned_files:   # source the scanner can't read (e.g. Rust) or whose
+#                      # references it can't follow, reviewed
 #     - pattern: "src/product-service/**/*.rs"
 #       reason: "Reviewed: calls ai-service via AI_SERVICE_URL only"
 exemptions:
   files: []
   dependencies: []
   silent_services: []
-  unscanned_files: []
+  unscanned_files:
+    # Test code, not shipped: it checks that the RabbitMQ variables the
+    # service reads are set. makeline-service's getEnvVar helper stays
+    # blocking (it hides which variables the service reads).
+    - pattern: "src/order-service/test/**"
+      reason: "Reviewed 2026-11-13: integration test only; process.env[name] loops over ORDER_QUEUE_* names the service itself reads literally"
