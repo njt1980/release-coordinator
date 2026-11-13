@@ -593,6 +593,14 @@ class NamespaceShapeTests(unittest.TestCase):
         )
         self.assertTrue(state["kubernetes_shape"])
 
+    def test_the_cluster_api_service_is_not_a_finding(self) -> None:
+        extractor = _shape_extractor()
+        extractor._core_v1_api.list_namespaced_service.return_value = _items(  # type: ignore[union-attr]
+            _service("kubernetes", None)
+        )
+        (topology,) = extractor.get_namespace_topology("default", CONTEXT).items
+        self.assertFalse(any(f.object == "service/kubernetes" for f in topology.findings))
+
     def test_a_missing_kind_permission_is_partial(self) -> None:
         extractor = _shape_extractor()
         extractor._batch_v1_api.list_namespaced_cron_job.side_effect = RuntimeError("403")  # type: ignore[union-attr]

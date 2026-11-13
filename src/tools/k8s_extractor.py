@@ -331,6 +331,8 @@ class NamespaceTopology(BaseModel):
 
 
 MANIFEST_PROVENANCE: Final[str] = "kubernetes"
+# The Service every cluster creates for its own API server; not an app object.
+_API_SERVER_SERVICE: Final[tuple[str, str]] = ("default", "kubernetes")
 _EXPOSED_METADATA_KEY: Final[str] = "exposed"
 _WORKLOAD_METADATA_KEY: Final[str] = "workload"
 # Owner kinds whose pod templates are read directly.
@@ -576,6 +578,8 @@ def _namespace_topology(
             )
             continue
         selector = dict(getattr(spec, "selector", None) or {})
+        if not selector and (namespace, name) == _API_SERVER_SERVICE:
+            continue
         if not selector:
             topology.findings.append(
                 _finding(
