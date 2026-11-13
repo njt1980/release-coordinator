@@ -1,6 +1,7 @@
 # Beyla eBPF auto-instrumentation for the lab: traces the network calls of
-# every workload in namespace `default` without code or image changes, and
-# sends them over OTLP to the in-cluster collector (collector.yaml).
+# every workload in namespaces `default` and `eshop` without code or image
+# changes, and sends them over OTLP to the in-cluster collector
+# (collector.yaml).
 #
 # Beyla needs elevated privileges on the node (privileged container,
 # hostPID). Acceptable for the single-operator lab; revisit on the security
@@ -46,6 +47,8 @@ data:
     discovery:
       instrument:
         - k8s_namespace: default
+        # eShop lab (deploy/lab/eshop), when deployed.
+        - k8s_namespace: eshop
       # Leave services that already ship their own OpenTelemetry spans to
       # their SDK, so a call is not reported twice.
       exclude_otel_instrumented_services: true
