@@ -18,7 +18,7 @@ own); these manifests live here, like the lab's telemetry and traffic.
 | `services.yaml` | the nine .NET services, wired as `src/eShop.AppHost/AppHost.cs` wires them |
 | `traffic.yaml` | read-only GET traffic in `lab-traffic` (web app pages, catalog API) |
 | `apply.sh` | deploys all of the above in order, filling in the image registry and tag (`--dry-run`: server-side dry run) |
-| `create-secrets.sh` | the random PostgreSQL password Secret `eshop/eshop-postgres` |
+| `create-secrets.sh` | the Secrets `eshop-postgres` (random password) and `eshop-tls` (lab CA and service certificate) |
 | `Dockerfile`, `build-images.sh` | build and push the service images in Azure with ACR Tasks (eShop has no Dockerfiles; no local .NET SDK needed) |
 
 ## How the AppHost maps to the manifests
@@ -28,7 +28,8 @@ own); these manifests live here, like the lab's telemetry and traffic.
 | `WithReference(postgres database)` | `ConnectionStrings__<db>=Host=postgres;...;Database=<db>` (no password) + `PGPASSWORD` from the Secret |
 | `WithReference(rabbitMq)` | `ConnectionStrings__eventbus=amqp://eventbus:5672` via ConfigMap `eshop-eventbus` (`envFrom`) |
 | `WithReference(redis)` | `ConnectionStrings__redis=redis:6379` |
-| `WithReference(<project>)` | `services__<project>__http__0=http://<project>` and a Service on port 80; for projects called as `https+http://`, also `services__<project>__https__0` (see `services.yaml`) |
+| `WithReference(<project>)` | `services__<project>__http__0=http://<project>` and a Service on port 80 |
+| projects called as `https+http://` (catalog-api, ordering-api) | HTTPS in the cluster: Kestrel on 8443 (Service port 443) with a lab-CA certificate; the web app trusts the CA (see `services.yaml`) |
 | `WithEnvironment("Identity__Url", ...)` and the callback URLs | the same variables, with in-cluster URLs |
 | `AddForwardedHeaders()` | `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` (ConfigMap `eshop-common`) |
 
@@ -80,5 +81,7 @@ a larger node or a second one.
 - `mobile-bff` (a YARP proxy for the MAUI app) isn't deployed; neither are
   the MAUI apps, which run on devices.
 - AI features are off (the AppHost's `UseFoundry` default).
+- The lab CA is generated per cluster and lives only in the Secret
+  `eshop-tls`; it is trusted only by the web app.
 - Credentials are lab-grade: RabbitMQ uses its public `guest` default and
   Redis has no password; both are reachable only inside the cluster.
