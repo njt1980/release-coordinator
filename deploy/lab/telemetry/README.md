@@ -15,7 +15,7 @@ pods in namespace default --eBPF--> Beyla (DaemonSet)
 | File | Contents |
 | --- | --- |
 | `beyla.yaml` | Beyla 3.40.0 DaemonSet, RBAC and config (instruments namespace `default` only) |
-| `collector.yaml` | Collector-contrib 0.164.0: OTLP in, CLIENT/PRODUCER spans only, `service.namespace` removed so `AppRoleName` is the bare workload name, Azure Monitor out |
+| `collector.yaml` | Collector-contrib 0.164.0: OTLP in, CLIENT/PRODUCER spans only, resource attributes kept (the backend reads `service.name`, `k8s.namespace.name` and `k8s.cluster.name` from `Properties`), Azure Monitor out |
 
 `.claude/skills/app-up/lab.sh up` applies both files and creates the Secret
 `observability/appinsights` (key `connection-string`) from the Application
@@ -45,9 +45,16 @@ Check what arrives:
 ```kusto
 AppDependencies
 | where TimeGenerated > ago(1h)
-| summarize calls=count(), last=max(TimeGenerated) by AppRoleName, Target, DependencyType
-| order by AppRoleName asc
+| summarize calls=count(), last=max(TimeGenerated)
+    by Cluster=tostring(Properties["k8s.cluster.name"]),
+       Namespace=tostring(Properties["k8s.namespace.name"]),
+       Source=tostring(Properties["service.name"]), Target, DependencyType
+| order by Source asc
 ```
+
+Beyla detects the cluster name itself; on AKS `k8s.cluster.name` is the
+node resource group (`MC_ReleaseCoordinatorLab_RC-Cluster_eastus`). The
+project policy's `telemetry_cluster` must name that value.
 
 ## Known limits
 

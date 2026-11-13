@@ -1,5 +1,6 @@
 """Batch-processing nodes for the Day-Zero discovery workflow."""
 
+import logging
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
@@ -20,9 +21,12 @@ from src.core.models import (
     ServiceEnvironment,
     ServiceIdentity,
     ServiceNode,
+    TelemetryClusterFilter,
     UnresolvedEntity,
+    UnresolvedEntityKind,
     baseline_problems,
     combine_statuses,
+    unresolved_entity_id,
 )
 from src.core.service_ids import (
     IdentityContext,
@@ -40,11 +44,18 @@ from src.tools.devops_extractor import (
     ReferenceKind,
 )
 from src.tools.k8s_extractor import KubernetesExtractor
+from src.tools.policy_store import (
+    PolicyInvalidError,
+    PolicyMissingError,
+    default_policy_store,
+)
 from src.tools.telemetry_extractor import TelemetryExtractor
 
 __all__ = ["DiscoveryIncompleteError"]
 
+logger = logging.getLogger(__name__)
 BASELINE_STORE = default_store()
+POLICY_STORE = default_policy_store()
 STATIC_CODE_PROVENANCE = "azure_devops"
 
 
@@ -110,8 +121,12 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     ``release-coord.yaml`` are returned even without dependencies), and its
     edges originate from that microservice, not from the repository.
     Services are registered under a FQURI carrying the onboarded
-    environment and cluster and an ``unknown`` namespace, with their repository and repository-relative
-    root directory in metadata (used to map PR file changes to services). Endpoint URLs are reduced to their hostnames
+    environment and cluster and the namespace declared in
+    ``release-coord.yaml`` (``unknown`` when none is declared), with their
+    repository and repository-relative root directory in metadata (used to
+    map PR file changes to services). Every repository directory gets its
+    own node, even when two share a FQURI: reconciliation decides whether
+    they are one service or an ambiguity, never this stage. Endpoint URLs are reduced to their hostnames
     and environment variables to ``env:<service>/<VARIABLE>`` before being
     stored as dependency targets; both ends are resolved against the
     inventory later, during reconciliation.
@@ -133,7 +148,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     context = identity_context(state)
     static_edges = list(state.get("static_edges", []))
     discovered_services = list(state.get("discovered_services", []))
-    registered = {service.service_id for service in discovered_services}
+    registered = {_static_key(service) for service in discovered_services}
     scanned_revisions: list[ScannedRevision] = list(state.get("scanned_revisions", []))
     statuses: list[DiscoveryStatus] = []
     errors: list[str] = []
@@ -149,9 +164,10 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
             scanned_revisions.append(repository_scan.revision)
             scans.extend(repository_scan.services)
         for scan in scans:
-            source_id = context.identity(scan.service.name).uri
-            if source_id not in registered:
-                registered.add(source_id)
+            source_id = context.identity(scan.service.name, scan.service.namespace).uri
+            key = (source_id, repo_name, scan.service.root)
+            if key not in registered:
+                registered.add(key)
                 discovered_services.append(
                     ServiceNode(
                         service_id=source_id,
@@ -201,6 +217,15 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     }
 
 
+def _static_key(service: ServiceNode) -> tuple[str, str | None, str | None]:
+    """Identify a node by its FQURI and the repository directory it came from."""
+    return (
+        service.service_id,
+        service.metadata.get(REPOSITORY_METADATA_KEY),
+        service.metadata.get(SERVICE_ROOT_METADATA_KEY),
+    )
+
+
 def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
     """Enrich the service baseline with Kubernetes deployment topology.
 
@@ -211,7 +236,9 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
     (``service_environments``), which reconciliation uses to resolve
     ``env:`` references. A namespace whose services or workload environments
     could not be fully read makes the stage PARTIAL. The stage is skipped
-    when no namespaces are configured.
+    when no namespaces are configured. The API server actually read is
+    recorded (``kubernetes_api_server``) so the baseline proves which
+    cluster it describes.
     """
     if not state.get("target_namespaces"):
         return _skipped(state, DiscoveryMethod.K8S_MANIFEST)
@@ -242,6 +269,7 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
     return {
         "discovered_services": discovered_services,
         "service_environments": service_environments,
+        "kubernetes_api_server": extractor.api_server,
         "discovery_reports": _append_report(state, report),
     }
 
@@ -251,14 +279,20 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
 
     This Day-Zero batch stage will establish a runtime dependency baseline and
     place its evidence-backed relationships in ``runtime_edges``. The stage is
-    skipped when no telemetry workspace ID is configured.
+    skipped when no telemetry workspace ID is configured. The query is
+    restricted to the project policy's ``telemetry_cluster`` when the
+    project has a valid policy naming one; the filter applied is recorded
+    (``telemetry_cluster``) and checked against the policy at assessment.
     """
     workspace_id = (state.get("workspace_id") or "").strip()
     if not workspace_id:
         return _skipped(state, DiscoveryMethod.RUNTIME_TELEMETRY)
 
+    cluster_filter = _policy_cluster_filter(state)
     extractor = TelemetryExtractor(workspace_id=workspace_id)
-    result = extractor.get_active_dependencies(days_back=30)
+    result = extractor.get_active_dependencies(
+        days_back=30, cluster_filter=cluster_filter
+    )
     report = DiscoveryStageReport(
         source=DiscoveryMethod.RUNTIME_TELEMETRY,
         status=result.status,
@@ -267,60 +301,120 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
     )
     return {
         "runtime_edges": list(result.items),
+        "telemetry_cluster": cluster_filter,
         "discovery_reports": _append_report(state, report),
     }
 
 
+def _policy_cluster_filter(state: DiscoveryGraphState) -> TelemetryClusterFilter | None:
+    """Return the project policy's telemetry cluster filter, if any.
+
+    Without a usable policy the query is unfiltered; the snapshot then
+    records no filter, which a policy that requires one rejects.
+    """
+    scope = BaselineScope(
+        tenant=state.get("tenant") or config.DEFAULT_TENANT,
+        project_id=state.get("project_id") or config.DEFAULT_PROJECT_ID,
+    )
+    try:
+        return POLICY_STORE.load(scope).policy.telemetry_cluster
+    except (PolicyMissingError, PolicyInvalidError) as error:
+        logger.warning("Telemetry is not scoped to a cluster: %s", error)
+        return None
+
+
 def _service_identity(
     service: ServiceNode, index: IdentityIndex, context: IdentityContext
-) -> ServiceIdentity:
-    """Return the identity ``service`` is merged under.
+) -> ServiceIdentity | None:
+    """Return the identity ``service`` is merged under, or None if ambiguous.
 
-    A service whose namespace is unknown (registered from source code) gets
-    the default namespace, if any, and merges into the single namespaced
-    service it matches; otherwise it keeps its own identity.
+    A service whose namespace is unknown (registered from source code
+    without a declared namespace) gets the default namespace, if any, and
+    merges into the single namespaced service it matches. Without a default
+    namespace, a name matching services in several namespaces is ambiguous:
+    it is never attached to one of them by guessing. Otherwise the service
+    keeps its own identity.
     """
     identity = service.identity
-    resolved = index.resolve(identity)
-    if resolved is None and identity.namespace == UNKNOWN_LABEL:
-        if context.default_namespace:
-            identity = identity.model_copy(
-                update={"namespace": context.default_namespace}
-            )
-        resolved = index.resolve(identity)
-    return resolved or identity
+    if identity.namespace != UNKNOWN_LABEL:
+        return index.resolve(identity) or identity
+    if context.default_namespace:
+        identity = identity.model_copy(update={"namespace": context.default_namespace})
+    matches = index.candidates(identity)
+    if len(matches) > 1:
+        return None
+    return matches[0] if matches else identity
+
+
+def _ambiguous_entity(reference: str) -> UnresolvedEntity:
+    reference = reference.strip().lower()
+    return UnresolvedEntity(
+        entity_id=unresolved_entity_id(reference),
+        reference=reference,
+        kind=UnresolvedEntityKind.AMBIGUOUS_SERVICE,
+    )
+
+
+def _is_static(service: ServiceNode) -> bool:
+    return REPOSITORY_METADATA_KEY in service.metadata
 
 
 def _canonicalize_services(
     services: list[ServiceNode], context: IdentityContext
-) -> list[ServiceNode]:
+) -> tuple[list[ServiceNode], dict[str, UnresolvedEntity]]:
     """Resolve services to their merged identities and merge duplicates.
 
     A repository-derived service (``...:unknown:order-service``) and its
     Kubernetes counterpart (``...:default:order-service``) collapse into a
     single node whose metadata combines both sources.
+
+    Source-code services that cannot be tied to exactly one identity are
+    ambiguous: two repository directories claiming the same identity, or a
+    name matching services in several namespaces. They are left out of the
+    inventory (their files then map to no service) and returned as
+    AMBIGUOUS_SERVICE entities keyed by their original service ID, so
+    reconciliation can attribute their code edges to the entity. A
+    Kubernetes service with the same identity stays registered.
+
+    Returns:
+        The merged services, and the ambiguous entity for each original
+        service ID of an ambiguous source-code service.
     """
     namespaced = IdentityIndex(
         service.identity
         for service in services
         if service.identity.namespace != UNKNOWN_LABEL
     )
-    merged: dict[str, ServiceNode] = {}
+    groups: dict[str, list[ServiceNode]] = {}
+    ambiguous: dict[str, UnresolvedEntity] = {}
     for service in services:
-        service_id = _service_identity(service, namespaced, context).uri
-        existing = merged.get(service_id)
-        if existing is None:
-            merged[service_id] = service.model_copy(
-                update={"service_id": service_id}
-            )
+        identity = _service_identity(service, namespaced, context)
+        if identity is None:
+            ambiguous[service.service_id] = _ambiguous_entity(service.service_id)
             continue
-        merged[service_id] = existing.model_copy(
-            update={
-                "repository_url": existing.repository_url or service.repository_url,
-                "metadata": {**service.metadata, **existing.metadata},
-            }
-        )
-    return list(merged.values())
+        groups.setdefault(identity.uri, []).append(service)
+
+    merged: list[ServiceNode] = []
+    for service_id, group in groups.items():
+        directories = {_static_key(s)[1:] for s in group if _is_static(s)}
+        if len(directories) > 1:
+            entity = _ambiguous_entity(service_id)
+            for service in group:
+                if _is_static(service):
+                    ambiguous[service.service_id] = entity
+            group = [s for s in group if not _is_static(s)]
+            if not group:
+                continue
+        node = group[0].model_copy(update={"service_id": service_id})
+        for service in group[1:]:
+            node = node.model_copy(
+                update={
+                    "repository_url": node.repository_url or service.repository_url,
+                    "metadata": {**service.metadata, **node.metadata},
+                }
+            )
+        merged.append(node)
+    return merged, ambiguous
 
 
 def _environment_index(
@@ -355,6 +449,19 @@ def _resolve_endpoint(
     entity = unresolved_entity(reference)
     unresolved.setdefault(entity.entity_id, entity)
     return entity.entity_id
+
+
+def _target_context(source_id: str, context: IdentityContext) -> IdentityContext:
+    """Return the context a target's bare name resolves in.
+
+    A registered source's own namespace, as in-cluster DNS resolves short
+    names in the caller's namespace; ``context`` otherwise.
+    """
+    try:
+        source = ServiceIdentity.parse(source_id)
+    except ValueError:
+        return context
+    return context.in_namespace(source.namespace)
 
 
 def _merge_labels(first: str, second: str) -> str:
@@ -405,25 +512,38 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
     it cannot be mapped to exactly one registered service it stays an
     ENVIRONMENT_VARIABLE entity, so release gating still sees it. Duplicate relationships
     are merged and self-referencing edges are dropped.
+
+    A target's bare name resolves in its source's namespace, as in-cluster
+    DNS does. Code edges of an ambiguous source-code service (see
+    ``_canonicalize_services``) start from its AMBIGUOUS_SERVICE entity.
     """
     context = identity_context(state)
-    services = _canonicalize_services(
+    services, ambiguous = _canonicalize_services(
         list(state.get("discovered_services", [])), context
     )
     index = IdentityIndex(service.identity for service in services)
     environments = _environment_index(list(state.get("service_environments", [])))
 
-    unresolved: dict[str, UnresolvedEntity] = {}
+    unresolved: dict[str, UnresolvedEntity] = {
+        entity.entity_id: entity for entity in ambiguous.values()
+    }
     merged_edges: dict[tuple[str, str], DependencyEdge] = {}
-    for edge in [
-        *state.get("static_edges", []),
-        *state.get("runtime_edges", []),
-    ]:
-        source = _resolve_endpoint(
+    static_edges = list(state.get("static_edges", []))
+    for position, edge in enumerate([*static_edges, *state.get("runtime_edges", [])]):
+        entity = (
+            ambiguous.get(edge.source_service_id)
+            if position < len(static_edges)
+            else None
+        )
+        source = entity.entity_id if entity else _resolve_endpoint(
             edge.source_service_id, index, context, environments, unresolved
         )
         target = _resolve_endpoint(
-            edge.target_service_id, index, context, environments, unresolved
+            edge.target_service_id,
+            index,
+            _target_context(source, context),
+            environments,
+            unresolved,
         )
         if source == target:
             continue
@@ -459,6 +579,8 @@ def scan_context(state: DiscoveryGraphState) -> ScanContext:
         namespaces=list(state.get("target_namespaces") or []),
         telemetry_workspace_id=(state.get("workspace_id") or "").strip(),
         scanned_revisions=list(state.get("scanned_revisions", [])),
+        kubernetes_api_server=state.get("kubernetes_api_server") or "",
+        telemetry_cluster=state.get("telemetry_cluster"),
     )
 
 

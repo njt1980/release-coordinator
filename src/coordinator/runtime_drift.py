@@ -58,14 +58,24 @@ def resolve_live_edges(
     """Resolve raw live edges to baseline node IDs.
 
     An endpoint matching exactly one registered service becomes its FQURI;
-    anything else becomes its unresolved entity ID. Self-edges are dropped
-    and duplicates merged, keeping the latest observation.
+    anything else becomes its unresolved entity ID. A target's bare name
+    resolves in its source's namespace, as discovery and in-cluster DNS
+    resolve it. Self-edges are dropped and duplicates merged, keeping the
+    latest observation.
     """
     index = IdentityIndex(service.identity for service in graph.services)
     observed: dict[tuple[str, str], ObservedEdge] = {}
     for edge in edges:
-        source = _endpoint(edge.source_service_id, index, context)
-        target = _endpoint(edge.target_service_id, index, context)
+        source_identity = resolve_reference(edge.source_service_id, index, context)
+        source = (
+            source_identity.uri
+            if source_identity
+            else unresolved_entity(edge.source_service_id).entity_id
+        )
+        target_context = (
+            context.in_namespace(source_identity.namespace) if source_identity else context
+        )
+        target = _endpoint(edge.target_service_id, index, target_context)
         if source == target:
             continue
         seen_at = _utc(edge.last_observed_at)

@@ -28,6 +28,7 @@ from src.tools import _timeout
 from src.tools._timeout import TIMEOUT_MESSAGE
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
+from src.tools.policy_store import PolicyMissingError
 from src.tools.telemetry_extractor import TelemetryExtractor
 
 
@@ -468,17 +469,23 @@ class DiscoveryNodeSkipTests(unittest.TestCase):
         telemetry_cls.assert_not_called()
 
     def test_telemetry_binds_workspace(self) -> None:
-        with patch.object(discovery_nodes, "TelemetryExtractor") as telemetry_cls:
+        policy_store = MagicMock()
+        policy_store.load.side_effect = PolicyMissingError("no policy")
+        with patch.object(
+            discovery_nodes, "TelemetryExtractor"
+        ) as telemetry_cls, patch.object(discovery_nodes, "POLICY_STORE", policy_store):
             telemetry_cls.return_value.get_active_dependencies.return_value = (
                 DiscoveryResult.success([])
             )
-            result = discovery_nodes.extract_runtime_telemetry(
-                _discovery_state(workspace_id="ws-1")
-            )
+            with self.assertLogs("src.discovery_engine.nodes", level="WARNING"):
+                result = discovery_nodes.extract_runtime_telemetry(
+                    _discovery_state(workspace_id="ws-1")
+                )
         self.assertEqual(
             result,
             {
                 "runtime_edges": [],
+                "telemetry_cluster": None,
                 "discovery_reports": [
                     DiscoveryStageReport(
                         source=DiscoveryMethod.RUNTIME_TELEMETRY,

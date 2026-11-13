@@ -155,12 +155,15 @@ class ServiceBoundary(BaseModel):
     """A service and the repository directory it owns.
 
     ``root`` is repository-relative without leading or trailing slashes;
-    the empty string is the repository root.
+    the empty string is the repository root. ``namespace`` is the
+    Kubernetes namespace the service runs in when the manifest declares it,
+    otherwise None (inferred during reconciliation).
     """
 
     name: str = Field(pattern=_DNS_LABEL_PATTERN.pattern)
     root: str
     source: BoundarySource
+    namespace: str | None = Field(default=None, pattern=_DNS_LABEL_PATTERN.pattern)
 
 
 class ServiceScan(BaseModel):
@@ -212,12 +215,18 @@ def resolve_default_branch_head(
 
 
 class ServiceDeclaration(BaseModel):
-    """One ``services`` entry of a ``release-coord.yaml`` manifest."""
+    """One ``services`` entry of a ``release-coord.yaml`` manifest.
+
+    ``namespace`` (optional) pins the Kubernetes namespace the service is
+    deployed to. Without it the namespace is inferred, and a service name
+    found in several scanned namespaces is ambiguous.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(pattern=_DNS_LABEL_PATTERN.pattern)
     root: str = Field(default=".", validate_default=True)
+    namespace: str | None = Field(default=None, pattern=_DNS_LABEL_PATTERN.pattern)
 
     @field_validator("root")
     @classmethod
@@ -236,6 +245,7 @@ class ReleaseCoordManifest(BaseModel):
         services:
           - name: payments
             root: services/payments-api
+            namespace: shop
           - name: gateway
             root: .
     """
@@ -300,7 +310,10 @@ def _dns_label(name: str) -> str | None:
 def _boundaries_from_manifest(manifest: ReleaseCoordManifest) -> list[ServiceBoundary]:
     return [
         ServiceBoundary(
-            name=service.name, root=service.root, source=BoundarySource.MANIFEST
+            name=service.name,
+            root=service.root,
+            source=BoundarySource.MANIFEST,
+            namespace=service.namespace,
         )
         for service in manifest.services
     ]

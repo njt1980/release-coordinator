@@ -7,7 +7,7 @@
 # succeeded in a baseline under 24h old that scanned the environment and
 # cluster below, runtime evidence must come from a live telemetry query,
 # and nothing is exempt.
-policy_version: 2
+policy_version: 3
 tenant: default
 project_id: default
 
@@ -15,6 +15,16 @@ project_id: default
 # have been onboarded with exactly these values (never "unknown").
 environment: local
 cluster: local
+
+# What proves the cluster label above. The baseline's manifest scan must
+# have read this API server (kubectl config view --minify shows it), and
+# telemetry is only counted from rows whose resource attribute equals the
+# value below. Beyla on AKS reports k8s.cluster.name as the node resource
+# group. These are the lab cluster RC-Cluster's values.
+kubernetes_api_server: https://rc-cluster-releasecoordinat-48a721-ao9498jv.hcp.eastus.azmk8s.io:443
+telemetry_cluster:
+  attribute: k8s.cluster.name
+  value: MC_ReleaseCoordinatorLab_RC-Cluster_eastus
 
 # Hours; 1..24. A project may require fresher baselines, never older ones.
 max_baseline_age_hours: 24

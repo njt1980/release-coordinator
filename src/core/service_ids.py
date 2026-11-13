@@ -114,6 +114,16 @@ class IdentityContext(BaseModel):
             default_namespace=namespaces[0] if len(namespaces) == 1 else None,
         )
 
+    def in_namespace(self, namespace: str) -> "IdentityContext":
+        """Return this context with bare names resolving in ``namespace``.
+
+        Used for a dependency's target: in-cluster DNS resolves a short
+        name in the caller's own namespace.
+        """
+        if namespace == UNKNOWN_LABEL:
+            return self
+        return self.model_copy(update={"default_namespace": namespace})
+
     def identity(self, service_name: str, namespace: str | None = None) -> ServiceIdentity:
         """Return the identity of ``service_name`` within this context.
 
@@ -145,8 +155,18 @@ class IdentityIndex:
         """
         if query in self._exact:
             return query
-        matches = [identity for identity in self._identities if query.matches(identity)]
+        matches = self.candidates(query)
         return matches[0] if len(matches) == 1 else None
+
+    def candidates(self, query: ServiceIdentity) -> list[ServiceIdentity]:
+        """Return every registered identity ``query`` matches.
+
+        Lets callers tell "no such service" (empty) from "ambiguous" (more
+        than one), which ``resolve`` reports the same way.
+        """
+        if query in self._exact:
+            return [query]
+        return [identity for identity in self._identities if query.matches(identity)]
 
 
 def _host_of(reference: str) -> str:
@@ -254,8 +274,7 @@ def resolve_env_var_reference(
     value = environments.get(owner.uri, {}).get(variable)
     if value is None:
         return None
-    owner_context = context.model_copy(update={"default_namespace": owner.namespace})
-    return resolve_reference(value, index, owner_context)
+    return resolve_reference(value, index, context.in_namespace(owner.namespace))
 
 
 def classify_unresolved(reference: str) -> UnresolvedEntityKind:

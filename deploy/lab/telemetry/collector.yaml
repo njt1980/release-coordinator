@@ -74,13 +74,11 @@ data:
               - attributes["url.full"] != nil and IsMatch(attributes["url.full"], "^/") and attributes["server.address"] != nil
             statements:
               - set(attributes["url.full"], Concat([attributes["url.scheme"], "://", attributes["server.address"], ":", attributes["server.port"], attributes["url.full"]], ""))
-      # The exporter builds AppRoleName as "<service.namespace>.<service.name>".
-      # Drop the namespace so AppRoleName is the bare workload name
-      # (e.g. order-service) that the release coordinator resolves.
-      resource/role-name:
-        attributes:
-          - key: service.namespace
-            action: delete
+      # Resource attributes are kept as they are. The release coordinator
+      # reads service.name and k8s.namespace.name (and filters on
+      # k8s.cluster.name) from each row's Properties, so AppRoleName (built
+      # by the exporter as "<service.namespace>.<service.name>") is only a
+      # fallback for telemetry without those attributes.
       batch: {}
     exporters:
       azure_monitor:
@@ -90,7 +88,7 @@ data:
         traces:
           receivers: [otlp]
           processors:
-            [memory_limiter, filter/dependencies-only, transform/dependency-target, resource/role-name, batch]
+            [memory_limiter, filter/dependencies-only, transform/dependency-target, batch]
           exporters: [azure_monitor]
 ---
 apiVersion: apps/v1

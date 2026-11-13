@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from enum import Enum
 from typing import Dict, Final, Generic, List, Literal, Optional, Self, TypeVar
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -265,6 +266,11 @@ class UnresolvedEntityKind(str, Enum):
         service in the inventory matches it (exactly one match is required).
     ENVIRONMENT_VARIABLE: an address read from an environment variable
         (``env:<service>/<VARIABLE>``) whose value is not yet known.
+    AMBIGUOUS_SERVICE: source code declares a service that cannot be tied
+        to exactly one identity: two repository directories claim the same
+        service, or a service with no namespace matches services in several
+        scanned namespaces. Declaring ``namespace`` in ``release-coord.yaml``
+        resolves it.
     """
 
     IP_ADDRESS = "IP_ADDRESS"
@@ -272,6 +278,7 @@ class UnresolvedEntityKind(str, Enum):
     EXTERNAL_DNS = "EXTERNAL_DNS"
     UNREGISTERED_SERVICE = "UNREGISTERED_SERVICE"
     ENVIRONMENT_VARIABLE = "ENVIRONMENT_VARIABLE"
+    AMBIGUOUS_SERVICE = "AMBIGUOUS_SERVICE"
 
 
 UNRESOLVED_ID_PREFIX: Final[str] = "unresolved:"
@@ -367,6 +374,60 @@ class ScannedRevision(BaseModel, frozen=True):
     commit_sha: str = Field(pattern=GIT_COMMIT_SHA_PATTERN)
 
 
+_DEFAULT_HTTPS_PORT: Final[int] = 443
+
+
+def normalize_api_server(url: str) -> str:
+    """Return a Kubernetes API server URL as ``https://<host>:<port>``.
+
+    The host is lower-cased and the port made explicit, so the same server
+    written two ways compares equal. Paths, queries and credentials are not
+    allowed: the value identifies a cluster, nothing else.
+
+    Raises:
+        ValueError: if ``url`` is not an absolute https URL with a host.
+    """
+    try:
+        parts = urlsplit(url.strip())
+        port = parts.port or _DEFAULT_HTTPS_PORT
+    except ValueError as error:
+        raise ValueError(f"invalid API server URL {url!r}: {error}") from error
+    if parts.scheme.lower() != "https" or not parts.hostname:
+        raise ValueError(f"API server must be an https URL with a host: {url!r}")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise ValueError(f"API server URL must not carry credentials or a query: {url!r}")
+    if parts.path not in ("", "/"):
+        raise ValueError(f"API server URL must not have a path: {url!r}")
+    host = parts.hostname.lower()
+    if ":" in host:  # IPv6 literal
+        host = f"[{host}]"
+    return f"https://{host}:{port}"
+
+
+# Telemetry attribute names (e.g. k8s.cluster.name) and values (e.g. an AKS
+# node resource group) are interpolated into telemetry queries, so both are
+# restricted to characters that cannot end a quoted string.
+TELEMETRY_ATTRIBUTE_PATTERN: Final[str] = r"^[A-Za-z0-9_.-]{1,128}$"
+TELEMETRY_VALUE_PATTERN: Final[str] = r"^[A-Za-z0-9_.-]{1,253}$"
+DEFAULT_CLUSTER_ATTRIBUTE: Final[str] = "k8s.cluster.name"
+
+
+class TelemetryClusterFilter(BaseModel):
+    """Restricts telemetry to rows emitted from one cluster.
+
+    Rows are kept only when their ``attribute`` (a resource attribute such
+    as ``k8s.cluster.name``) equals ``value``. Rows without the attribute
+    are dropped, so unscoped telemetry is never counted as this cluster's.
+    """
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    attribute: str = Field(
+        default=DEFAULT_CLUSTER_ATTRIBUTE, pattern=TELEMETRY_ATTRIBUTE_PATTERN
+    )
+    value: str = Field(pattern=TELEMETRY_VALUE_PATTERN)
+
+
 class ScanContext(BaseModel):
     """What one discovery run scanned, recorded in its baseline snapshot.
 
@@ -375,6 +436,11 @@ class ScanContext(BaseModel):
     carries them. ``namespaces`` are the Kubernetes namespaces scanned,
     ``telemetry_workspace_id`` the telemetry workspace queried (blank when
     none), and ``scanned_revisions`` one entry per repository read.
+    ``kubernetes_api_server`` is the API server the manifest scan actually
+    read (normalized, blank when no namespace was scanned) and
+    ``telemetry_cluster`` the cluster filter the telemetry query applied
+    (None when unfiltered). Both are checked against the project policy, so
+    the ``cluster`` label is backed by what was really read.
     """
 
     environment: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
@@ -382,6 +448,13 @@ class ScanContext(BaseModel):
     namespaces: List[str] = Field(default_factory=list)
     telemetry_workspace_id: str = ""
     scanned_revisions: List[ScannedRevision] = Field(default_factory=list)
+    kubernetes_api_server: str = ""
+    telemetry_cluster: Optional[TelemetryClusterFilter] = None
+
+    @field_validator("kubernetes_api_server")
+    @classmethod
+    def _normalize_api_server(cls, value: str) -> str:
+        return normalize_api_server(value) if value else ""
 
     @model_validator(mode="after")
     def _check_scope(self) -> Self:

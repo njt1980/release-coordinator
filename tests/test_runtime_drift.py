@@ -14,6 +14,7 @@ from src.coordinator.runtime_drift import (
     workspace_mismatch_issue,
 )
 from src.core.models import (
+    TelemetryClusterFilter,
     UNKNOWN_LABEL,
     ContractChange,
     DependencyEdge,
@@ -43,6 +44,7 @@ SCAN = ScanContext(
     cluster="aks-1",
     namespaces=["shop"],
     telemetry_workspace_id=WORKSPACE,
+    telemetry_cluster=TelemetryClusterFilter(value="aks-1"),
 )
 T0 = datetime(2026, 11, 1, tzinfo=timezone.utc)
 T1 = datetime(2026, 11, 2, tzinfo=timezone.utc)
@@ -86,6 +88,8 @@ environment: prod
 cluster: aks-1
 required_sources: [STATIC_CODE]
 runtime_evidence: live
+telemetry_cluster:
+  value: aks-1
 exemptions:
   dependencies:
     - entity_id: "unresolved:api.stripe.com"

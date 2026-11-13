@@ -20,6 +20,7 @@ from src.core.models import (
     ReasonCode,
     RuntimeEvidenceState,
     ScanContext,
+    TelemetryClusterFilter,
 )
 from src.tools.policy_store import ProjectPolicy, RuntimeEvidenceRequirement
 
@@ -37,8 +38,12 @@ def baseline_scope_issue(
     """Return a BASELINE_SCOPE_MISMATCH issue unless the snapshot scanned the
     policy's environment and cluster.
 
-    A snapshot that does not record its scan context (written before it was
-    recorded) cannot show what it scanned, so it fails too.
+    The cluster is proven, not just labeled: when the policy names a
+    Kubernetes API server, the snapshot's manifest scan must have read that
+    server, and when it names a telemetry cluster filter, the snapshot's
+    telemetry query must have applied exactly that filter. A snapshot that
+    does not record its scan context (written before it was recorded)
+    cannot show what it scanned, so it fails too.
     """
     expected = f"{policy.environment}/{policy.cluster}"
     if scan is None:
@@ -52,9 +57,34 @@ def baseline_scope_issue(
             f"Baseline snapshot {snapshot_id} scanned {scan.environment}/"
             f"{scan.cluster}, but the project policy releases to {expected}."
         )
+    elif (
+        policy.kubernetes_api_server
+        and scan.kubernetes_api_server != policy.kubernetes_api_server
+    ):
+        detail = (
+            f"Baseline snapshot {snapshot_id} read Kubernetes API server "
+            f"{scan.kubernetes_api_server or 'none (or not recorded)'}, but the "
+            f"project policy's cluster {policy.cluster} is "
+            f"{policy.kubernetes_api_server}. Re-run discovery against that cluster."
+        )
+    elif policy.telemetry_cluster and scan.telemetry_cluster != policy.telemetry_cluster:
+        recorded = (
+            _describe_filter(scan.telemetry_cluster)
+            if scan.telemetry_cluster
+            else "no cluster filter (or none recorded)"
+        )
+        detail = (
+            f"Baseline snapshot {snapshot_id} read telemetry with {recorded}, but "
+            f"the project policy requires "
+            f"{_describe_filter(policy.telemetry_cluster)}. Re-run discovery."
+        )
     else:
         return None
     return EvidenceIssue(code=ReasonCode.BASELINE_SCOPE_MISMATCH, detail=detail)
+
+
+def _describe_filter(cluster_filter: TelemetryClusterFilter) -> str:
+    return f"{cluster_filter.attribute} == {cluster_filter.value!r}"
 
 
 def baseline_freshness_issue(
