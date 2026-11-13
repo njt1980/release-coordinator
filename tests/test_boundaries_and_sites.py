@@ -89,6 +89,18 @@ class CsprojTests(unittest.TestCase):
             '<Project Sdk="Microsoft.NET.Sdk"><Sdk Name="Aspire.AppHost.Sdk" Version="9.0.0" />'
             "<PropertyGroup><OutputType>Exe</OutputType></PropertyGroup></Project>": ProjectKind.APPHOST,
             _csproj(body="<PropertyGroup><IsAspireHost>true</IsAspireHost></PropertyGroup>"): ProjectKind.APPHOST,
+            # eShop's tests: MSTest.Sdk with OutputType Exe.
+            _csproj("MSTest.Sdk", "<PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>"): ProjectKind.TEST,
+            _csproj(
+                body='<PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>'
+                '<ItemGroup><PackageReference Include="xunit.v3" /></ItemGroup>'
+            ): ProjectKind.TEST,
+            # A MAUI app runs on devices, not in the cluster.
+            _csproj(
+                body="<PropertyGroup><OutputType Condition=\"'$(TargetFramework)' != 'net10.0'\">Exe</OutputType>"
+                "<UseMaui>true</UseMaui></PropertyGroup>"
+            ): ProjectKind.CLIENT,
+            _csproj("Microsoft.NET.Sdk", "<PropertyGroup><OutputType>WinExe</OutputType><UseWPF>true</UseWPF></PropertyGroup>"): ProjectKind.CLIENT,
             # Old-style project with an MSBuild namespace.
             '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">'
             "<PropertyGroup><OutputType>WinExe</OutputType></PropertyGroup></Project>": ProjectKind.SERVICE,
@@ -132,7 +144,35 @@ class MavenGradleTests(unittest.TestCase):
         self.assertIs(by_root["customers"].kind, ProjectKind.SERVICE)
         self.assertIs(by_root["common"].kind, ProjectKind.LIBRARY)
         self.assertEqual(by_root["customers"].references, ["common"])
-        self.assertEqual(parse_pom(parent, "/pom.xml")[1], [])
+        self.assertEqual(parse_pom(parent, "/pom.xml").dependencies, [])
+
+    def test_boot_plugin_is_inherited_from_a_parent_profile(self) -> None:
+        # spring-petclinic-microservices: the parent applies the plugin in a
+        # profile activated by a file each service module has.
+        parent = (
+            "<project><artifactId>parent</artifactId><packaging>pom</packaging><profiles>"
+            "<profile><activation><file><exists>${basedir}/src/main/resources/application.yml</exists></file></activation>"
+            "<build><plugins><plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></profile>"
+            "</profiles></project>"
+        )
+        child = "<project><artifactId>{0}</artifactId><parent><artifactId>parent</artifactId></parent></project>"
+        files = {
+            "/pom.xml": parent,
+            "/customers/pom.xml": child.format("customers"),
+            "/common/pom.xml": child.format("common"),
+        }
+        paths = [*files, "/customers/src/main/resources/application.yml"]
+        projects, _ = read_projects(files, paths)
+        kinds = {p.root: p.kind for p in projects}
+        self.assertIs(kinds["customers"], ProjectKind.SERVICE)
+        self.assertIs(kinds["common"], ProjectKind.LIBRARY)
+
+        default_on = parent.replace(
+            "<file><exists>${basedir}/src/main/resources/application.yml</exists></file>",
+            "<activeByDefault>true</activeByDefault>",
+        )
+        projects, _ = read_projects({**files, "/pom.xml": default_on}, paths)
+        self.assertIs({p.root: p.kind for p in projects}["common"], ProjectKind.SERVICE)
 
     def test_gradle_kinds_and_project_references(self) -> None:
         settings = {"": "rootProject.name = 'shop'\ninclude 'api', 'libs:core'\n"}
@@ -356,6 +396,10 @@ class OpaqueSiteTests(unittest.TestCase):
         address = OpaqueReferenceKind.CLIENT_ADDRESS_EXPRESSION
         cases = [
             ('client.BaseAddress = new Uri("http://catalog-api");', "x.cs", []),
+            # C# 9 target-typed new, as eShop registers its clients.
+            ('AddHttpClient<C>(o => o.BaseAddress = new("https+http://catalog-api"));', "x.cs", []),
+            ('AddGrpcClient<B>(o => o.Address = new("http://basket-api"));', "x.cs", []),
+            ("AddGrpcClient<B>(o => o.Address = new(settings.Url));", "x.cs", [(1, address)]),
             ('c.BaseAddress = new Uri(builder.Configuration["Catalog:Url"]!);', "x.cs", []),
             ('c.BaseAddress = new Uri($"https+http://catalog-api/");', "x.cs", []),
             ('var url = configuration.GetValue<string>("Catalog:Url");\nc.BaseAddress = new Uri(url);', "x.cs", []),
@@ -382,6 +426,11 @@ class OpaqueSiteTests(unittest.TestCase):
         self.assertEqual([(s.section, s.line) for s in sections], [("Catalog", 1), ("Basket", 2)])
         keys = {ConfigFramework.DOTNET: {"catalog:Url"}}
         self.assertEqual([s.detail for s in unbound_section_sites(sections, keys)], ["Basket"])
+
+    def test_a_section_read_from_a_section_is_relative(self) -> None:
+        (scopes,) = bound_sections('identitySection.GetRequiredSection("Scopes").GetChildren();', "x.cs")
+        self.assertEqual(unbound_section_sites([scopes], {ConfigFramework.DOTNET: {"Identity:Scopes:orders"}}), [])
+        self.assertEqual(len(unbound_section_sites([scopes], {ConfigFramework.DOTNET: {"Identity:Url"}})), 1)
 
     def test_spring_sections_bind_relaxed(self) -> None:
         section = BoundSection(section="visits-client", framework=ConfigFramework.SPRING, line=1)

@@ -5,14 +5,20 @@ Pure functions the repository scanner calls before attributing files.
 Understood build files:
 
 - .NET ``*.csproj``: a project is an Aspire AppHost (``Aspire.AppHost.Sdk``
-  or ``IsAspireHost``), a test (``IsTestProject`` or a
-  ``Microsoft.NET.Test.Sdk`` package), runnable (``Microsoft.NET.Sdk.Web``,
-  ``Microsoft.NET.Sdk.Worker``, or ``OutputType`` ``Exe``/``WinExe``) or a
-  library; ``<ProjectReference>`` paths are resolved relative to the file.
+  or ``IsAspireHost``), a test (``IsTestProject``, a test SDK such as
+  ``MSTest.Sdk``, or a test framework package), a client app (``UseMaui``,
+  ``UseWPF``, ``UseWindowsForms``: it runs on devices, not in the cluster),
+  runnable (``Microsoft.NET.Sdk.Web``, ``Microsoft.NET.Sdk.Worker``, or
+  ``OutputType`` ``Exe``/``WinExe``) or a library; ``<ProjectReference>``
+  paths are resolved relative to the file.
 - Maven ``pom.xml``: ``packaging`` ``pom`` is an aggregator; a
-  ``spring-boot-maven-plugin`` under ``build/plugins`` is runnable; anything
-  else is a library. A ``<dependency>`` whose ``artifactId`` is another
-  module's in the repository is a project reference.
+  ``spring-boot-maven-plugin`` under ``build/plugins`` is runnable, whether
+  the module declares it or inherits it from a parent POM in the
+  repository, directly or in a profile that is active for the module
+  (``activeByDefault``, or ``activation/file/exists`` naming a file the
+  module has); anything else is a library. A ``<dependency>`` whose
+  ``artifactId`` is another module's in the repository is a project
+  reference.
 - Gradle ``build.gradle``/``build.gradle.kts``: the ``org.springframework.boot``
   or ``application`` plugin is runnable; a directory whose
   ``settings.gradle`` includes subprojects is an aggregator. ``project(':a:b')``
@@ -50,6 +56,7 @@ class ProjectKind(str, Enum):
         Boot application or console executable).
     LIBRARY: code that ships inside the projects referencing it.
     TEST: a test project; never deployed.
+    CLIENT: a mobile or desktop app; it runs on devices, not in the cluster.
     APPHOST: a .NET Aspire AppHost, which orchestrates other projects locally.
     AGGREGATOR: a Maven parent or Gradle root that only groups modules.
     """
@@ -57,6 +64,7 @@ class ProjectKind(str, Enum):
     SERVICE = "SERVICE"
     LIBRARY = "LIBRARY"
     TEST = "TEST"
+    CLIENT = "CLIENT"
     APPHOST = "APPHOST"
     AGGREGATOR = "AGGREGATOR"
 
@@ -88,7 +96,13 @@ _GRADLE_SETTINGS_FILES: Final[frozenset[str]] = frozenset(
     {"settings.gradle", "settings.gradle.kts"}
 )
 _DOTNET_SERVICE_SDKS: Final[tuple[str, ...]] = ("microsoft.net.sdk.web", "microsoft.net.sdk.worker")
-_DOTNET_TEST_PACKAGE: Final[str] = "microsoft.net.test.sdk"
+# Test SDKs, and packages only test projects reference.
+_DOTNET_TEST_SDKS: Final[tuple[str, ...]] = ("mstest.sdk", "microsoft.net.test.sdk")
+_DOTNET_TEST_PACKAGES: Final[frozenset[str]] = frozenset(
+    {"microsoft.net.test.sdk", "mstest", "mstest.testframework", "xunit", "xunit.v3", "nunit", "tunit"}
+)
+# Properties that make a project a device (mobile/desktop) application.
+_DOTNET_CLIENT_PROPERTIES: Final[tuple[str, ...]] = ("usemaui", "usewpf", "usewindowsforms")
 _DOTNET_APPHOST_SDK: Final[str] = "aspire.apphost.sdk"
 _SPRING_BOOT_MAVEN_PLUGIN: Final[str] = "spring-boot-maven-plugin"
 _GRADLE_SERVICE_PLUGIN: Final[re.Pattern[str]] = re.compile(
@@ -177,8 +191,14 @@ def parse_csproj(content: str, path: str, file_paths: set[str]) -> BuildProject:
         properties.get("isaspirehost", "").lower() == "true"
     ):
         kind = ProjectKind.APPHOST
-    elif properties.get("istestproject", "").lower() == "true" or _DOTNET_TEST_PACKAGE in packages:
+    elif (
+        properties.get("istestproject", "").lower() == "true"
+        or any(name.startswith(_DOTNET_TEST_SDKS) for name in sdk_names)
+        or packages & _DOTNET_TEST_PACKAGES
+    ):
         kind = ProjectKind.TEST
+    elif any(properties.get(name, "").lower() == "true" for name in _DOTNET_CLIENT_PROPERTIES):
+        kind = ProjectKind.CLIENT
     elif any(name.startswith(_DOTNET_SERVICE_SDKS) for name in sdk_names) or (
         properties.get("outputtype", "").lower() in ("exe", "winexe")
     ):
@@ -216,61 +236,119 @@ def parse_csproj(content: str, path: str, file_paths: set[str]) -> BuildProject:
 # --- Maven -----------------------------------------------------------------
 
 
-def parse_pom(content: str, path: str) -> tuple[BuildProject, list[str]]:
-    """Read a ``pom.xml``; return the project and the artifactIds it depends on.
+class MavenModule(BaseModel):
+    """What a ``pom.xml`` says, before modules are related to each other.
 
-    References are resolved later against every module's artifactId (see
-    ``resolve_maven_references``).
+    ``boot_plugin`` is when the Spring Boot plugin applies to a module
+    inheriting this POM: ``always`` (``build/plugins``), ``default`` (a
+    profile active by default) or ``file:<path>`` (a profile activated when
+    the module has that file). ``parent`` is the parent's artifactId.
+    """
+
+    project: BuildProject
+    packaging: str = ""
+    parent: str | None = None
+    dependencies: list[str] = Field(default_factory=list)
+    boot_plugin: list[str] = Field(default_factory=list)
+
+
+def _has_boot_plugin(build: ElementTree.Element | None) -> bool:
+    return build is not None and any(
+        _text(plugin.find("artifactId")) == _SPRING_BOOT_MAVEN_PLUGIN
+        for plugin in build.findall("./plugins/plugin")
+    )
+
+
+def _boot_plugin_conditions(root: ElementTree.Element) -> list[str]:
+    conditions = ["always"] if _has_boot_plugin(root.find("build")) else []
+    for profile in root.findall("./profiles/profile"):
+        if not _has_boot_plugin(profile.find("build")):
+            continue
+        activation = profile.find("activation")
+        if activation is not None and _text(activation.find("activeByDefault")).lower() == "true":
+            conditions.append("default")
+        exists = _text(activation.find("./file/exists")) if activation is not None else ""
+        if exists:
+            exists = re.sub(r"^\$\{(?:project\.)?basedir\}/", "", exists)
+            conditions.append(f"file:{exists}")
+    return conditions
+
+
+def parse_pom(content: str, path: str) -> MavenModule:
+    """Read a ``pom.xml``; its kind and references are settled by
+    ``resolve_maven_modules`` once every module is known.
 
     Raises:
         BuildParseError: if the file isn't XML.
     """
     root = _xml_root(content, path)
-    packaging = _text(root.find("packaging")).lower()
-    plugins = [
-        _text(plugin.find("artifactId"))
-        for plugin in root.findall("./build/plugins/plugin")
-    ]
-    if packaging == "pom":
-        kind = ProjectKind.AGGREGATOR
-    elif _SPRING_BOOT_MAVEN_PLUGIN in plugins:
-        kind = ProjectKind.SERVICE
-    else:
-        kind = ProjectKind.LIBRARY
     dependencies = [
         _text(dependency.find("artifactId"))
         for dependency in root.findall("./dependencies/dependency")
     ]
-    project = BuildProject(
-        root=_directory(path),
-        file_path=_relative(path),
-        system=BuildSystem.MAVEN,
-        kind=kind,
-        artifact_id=_text(root.find("artifactId")) or None,
+    return MavenModule(
+        project=BuildProject(
+            root=_directory(path),
+            file_path=_relative(path),
+            system=BuildSystem.MAVEN,
+            kind=ProjectKind.LIBRARY,
+            artifact_id=_text(root.find("artifactId")) or None,
+        ),
+        packaging=_text(root.find("packaging")).lower(),
+        parent=_text(root.find("./parent/artifactId")) or None,
+        dependencies=[name for name in dependencies if name],
+        boot_plugin=_boot_plugin_conditions(root),
     )
-    return project, [name for name in dependencies if name]
 
 
-def resolve_maven_references(
-    projects: list[tuple[BuildProject, list[str]]],
-) -> list[BuildProject]:
-    """Turn dependencies on sibling modules into project references.
+def _boot_plugin_applies(conditions: list[str], module_root: str, file_paths: set[str]) -> bool:
+    for condition in conditions:
+        if condition in ("always", "default"):
+            return True
+        if condition.startswith("file:"):
+            target = posixpath.normpath(posixpath.join(module_root, condition[len("file:") :]))
+            if target in file_paths:
+                return True
+    return False
 
-    An artifactId more than one module declares is ambiguous and not
-    followed; any other dependency is external.
+
+def resolve_maven_modules(modules: list[MavenModule], file_paths: set[str]) -> list[BuildProject]:
+    """Settle each module's kind and its references to sibling modules.
+
+    Packaging ``pom`` is an aggregator. A module is a service when the
+    Spring Boot plugin applies to it from its own POM or any ancestor in
+    the repository (see ``MavenModule.boot_plugin``). A dependency on an
+    artifactId exactly one module declares is a project reference; any
+    other dependency is external.
     """
-    owners: dict[str, list[str]] = {}
-    for project, _ in projects:
-        if project.artifact_id:
-            owners.setdefault(project.artifact_id, []).append(project.root)
+    owners: dict[str, list[MavenModule]] = {}
+    for module in modules:
+        if module.project.artifact_id:
+            owners.setdefault(module.project.artifact_id, []).append(module)
     resolved: list[BuildProject] = []
-    for project, dependencies in projects:
+    for module in modules:
+        conditions = list(module.boot_plugin)
+        seen: set[str] = set()
+        parent = module.parent
+        while parent and parent not in seen and len(owners.get(parent, [])) == 1:
+            seen.add(parent)
+            ancestor = owners[parent][0]
+            conditions.extend(ancestor.boot_plugin)
+            parent = ancestor.parent
+        if module.packaging == "pom":
+            kind = ProjectKind.AGGREGATOR
+        elif _boot_plugin_applies(conditions, module.project.root, file_paths):
+            kind = ProjectKind.SERVICE
+        else:
+            kind = ProjectKind.LIBRARY
         references = [
-            owners[name][0]
-            for name in dependencies
-            if len(owners.get(name, [])) == 1 and owners[name][0] != project.root
+            owners[name][0].project.root
+            for name in module.dependencies
+            if len(owners.get(name, [])) == 1 and owners[name][0].project.root != module.project.root
         ]
-        resolved.append(project.model_copy(update={"references": list(dict.fromkeys(references))}))
+        resolved.append(
+            module.project.model_copy(update={"kind": kind, "references": list(dict.fromkeys(references))})
+        )
     return resolved
 
 
@@ -375,7 +453,7 @@ def read_projects(
         if is_gradle_settings(path)
     }
     projects: list[BuildProject] = []
-    maven: list[tuple[BuildProject, list[str]]] = []
+    maven: list[MavenModule] = []
     failures: dict[str, str] = {}
     for path, content in build_files.items():
         system = build_file_system(path)
@@ -388,7 +466,7 @@ def read_projects(
                 projects.append(parse_gradle(content, path, settings, directories))
         except BuildParseError as error:
             failures[_relative(path)] = str(error)
-    projects.extend(resolve_maven_references(maven))
+    projects.extend(resolve_maven_modules(maven, relative_files))
     return projects, failures
 
 
@@ -416,7 +494,7 @@ def _contains(root: str, path: str) -> bool:
 
 
 _CARVED_KINDS: Final[frozenset[ProjectKind]] = frozenset(
-    {ProjectKind.LIBRARY, ProjectKind.TEST, ProjectKind.APPHOST}
+    {ProjectKind.LIBRARY, ProjectKind.TEST, ProjectKind.CLIENT, ProjectKind.APPHOST}
 )
 
 
@@ -424,7 +502,7 @@ class RepositoryLayout(BaseModel):
     """Services, libraries and carved-out projects of one repository.
 
     ``service_roots`` are the service boundaries. ``carved`` maps the root
-    of every library, test or AppHost project that isn't itself a service
+    of every library, test, client or AppHost project that isn't itself a service
     root to its kind: its files never belong to an enclosing service.
     ``consumers`` maps each library root to the services consuming it.
     """

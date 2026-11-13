@@ -76,7 +76,7 @@ _RUBY_KEY_CALLS: Final[tuple[tuple[re.Pattern[str], OpaqueReferenceKind], ...]] 
 # Client address sinks: the pattern ends where the address expression starts.
 _CS_ADDRESS_CALLS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"\bGrpcChannel\.ForAddress\("),
-    re.compile(r"\bAddress\s*=\s*new\s+Uri\("),
+    re.compile(r"\bAddress\s*=\s*new\s*(?:Uri)?\("),
 )
 _CS_ADDRESS_ASSIGNMENT: Final[re.Pattern[str]] = re.compile(r"\bBaseAddress\s*=\s*(?!=)")
 _JAVA_ADDRESS_CALLS: Final[tuple[re.Pattern[str], ...]] = (
@@ -99,7 +99,8 @@ _JAVA_CONFIG_READ: Final[re.Pattern[str]] = re.compile(
     r"""^(?:[\w.()]*\.get(?:Required)?Property\(\s*"|System\.getenv\(\s*")"""
 )
 _IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"^(?:this\.)?(?P<name>[A-Za-z_]\w*)$")
-_NEW_URI: Final[re.Pattern[str]] = re.compile(r"^new\s+Uri\(")
+# ``new Uri(...)`` or C# 9 target-typed ``new(...)``.
+_NEW_URI: Final[re.Pattern[str]] = re.compile(r"^new\s*(?:Uri)?\(")
 
 _CS_SECTIONS: Final[re.Pattern[str]] = re.compile(
     r"""\.(?:GetSection|GetRequiredSection|BindConfiguration)\(\s*@?"(?P<section>[^"]+)\""""
@@ -273,16 +274,21 @@ def _relaxed(name: str) -> str:
     return re.sub(r"[-_]", "", name.lower())
 
 
+def _under(key: str, section: str, separator: str) -> bool:
+    """Whether ``key`` lies under ``section`` at any depth: a section read
+    from another section (``identity.GetSection("Scopes")``) is relative,
+    so ``Identity:Scopes:read`` is under ``Scopes``."""
+    wrapped = separator + key + separator
+    return separator + section + separator in wrapped.replace("[", separator).replace("]", "")
+
+
 def section_has_keys(section: BoundSection, keys: dict[ConfigFramework, set[str]]) -> bool:
     """Whether any configuration file key lies under ``section``."""
     if section.framework is ConfigFramework.DOTNET:
         prefix = section.section.lower()
-        return any(key.lower() == prefix or key.lower().startswith(prefix + ":") for key in keys.get(section.framework, set()))
+        return any(_under(key.lower(), prefix, ":") for key in keys.get(section.framework, set()))
     prefix = _relaxed(section.section)
-    return any(
-        _relaxed(key) == prefix or _relaxed(key).startswith(prefix + ".") or _relaxed(key).startswith(prefix + "[")
-        for key in keys.get(section.framework, set())
-    )
+    return any(_under(_relaxed(key), prefix, ".") for key in keys.get(section.framework, set()))
 
 
 def unbound_section_sites(
