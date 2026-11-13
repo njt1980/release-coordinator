@@ -2,12 +2,14 @@ import { useEffect } from "react";
 import Landing from "./pages/Landing.jsx";
 import HowItWorks from "./pages/HowItWorks.jsx";
 import Onboarding from "./pages/Onboarding.jsx";
+import Runs from "./pages/Runs.jsx";
 import { ROUTES, useRoute } from "./lib/router.js";
 
 const PAGES = {
   [ROUTES.home]: { component: Landing, title: "Release Coordinator" },
   [ROUTES.howItWorks]: { component: HowItWorks, title: "How it works · Release Coordinator" },
   [ROUTES.onboard]: { component: Onboarding, title: "Onboarding · Release Coordinator" },
+  [ROUTES.runs]: { component: Runs, title: "Runs · Release Coordinator" },
 };
 
 export default function App() {

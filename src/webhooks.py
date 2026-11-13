@@ -25,6 +25,8 @@ from src.core.models import (
     PullRequestPayload,
     ReleaseAssessment,
 )
+from src.orchestration.narration import narrate_assessment
+from src.orchestration.run_log import DEFAULT_RUN_LOGS, run_graph
 from src.tools.baseline_store import PATH_SEGMENT_PATTERN, BaselineScope, default_store
 from src.tools.policy_store import (
     PolicyInvalidError,
@@ -110,6 +112,7 @@ class PrAssessmentJob(BaseModel):
 # In-memory job registry; records are lost when the server restarts. Only
 # mutated from the event loop, so no locking is needed.
 _assessment_jobs: dict[str, PrAssessmentJob] = {}
+RUN_LOGS = DEFAULT_RUN_LOGS
 
 
 def _load_policy(scope: BaselineScope) -> ProjectPolicy | None:
@@ -173,16 +176,28 @@ async def run_assessment_job(
         job_id=job_id, pr_id=pr_id, status="running"
     )
     try:
-        final_state = await run_in_threadpool(coordinator_app.invoke, state)
+        final_state = await run_in_threadpool(
+            run_graph, coordinator_app, state, narrate_assessment, RUN_LOGS, job_id
+        )
         assessment = final_state["release_assessment"]
     except Exception as error:
+        message = str(error) or repr(error)
         _assessment_jobs[job_id] = PrAssessmentJob(
             job_id=job_id,
             pr_id=pr_id,
             status="failed",
-            error_message=str(error) or repr(error),
+            error_message=message,
         )
+        RUN_LOGS.finish(job_id, "failed", message)
     else:
+        RUN_LOGS.finish(
+            job_id,
+            "completed",
+            "Approved"
+            if assessment.approved
+            else "Not approved: "
+            + (", ".join(code.value for code in assessment.reason_codes) or "no reason given"),
+        )
         _assessment_jobs[job_id] = PrAssessmentJob(
             job_id=job_id,
             pr_id=pr_id,
@@ -239,6 +254,13 @@ def pr_assessment_webhook(
     job_id = str(uuid4())
     _assessment_jobs[job_id] = PrAssessmentJob(
         job_id=job_id, pr_id=payload.pr_id, status="queued"
+    )
+    RUN_LOGS.start(
+        job_id,
+        "assessment",
+        f"Assess {payload.pr_id}" + (f": {payload.title}" if payload.title else ""),
+        payload.tenant,
+        payload.project_id,
     )
     background_tasks.add_task(
         run_assessment_job,

@@ -929,3 +929,59 @@ class ReleaseAssessment(BaseModel):
         if self.approved and self.advisory_assessment is None:
             raise ValueError("an approved assessment requires an advisory assessment")
         return self
+
+
+class RunEventStatus(str, Enum):
+    """Outcome of one step shown in a run's live log.
+
+    INFO: context, nothing was checked. PASSED: a check succeeded.
+    WARNING: a check found something worth reviewing that doesn't block.
+    BLOCKED: a check found a reason the release can't go ahead.
+    FAILED: a step could not run (an error, not a finding).
+    """
+
+    INFO = "info"
+    PASSED = "passed"
+    WARNING = "warning"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
+class RunEvent(BaseModel):
+    """One plain-language line in a run's live log.
+
+    ``seq`` is the event's position in its run (1-based), so a client can
+    ask for everything after the last one it saw. ``stage`` names the step
+    (e.g. "Kubernetes scan"), ``message`` says what was checked and found,
+    and ``details`` holds supporting lines (IDs, errors, counts).
+    """
+
+    seq: int = Field(ge=1)
+    at: datetime
+    stage: str = Field(min_length=1)
+    status: RunEventStatus
+    message: str = Field(min_length=1)
+    details: List[str] = Field(default_factory=list)
+
+
+RunKind = Literal["onboarding", "assessment"]
+RunState = Literal["running", "completed", "failed"]
+
+
+class RunSummary(BaseModel):
+    """One onboarding or PR assessment run, as listed on the Runs page.
+
+    ``outcome`` is a one-line result once the run ends (for example
+    "Baseline 2026...-abcd saved" or "Blocked: DISCOVERY_GAP").
+    """
+
+    run_id: str = Field(min_length=1)
+    kind: RunKind
+    title: str
+    tenant: str
+    project_id: str
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    state: RunState = "running"
+    outcome: str = ""
+    event_count: int = Field(ge=0, default=0)

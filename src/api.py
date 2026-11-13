@@ -1,5 +1,6 @@
 """FastAPI boundary that lets a frontend trigger the Day-Zero discovery engine."""
 
+import logging
 from datetime import datetime
 from typing import Literal, Self
 from uuid import uuid4
@@ -14,12 +15,15 @@ from src.core.models import (
     UNKNOWN_LABEL,
     DependencyEdge,
     DiscoveryStageReport,
+    RunEvent,
     ScannedRevision,
     ServiceNode,
     UnresolvedEntity,
 )
 from src.discovery_engine.graph import discovery_app
 from src.discovery_engine.state import DiscoveryGraphState
+from src.orchestration.narration import narrate_discovery
+from src.orchestration.run_log import DEFAULT_RUN_LOGS, run_graph
 from src.tools.baseline_store import (
     PATH_SEGMENT_PATTERN,
     BaselineScope,
@@ -29,13 +33,17 @@ from src.tools.baseline_store import (
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.telemetry_extractor import TelemetryExtractor
+from src.runs import router as runs_router
 from src.webhooks import router as webhooks_router
 
 
 app = FastAPI(title="Release Coordinator API")
 app.include_router(webhooks_router)
+app.include_router(runs_router)
 
 BASELINE_STORE = default_store()
+RUN_LOGS = DEFAULT_RUN_LOGS
+logger = logging.getLogger(__name__)
 
 
 class OnboardingPayload(BaseModel):
@@ -290,8 +298,13 @@ def summarize_baseline(baseline: StoredBaseline) -> CrawlResults:
     )
 
 
-def execute_discovery(state: DiscoveryGraphState) -> CrawlResults:
+def execute_discovery(
+    state: DiscoveryGraphState, run_id: str | None = None
+) -> CrawlResults:
     """Run the discovery graph and summarize the snapshot this run wrote.
+
+    With ``run_id``, every step is narrated into that run's live log and,
+    once the snapshot is written, the log is kept beside it.
 
     The run's own snapshot is read back by ID, not the project's latest, so
     a concurrent run for the same project cannot be reported in its place.
@@ -301,12 +314,29 @@ def execute_discovery(state: DiscoveryGraphState) -> CrawlResults:
         DiscoveryIncompleteError, OSError, ValueError: if the snapshot is
             incomplete, missing or invalid.
     """
-    final_state = discovery_app.invoke(state)
+    if run_id is None:
+        final_state = discovery_app.invoke(state)
+    else:
+        final_state = run_graph(discovery_app, state, narrate_discovery, RUN_LOGS, run_id)
     snapshot_id = (final_state or {}).get("baseline_snapshot_id")
     if not snapshot_id:
         raise RuntimeError("Discovery finished without writing a baseline snapshot")
     scope = BaselineScope(tenant=state["tenant"], project_id=state["project_id"])
-    return summarize_baseline(BASELINE_STORE.read(scope, snapshot_id))
+    results = summarize_baseline(BASELINE_STORE.read(scope, snapshot_id))
+    if run_id is not None:
+        _keep_run_log(scope, snapshot_id, run_id)
+    return results
+
+
+def _keep_run_log(scope: BaselineScope, snapshot_id: str, run_id: str) -> None:
+    """Save the run's log beside its snapshot; a failure here is only logged."""
+    found = RUN_LOGS.get(run_id)
+    if found is None:
+        return
+    try:
+        BASELINE_STORE.write_run_log(scope, snapshot_id, found[1])
+    except OSError as error:
+        logger.warning("Could not keep the run log for %s: %s", snapshot_id, error)
 
 
 async def run_discovery_job(job_id: str, state: DiscoveryGraphState) -> None:
@@ -318,13 +348,19 @@ async def run_discovery_job(job_id: str, state: DiscoveryGraphState) -> None:
     """
     _jobs[job_id] = JobRecord(job_id=job_id, status="running")
     try:
-        results = await run_in_threadpool(execute_discovery, state)
+        results = await run_in_threadpool(execute_discovery, state, job_id)
     except Exception as error:
-        _jobs[job_id] = JobRecord(
-            job_id=job_id, status="failed", error_message=str(error) or repr(error)
-        )
+        message = str(error) or repr(error)
+        _jobs[job_id] = JobRecord(job_id=job_id, status="failed", error_message=message)
+        RUN_LOGS.finish(job_id, "failed", message)
     else:
         _jobs[job_id] = JobRecord(job_id=job_id, status="completed", results=results)
+        RUN_LOGS.finish(
+            job_id,
+            "completed",
+            f"Baseline {results.snapshot_id}: {results.service_count} services, "
+            f"{results.edge_count} dependencies, {results.unresolved_count} unresolved",
+        )
 
 
 @app.post(
@@ -338,6 +374,14 @@ def onboard(
     """Schedule a discovery graph run for the requested scope and return at once."""
     job_id = str(uuid4())
     _jobs[job_id] = JobRecord(job_id=job_id, status="queued")
+    RUN_LOGS.start(
+        job_id,
+        "onboarding",
+        f"Onboard {payload.tenant}/{payload.project_id} "
+        f"({payload.environment}/{payload.cluster})",
+        payload.tenant,
+        payload.project_id,
+    )
     background_tasks.add_task(
         run_discovery_job, job_id, build_discovery_state(payload)
     )
@@ -378,6 +422,30 @@ def get_latest_baseline(tenant: str, project_id: str) -> CrawlResults:
             detail=f"No complete baseline for {tenant}/{project_id}",
         )
     return summarize_baseline(baseline)
+
+
+@app.get(
+    "/api/baselines/{tenant}/{project_id}/{snapshot_id}/run-log",
+    response_model=list[RunEvent],
+)
+def get_baseline_run_log(tenant: str, project_id: str, snapshot_id: str) -> list[RunEvent]:
+    """Return the log of the onboarding run that built a snapshot.
+
+    404 when the snapshot predates run logs or its log wasn't kept.
+    """
+    try:
+        scope = BaselineScope(tenant=tenant, project_id=project_id)
+        events = BASELINE_STORE.read_run_log(scope, snapshot_id)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    if events is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No run log kept for snapshot {snapshot_id}",
+        )
+    return events
 
 
 @app.post("/api/verify/devops", response_model=SystemVerification)
