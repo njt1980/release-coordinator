@@ -51,6 +51,12 @@ before falling back to the developer's `az login`.
   (`kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'`),
   or the baseline is rejected as `BASELINE_SCOPE_MISMATCH`.
 
+## Claude (risk model and Ask assistant)
+
+- `ANTHROPIC_API_KEY` in `.env` (gitignored). Without it the risk model
+  can't be consulted and the Ask panel says it isn't configured.
+- The assistant uses `claude-opus-5-5` unless `ASSISTANT_MODEL` is set.
+
 ## Lab setup (2026-11-13)
 
 | Identity | Grants |

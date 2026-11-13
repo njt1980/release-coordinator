@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import Nav from "../components/Nav.jsx";
 import RunLog, { RunStateBadge } from "../components/RunLog.jsx";
+import { FocusContext } from "../lib/focus.js";
 import { ROUTES } from "../lib/router.js";
 
 const REFRESH_MS = 3000;
@@ -13,6 +14,10 @@ export default function Runs() {
   const [runs, setRuns] = useState(null);
   const [error, setError] = useState(null);
   const [selected, setSelected] = useState(null);
+  const { setRunId } = useContext(FocusContext);
+
+  // The assistant is asked about the run being viewed.
+  useEffect(() => setRunId(selected), [selected, setRunId]);
 
   useEffect(() => {
     let cancelled = false;

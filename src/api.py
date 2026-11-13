@@ -33,6 +33,7 @@ from src.tools.baseline_store import (
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.telemetry_extractor import TelemetryExtractor
+from src.assistant_api import router as assistant_router
 from src.runs import router as runs_router
 from src.webhooks import router as webhooks_router
 
@@ -40,6 +41,7 @@ from src.webhooks import router as webhooks_router
 app = FastAPI(title="Release Coordinator API")
 app.include_router(webhooks_router)
 app.include_router(runs_router)
+app.include_router(assistant_router)
 
 BASELINE_STORE = default_store()
 RUN_LOGS = DEFAULT_RUN_LOGS

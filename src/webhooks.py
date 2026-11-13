@@ -115,6 +115,11 @@ _assessment_jobs: dict[str, PrAssessmentJob] = {}
 RUN_LOGS = DEFAULT_RUN_LOGS
 
 
+def find_assessment(job_id: str) -> PrAssessmentJob | None:
+    """Return a PR assessment job's current record, or None if unknown."""
+    return _assessment_jobs.get(job_id)
+
+
 def _load_policy(scope: BaselineScope) -> ProjectPolicy | None:
     """Return the project's policy, or None when it is missing or invalid.
 
