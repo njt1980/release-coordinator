@@ -15,6 +15,7 @@ from src import webhooks
 from src.coordinator import nodes as coordinator_nodes
 from src.coordinator.file_mapping import ChangedFileMapping, map_changed_files
 from src.core.models import (
+    TelemetryClusterFilter,
     AssessmentEvidence,
     ContractChange,
     DependencyEdge,
@@ -42,6 +43,8 @@ SCAN = ScanContext(
     environment="prod",
     cluster="aks-1",
     namespaces=["shop"],
+    kubernetes_api_server="https://aks-1.example.azmk8s.io:443",
+    telemetry_cluster=TelemetryClusterFilter(value="aks-1"),
     scanned_revisions=[
         SHOP_REVISION,
         ScannedRevision(repository="other-repo", branch="main", commit_sha="a" * 40),
@@ -85,6 +88,9 @@ environment: prod
 cluster: aks-1
 required_sources: [STATIC_CODE, K8S_MANIFEST, RUNTIME_TELEMETRY]
 runtime_evidence: baseline
+kubernetes_api_server: https://aks-1.example.azmk8s.io
+telemetry_cluster:
+  value: aks-1
 exemptions:
   files:
     - pattern: "docs/*"

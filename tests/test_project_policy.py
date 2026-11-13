@@ -31,6 +31,7 @@ from src.core.models import (
     ReasonCode,
     RuntimeEvidenceState,
     ScanContext,
+    TelemetryClusterFilter,
 )
 from src.tools.baseline_store import BaselineScope, snapshot_created_at
 from src.tools.policy_store import (
@@ -55,6 +56,8 @@ cluster: aks-1
 max_baseline_age_hours: 12
 required_sources: [STATIC_CODE, RUNTIME_TELEMETRY]
 runtime_evidence: live
+telemetry_cluster:
+  value: aks-1
 exemptions:
   files:
     - pattern: "docs/**"
@@ -165,12 +168,122 @@ class PolicyStoreTests(unittest.TestCase):
         self.assertEqual(policy.exemptions.files, [])
         self.assertEqual(policy.exemptions.dependencies, [])
         self.assertEqual((policy.environment, policy.cluster), ("local", "local"))
+        self.assertTrue(policy.kubernetes_api_server.startswith("https://"))
+        self.assertIsNotNone(policy.telemetry_cluster)
 
 
 class BaselineScopeTests(unittest.TestCase):
     def test_matching_scan_has_no_issue(self) -> None:
-        scan = ScanContext(environment="prod", cluster="aks-1")
+        scan = ScanContext(
+            environment="prod",
+            cluster="aks-1",
+            telemetry_cluster=TelemetryClusterFilter(value="aks-1"),
+        )
         self.assertIsNone(baseline_scope_issue(POLICY, "snap", scan))
+
+    def test_api_server_must_match_the_policy(self) -> None:
+        policy = POLICY.model_copy(
+            update={"kubernetes_api_server": "https://aks-1.example.io:443"}
+        )
+        base = {
+            "environment": "prod",
+            "cluster": "aks-1",
+            "telemetry_cluster": TelemetryClusterFilter(value="aks-1"),
+        }
+        # The same server written differently still matches.
+        same = ScanContext(**base, kubernetes_api_server="HTTPS://AKS-1.example.io")
+        self.assertIsNone(baseline_scope_issue(policy, "snap", same))
+        for server, shown in [
+            ("https://aks-2.example.io", "https://aks-2.example.io:443"),
+            ("", "none (or not recorded)"),
+        ]:
+            with self.subTest(server=server):
+                scan = ScanContext(**base, kubernetes_api_server=server)
+                issue = baseline_scope_issue(policy, "snap", scan)
+                assert issue is not None
+                self.assertIs(issue.code, ReasonCode.BASELINE_SCOPE_MISMATCH)
+                self.assertIn(shown, issue.detail)
+                self.assertIn("https://aks-1.example.io:443", issue.detail)
+
+    def test_telemetry_cluster_filter_must_match_the_policy(self) -> None:
+        for recorded, shown in [
+            (None, "no cluster filter"),
+            (TelemetryClusterFilter(value="aks-2"), "'aks-2'"),
+            (
+                TelemetryClusterFilter(attribute="cluster", value="aks-1"),
+                "cluster == 'aks-1'",
+            ),
+        ]:
+            with self.subTest(recorded=recorded):
+                scan = ScanContext(
+                    environment="prod", cluster="aks-1", telemetry_cluster=recorded
+                )
+                issue = baseline_scope_issue(POLICY, "snap", scan)
+                assert issue is not None
+                self.assertIs(issue.code, ReasonCode.BASELINE_SCOPE_MISMATCH)
+                self.assertIn(shown, issue.detail)
+                self.assertIn("k8s.cluster.name == 'aks-1'", issue.detail)
+
+
+class ClusterProofPolicyTests(unittest.TestCase):
+    """The policy must say how its cluster label is proven."""
+
+    def _policy(self, **changes: object) -> dict[str, object]:
+        data: dict[str, object] = {
+            "policy_version": 3,
+            "tenant": "acme",
+            "project_id": "shop",
+            "environment": "prod",
+            "cluster": "aks-1",
+            "required_sources": ["STATIC_CODE"],
+            "runtime_evidence": "baseline",
+        }
+        data.update(changes)
+        return data
+
+    def test_api_server_required_with_k8s_manifest_source(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "kubernetes_api_server"):
+            ProjectPolicy.model_validate(
+                self._policy(required_sources=["K8S_MANIFEST"])
+            )
+        policy = ProjectPolicy.model_validate(
+            self._policy(
+                required_sources=["K8S_MANIFEST"],
+                kubernetes_api_server="https://AKS-1.example.io",
+            )
+        )
+        self.assertEqual(policy.kubernetes_api_server, "https://aks-1.example.io:443")
+
+    def test_telemetry_cluster_required_for_runtime_evidence(self) -> None:
+        for changes in [
+            {"required_sources": ["RUNTIME_TELEMETRY"]},
+            {"runtime_evidence": "live"},
+        ]:
+            with self.subTest(changes=changes):
+                with self.assertRaisesRegex(ValidationError, "telemetry_cluster"):
+                    ProjectPolicy.model_validate(self._policy(**changes))
+        policy = ProjectPolicy.model_validate(
+            self._policy(runtime_evidence="live", telemetry_cluster={"value": "aks-1"})
+        )
+        assert policy.telemetry_cluster is not None
+        self.assertEqual(policy.telemetry_cluster.attribute, "k8s.cluster.name")
+
+    def test_neither_is_required_without_those_sources(self) -> None:
+        policy = ProjectPolicy.model_validate(self._policy())
+        self.assertEqual(policy.kubernetes_api_server, "")
+        self.assertIsNone(policy.telemetry_cluster)
+
+    def test_unsafe_values_are_rejected(self) -> None:
+        for changes in [
+            {"kubernetes_api_server": "http://aks-1.example.io"},
+            {"kubernetes_api_server": "https://aks-1.example.io/api"},
+            {"telemetry_cluster": {"value": 'aks-1" or true'}},
+            {"telemetry_cluster": {"attribute": "a]b", "value": "aks-1"}},
+            {"telemetry_cluster": {"value": "aks-1", "extra": 1}},
+        ]:
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValidationError):
+                    ProjectPolicy.model_validate(self._policy(**changes))
 
     def test_snapshot_without_scan_context_is_a_mismatch(self) -> None:
         issue = baseline_scope_issue(POLICY, "snap", None)

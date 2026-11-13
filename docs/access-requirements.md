@@ -32,6 +32,11 @@ before falling back to the developer's `az login`.
   `AppDependencies` (the Application Insights resource must be
   workspace-based). The workspace ID (`customerId`) is passed per
   onboarding request and PR webhook.
+- Telemetry rows must carry a cluster attribute (by default
+  `k8s.cluster.name` in `Properties`; Beyla and the OpenTelemetry Kubernetes
+  attributes processor set it). The project policy's `telemetry_cluster`
+  names the attribute and value, and only matching rows are counted, so a
+  workspace shared by several clusters is safe.
 - Role assignments can take a few minutes to take effect.
 
 ## Kubernetes (manifest scan)
@@ -41,6 +46,10 @@ before falling back to the developer's `az login`.
   never read.
 - Locally the backend uses the current kubeconfig context; on Azure it uses
   the in-cluster service account or the cluster's Entra integration.
+- Whichever it uses, discovery records the API server it actually read. The
+  project policy's `kubernetes_api_server` must be that server
+  (`kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'`),
+  or the baseline is rejected as `BASELINE_SCOPE_MISMATCH`.
 
 ## Lab setup (2026-11-13)
 

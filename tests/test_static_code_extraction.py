@@ -567,6 +567,9 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
 
     def test_env_and_private_targets_reconcile_to_unresolved_entities(self) -> None:
         state = _devops_state()
+        # One repository: the mock returns the same scan for every repository,
+        # and two repositories declaring one service would be ambiguous.
+        state["target_repositories"] = ["repo-a"]
         with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
             devops_cls.return_value.scan_repository.return_value = _repository_result(
                 _scan(

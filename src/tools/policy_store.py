@@ -29,6 +29,8 @@ from src.core.models import (
     UNKNOWN_LABEL,
     UNRESOLVED_ID_PREFIX,
     DiscoveryMethod,
+    TelemetryClusterFilter,
+    normalize_api_server,
 )
 from src.tools.baseline_store import BaselineScope
 
@@ -144,6 +146,13 @@ class ProjectPolicy(_StrictModel):
     snapshot's age at assessment time. ``environment`` and ``cluster`` name
     the one deployment target the project releases to; the baseline must
     have scanned exactly that target.
+
+    ``environment`` and ``cluster`` are labels; two fields prove them.
+    ``kubernetes_api_server`` is the API server the manifest scan must have
+    read (required when K8S_MANIFEST is a required source).
+    ``telemetry_cluster`` restricts every telemetry query to rows emitted
+    from this cluster (required when RUNTIME_TELEMETRY is a required source
+    or runtime evidence must be live).
     """
 
     policy_version: int = Field(ge=1)
@@ -159,6 +168,13 @@ class ProjectPolicy(_StrictModel):
     required_sources: list[DiscoveryMethod] = Field(min_length=1)
     runtime_evidence: RuntimeEvidenceRequirement
     exemptions: Exemptions = Field(default_factory=Exemptions)
+    kubernetes_api_server: str = ""
+    telemetry_cluster: TelemetryClusterFilter | None = None
+
+    @field_validator("kubernetes_api_server")
+    @classmethod
+    def _normalize_api_server(cls, value: str) -> str:
+        return normalize_api_server(value) if value else ""
 
     @field_validator("environment", "cluster")
     @classmethod
@@ -171,6 +187,27 @@ class ProjectPolicy(_StrictModel):
     def _sources_are_unique(self) -> Self:
         if len(set(self.required_sources)) != len(self.required_sources):
             raise ValueError("required_sources must not repeat a source")
+        return self
+
+    @model_validator(mode="after")
+    def _cluster_is_provable(self) -> Self:
+        if (
+            DiscoveryMethod.K8S_MANIFEST in self.required_sources
+            and not self.kubernetes_api_server
+        ):
+            raise ValueError(
+                "kubernetes_api_server is required when K8S_MANIFEST is a "
+                "required source"
+            )
+        needs_telemetry = (
+            DiscoveryMethod.RUNTIME_TELEMETRY in self.required_sources
+            or self.runtime_evidence is RuntimeEvidenceRequirement.LIVE
+        )
+        if needs_telemetry and self.telemetry_cluster is None:
+            raise ValueError(
+                "telemetry_cluster is required when RUNTIME_TELEMETRY is a "
+                "required source or runtime_evidence is live"
+            )
         return self
 
 

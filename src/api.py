@@ -227,7 +227,8 @@ def verify_kubernetes(namespaces: list[str]) -> SystemVerification:
                 failures.append(f"{namespace}: {message}")
         if failures:
             return SystemVerification(status=False, message="; ".join(failures))
-        return SystemVerification(status=True, message="Success")
+        server = extractor.api_server or "an unidentified API server"
+        return SystemVerification(status=True, message=f"Success: read from {server}")
     except Exception as error:
         return SystemVerification(status=False, message=str(error))
 
@@ -259,6 +260,8 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
         "runtime_edges": [],
         "discovery_reports": [],
         "scanned_revisions": [],
+        "kubernetes_api_server": "",
+        "telemetry_cluster": None,
         "reconciled_graph": {},
         "baseline_snapshot_id": "",
     }

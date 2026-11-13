@@ -107,6 +107,7 @@ def _extractor(core: object | None, apps: object | None) -> KubernetesExtractor:
     extractor = KubernetesExtractor.__new__(KubernetesExtractor)
     extractor._core_v1_api = core  # type: ignore[assignment]
     extractor._apps_v1_api = apps  # type: ignore[assignment]
+    extractor._api_server = "https://aks-1.example.azmk8s.io:443"
     return extractor
 
 

@@ -1,6 +1,7 @@
 # Supported applications and release model
 
-Status: draft for review (2026-11-13)
+Status: draft for review (2026-11-13; G11 onwards and the acceptance gates
+added the same day after the external review)
 
 This document states what kind of application the release coordinator
 supports, what it needs from a team that onboards one, how it decides
@@ -31,8 +32,25 @@ Every service is identified by a URI:
 Every source of evidence (code, manifests, telemetry) names services
 differently; all of them are resolved to this URI. A reference that does not
 match exactly one registered service stays an **unresolved entity**, with a
-kind: IP address, private DNS, external DNS, unregistered service, or
-unresolved environment variable.
+kind: IP address, private DNS, external DNS, unregistered service,
+unresolved environment variable, or ambiguous service.
+
+Identity is namespace-safe:
+
+- A service declared in source code takes the namespace given in
+  `release-coord.yaml` (`namespace:`). Without one, it merges with the only
+  Kubernetes service of that name in the scanned namespaces.
+- When that can't be decided, nothing is merged and the service is an
+  **ambiguous service**: two repository directories claim the same service,
+  or the name exists in several scanned namespaces. Its code dependencies
+  stay attached to the ambiguity (a `DISCOVERY_GAP` in any radius it
+  reaches) and its files map to no service (`UNMAPPED_FILES`) until the
+  namespace is declared.
+- A dependency's bare target name (`db`, `db:5432`) resolves in the
+  caller's own namespace, as in-cluster DNS does.
+- Telemetry names its source by the `service.name` and `k8s.namespace.name`
+  resource attributes, so the same workload name in two namespaces stays
+  two services.
 
 ## 2. What a team provides
 
@@ -41,7 +59,19 @@ unresolved environment variable.
 | Repositories and project | Static code scan: service boundaries and the addresses each service uses | Read on the repositories |
 | Cluster and namespaces | Manifest scan: Services, workloads, ConfigMaps, environment variables | `get`/`list` on those kinds; never Secrets |
 | Telemetry workspace | Observed calls between services | Read on the workspace |
-| Project policy | What evidence is required and what is exempt | Reviewed file in the repo (`policies/{tenant}/{project}.yaml`) |
+| Project policy | What evidence is required, what is exempt, and what proves the cluster | Reviewed file in the repo (`policies/{tenant}/{project}.yaml`) |
+
+The policy's `cluster` is a label. Two fields prove it:
+
+- `kubernetes_api_server`: the API server the manifest scan must have read
+  (required when `K8S_MANIFEST` is a required source).
+- `telemetry_cluster`: an attribute and value (by default
+  `k8s.cluster.name`) that every telemetry query filters on, at onboarding
+  and at assessment (required when `RUNTIME_TELEMETRY` is required or
+  runtime evidence must be live).
+
+A baseline that read another API server, or telemetry with another filter
+or none, is `BASELINE_SCOPE_MISMATCH`.
 
 Telemetry comes from either:
 
@@ -85,7 +115,7 @@ workspace.
 | Code | Meaning |
 | --- | --- |
 | `POLICY_MISSING`, `POLICY_INVALID` | No usable policy for the project |
-| `BASELINE_UNAVAILABLE`, `BASELINE_STALE`, `BASELINE_SCOPE_MISMATCH` | No baseline, too old, or scanned for another environment/cluster |
+| `BASELINE_UNAVAILABLE`, `BASELINE_STALE`, `BASELINE_SCOPE_MISMATCH` | No baseline, too old, or scanned for another environment/cluster (or not provably the policy's cluster) |
 | `REQUIRED_SOURCE_MISSING` | A discovery source the policy requires did not succeed |
 | `UNMAPPED_FILES` | Changed files no service owns and the policy doesn't exempt |
 | `DISCOVERY_GAP` | An unresolved entity in the release radius |
@@ -110,20 +140,67 @@ a platform capability, not a lab fix.
 | G7 | Messaging is modeled as service → broker | The release risk is producer → queue/topic → consumer | Queues and topics as dependency nodes |
 | G8 | No contract analysis | Nothing can be approved (`COMPATIBILITY_UNVERIFIED`) | Compare API and message schemas (OpenAPI, protobuf, JSON Schema) between base and head |
 | G9 | The agent bundle is a lab directory with fixed names | Every cluster differs | A versioned, parameterized bundle (namespaces, connection string) with documented known issues |
-| G10 | The backend runs as a single local process with no authentication | Shared and customer use | The security track: authentication, tenant isolation, webhook signatures, managed identity |
+| G10 | The backend runs as a single local process with no authentication | Shared and customer use | The security track: authentication, tenant isolation, webhook signatures, managed identity, and an allowlist of code-host organizations a tenant may name |
 
-## 5. Proposed order
+Added after the external review of 2026-11-13, which found the platform
+fit for an engineer-reviewed pilot, not for gating releases:
 
-1. **Step 2 (next):** G1, G2, G3 and G6, plus one service instrumented with
-   the OpenTelemetry SDK so the "team already has telemetry" path is tested
-   next to eBPF.
-2. **Security track (G10):** before any shared deployment.
-3. **Contract analysis (G8):** the main remaining blocker to approving a
-   real release.
-4. **Adapters (G4, G5), messaging topology (G7), agent bundle (G9):** as
-   onboarding needs them.
+| # | Gap | Why it matters | Proposed capability | Status |
+| --- | --- | --- | --- | --- |
+| G11 | The cluster was a caller-supplied label; the scan used whatever kubeconfig was current, and telemetry wasn't scoped by cluster | A baseline could describe another cluster than the one it is labeled with | The policy names the API server and a telemetry cluster filter; the snapshot records both and they must match | Done (PR 2a-1) |
+| G12 | Same-named services merged: code services had an unknown namespace, and the lab collector dropped the telemetry namespace | Two services could share one node, hiding a dependency | Declared namespaces, ambiguous services, targets resolved in the caller's namespace, namespaced telemetry sources | Done (PR 2a-1) |
+| G13 | A live query with zero rows counted as live evidence; the reported runtime edges came from the baseline; real metrics were empty | "Live" didn't prove the radius was observed | Live evidence states (empty, stale, uncovered), live edges in the report, metrics from the query | PR 2a-2 |
+| G14 | One PR-wide additive/breaking flag | A PR changes several interfaces, each with its own compatibility | Per-interface change classification, from contract analysis (G8) | After G8 |
+| G15 | The PR's base and head commits aren't verified, and the head isn't scanned for new dependencies; no evidence of what is deployed | The assessment may describe code other than what will ship | Verify base ancestry and scan the head; record deployed versions | PR 2b |
+| G16 | The static scanner is heuristic and `SUCCESS` doesn't mean full coverage; pipeline variables are discarded | A missed reference looks like a missing dependency | Coverage accounting per service directory; read pipeline variables | PR 2b |
+| G17 | Jobs are in memory, not safe across replicas, and have no deadlines | Restarts lose assessments; runs can hang | Durable job store with deadlines | Planned |
+| G18 | Nothing enforces the verdict; an assessment never expires or yields to a newer head | A stale approval could be acted on | Required PR/CD check, superseded on a new head, expiry | Planned |
+| G19 | No policy on what is sent to the risk model | Customer code and topology leave the boundary | Model data-egress policy: what is sent, redaction, opt-out | Planned |
+| G20 | Packaging and operations; dependencies unpinned | Reproducible, supportable installs | Pinned dependencies, container image, runbooks | Planned |
+| G21 | Kubernetes coverage is Services, Deployments, StatefulSets and bare Pods | DaemonSets, Jobs/CronJobs, Ingress and ExternalName services carry dependencies too | Read the remaining workload and routing kinds | Planned |
 
-## 6. Out of scope for now
+## 5. Acceptance gates
+
+The coordinator's verdict may gate a real release only when every one of
+these holds. Until then it is advisory and reviewed by an engineer.
+
+1. **Scope is proven** (G11): the baseline read the policy's API server,
+   and all telemetry is filtered to the policy's cluster.
+2. **Identity is unambiguous** (G12): no ambiguous service and no unknown
+   namespace in the release radius.
+3. **Live evidence is real** (G13): the live query completed, is fresh,
+   and observed every service in the radius, or each silent service is
+   explicitly allowlisted with a reason.
+4. **The assessed code is the code that ships** (G15, G18): base and head
+   are verified, the head is scanned, and a newer head supersedes the
+   assessment, which also expires.
+5. **Static coverage is accounted for** (G16): every service directory was
+   scanned, and gaps are reported rather than hidden in `SUCCESS`.
+6. **Compatibility is evidenced** (G8, G14) for every changed interface.
+7. **Access is controlled** (G10): authentication, tenant isolation, signed
+   webhooks, and allowlisted organizations.
+8. **Runs are durable and enforced** (G17, G18): jobs survive restarts and
+   have deadlines, and the verdict is a required check.
+9. **Data handling is defined** (G19, G20): model egress policy, pinned
+   dependencies.
+10. **Proven beyond the lab**: on a cluster we don't control, a
+    deliberately unsafe change is blocked for the right reason and a safe
+    one is not blocked by noise.
+
+## 6. Proposed order
+
+1. **Evidence you can trust:** PR 2a-1 (G11, G12), then PR 2a-2 (G13, G1,
+   G2, G3, G6).
+2. **PR 2b:** static coverage accounting and the PR head scan (G15, G16).
+3. **PR 2c:** one service instrumented with the OpenTelemetry SDK, so the
+   "team already has telemetry" path is tested next to eBPF.
+4. **Security track (G10):** before any shared deployment.
+5. **Contract analysis and messaging (G8, G14, G7):** the main remaining
+   blocker to approving a real release.
+6. **Durable jobs and gate integration (G17, G18), then G19 to G21.**
+7. **Adapters (G4, G5) and the agent bundle (G9):** as onboarding needs them.
+
+## 7. Out of scope for now
 
 - Applications not on Kubernetes (VMs, serverless).
 - Executing the deployment. The platform decides and orders; the team's CD

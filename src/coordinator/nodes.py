@@ -458,7 +458,9 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     ``RuntimeEvidenceState``); when it is weaker than the project policy
     requires, a REQUIRED_SOURCE_MISSING issue is added.
 
-    Real (non-mock) live edges are compared with the baseline (see
+    The live query is restricted to the project policy's telemetry cluster
+    filter, so rows from another cluster sharing the workspace are not
+    counted. Real (non-mock) live edges are compared with the baseline (see
     ``live_drift_issues``): a workspace other than the baseline's is a
     DISCOVERY_GAP, and edges touching the radius that the baseline lacks
     are BASELINE_DRIFT.
@@ -489,8 +491,11 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
             *state.get("downstream_services", []),
         ]
     }
+    policy = _policy(state)
     extractor = TelemetryExtractor(workspace_id=workspace_id)
-    result = extractor.get_active_dependencies(days_back=7)
+    result = extractor.get_active_dependencies(
+        days_back=7, cluster_filter=policy.telemetry_cluster if policy else None
+    )
     issues = list(state.get("discovery_issues", []))
     if result.status.is_incomplete:
         issues.append(

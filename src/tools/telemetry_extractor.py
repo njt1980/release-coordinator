@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,6 +24,7 @@ from src.core.models import (
     DependencyEdge,
     DiscoveryMethod,
     DiscoveryResult,
+    TelemetryClusterFilter,
 )
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
@@ -34,6 +36,14 @@ from src.tools._timeout import (
 logger = logging.getLogger(__name__)
 RuntimeMetrics: TypeAlias = dict[str, dict[str, int | float]]
 _REQUIRED_COLUMNS = frozenset({"Source", "Target", "LastObservedAt"})
+_NAMESPACE_COLUMN = "SourceNamespace"
+_DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+# OpenTelemetry resource attributes, as Application Insights stores them in
+# Properties: the workload's own name, and the Kubernetes namespace it runs
+# in (service.namespace is a logical grouping in OpenTelemetry, not
+# necessarily the Kubernetes namespace, so it is not used).
+_SERVICE_NAME_PROPERTY = "service.name"
+_NAMESPACE_PROPERTY = "k8s.namespace.name"
 AZURE_MONITOR_PROVENANCE = "azure_monitor"
 MOCK_ENVIRONMENT = "mock"
 
@@ -116,9 +126,16 @@ class TelemetryExtractor:
             return False, str(error)
 
     def get_active_dependencies(
-        self, days_back: int = 30
+        self,
+        days_back: int = 30,
+        cluster_filter: TelemetryClusterFilter | None = None,
     ) -> DiscoveryResult[DependencyEdge]:
         """Return active dependency edges observed within a lookback period.
+
+        With ``cluster_filter``, only rows emitted from that cluster are
+        read (see ``build_dependency_query``); the mock fixture has no
+        cluster attributes and ignores it. A source whose Kubernetes
+        namespace is known is named ``<namespace>/<name>``.
 
         The local source reads AppDependencies-shaped records from the root
         mock_telemetry.json fixture. Set TELEMETRY_SOURCE=azure to use Azure.
@@ -135,7 +152,7 @@ class TelemetryExtractor:
             raise ValueError("days_back must be a positive integer")
         if self._source == "mock":
             return self._get_active_dependencies_from_mock()
-        return self._get_active_dependencies_from_azure(days_back)
+        return self._get_active_dependencies_from_azure(days_back, cluster_filter)
 
     def get_runtime_metrics(self) -> RuntimeMetrics:
         """Return metrics derived from the most recently loaded mock records."""
@@ -218,17 +235,10 @@ class TelemetryExtractor:
         return DiscoveryResult[DependencyEdge].from_items(edges, errors)
 
     def _get_active_dependencies_from_azure(
-        self, days_back: int
+        self, days_back: int, cluster_filter: TelemetryClusterFilter | None
     ) -> DiscoveryResult[DependencyEdge]:
         """Query Azure Monitor for observed dependency edges."""
-        query = f"""
-            AppDependencies
-            | where TimeGenerated >= ago({days_back}d)
-            | where isnotempty(AppRoleName) and isnotempty(Target)
-            | summarize LastObservedAt=max(TimeGenerated)
-                by Source=AppRoleName, Target
-            | project Source, Target, LastObservedAt
-        """
+        query = build_dependency_query(days_back, cluster_filter)
         try:
             if self._client is None:
                 raise RuntimeError("Azure telemetry client was not initialized")
@@ -243,6 +253,53 @@ class TelemetryExtractor:
                 f"Telemetry query failed: {error}"
             )
         return parse_dependency_response(response)
+
+
+def build_dependency_query(
+    days_back: int, cluster_filter: TelemetryClusterFilter | None = None
+) -> str:
+    """Return the KQL that summarizes AppDependencies into edges.
+
+    The source is the row's ``service.name`` resource attribute, falling
+    back to ``AppRoleName`` (which some exporters prefix with
+    ``service.namespace``), with its Kubernetes namespace alongside. A
+    cluster filter keeps only rows whose attribute equals the value; its
+    attribute and value are pattern-restricted by ``TelemetryClusterFilter``
+    so they cannot break out of the quoted strings.
+    """
+    if days_back <= 0:
+        raise ValueError("days_back must be a positive integer")
+    cluster_clause = (
+        f'| where tostring(Properties["{cluster_filter.attribute}"]) == '
+        f'"{cluster_filter.value}"\n'
+        if cluster_filter
+        else ""
+    )
+    return (
+        "AppDependencies\n"
+        f"| where TimeGenerated >= ago({days_back}d)\n"
+        f"{cluster_clause}"
+        f'| extend SourceName = coalesce(tostring(Properties["{_SERVICE_NAME_PROPERTY}"]), AppRoleName),\n'
+        f'    {_NAMESPACE_COLUMN} = tostring(Properties["{_NAMESPACE_PROPERTY}"])\n'
+        "| where isnotempty(SourceName) and isnotempty(Target)\n"
+        "| summarize LastObservedAt=max(TimeGenerated)\n"
+        f"    by Source=SourceName, {_NAMESPACE_COLUMN}, Target\n"
+        f"| project Source, {_NAMESPACE_COLUMN}, Target, LastObservedAt\n"
+    )
+
+
+def source_reference(name: str, namespace: str | None) -> str:
+    """Return how an edge names its telemetry source.
+
+    ``<namespace>/<name>`` when both are DNS labels, so the source resolves
+    in exactly that namespace; otherwise the bare name, resolved like any
+    short service name.
+    """
+    name = name.strip()
+    namespace = (namespace or "").strip().lower()
+    if namespace and _DNS_LABEL.match(namespace) and _DNS_LABEL.match(name.lower()):
+        return f"{namespace}/{name.lower()}"
+    return name
 
 
 def _runtime_edge(source: str, target: str, observed_at: datetime) -> DependencyEdge:
@@ -271,7 +328,9 @@ def _parse_dependency_table(
     """Parse one result table into edges and per-row errors.
 
     ``LogsTable.columns`` is a list of column-name strings in
-    azure-monitor-query; row values are read by the matching index.
+    azure-monitor-query; row values are read by the matching index. The
+    ``SourceNamespace`` column is optional; when present it qualifies the
+    source (see ``source_reference``).
 
     Raises:
         ValueError: if the table does not have the expected columns.
@@ -288,6 +347,7 @@ def _parse_dependency_table(
             f"table {table.name!r} is missing columns: {', '.join(sorted(missing))}"
         )
 
+    namespace_index = column_indexes.get(_NAMESPACE_COLUMN)
     edges: list[DependencyEdge] = []
     bad_rows = 0
     for row in table.rows:
@@ -297,7 +357,9 @@ def _parse_dependency_table(
             observed_at = _parse_observed_at(row[column_indexes["LastObservedAt"]])
             if not source or not target:
                 raise ValueError("empty Source or Target")
-            edges.append(_runtime_edge(str(source), str(target), observed_at))
+            namespace = row[namespace_index] if namespace_index is not None else None
+            reference = source_reference(str(source), str(namespace or ""))
+            edges.append(_runtime_edge(reference, str(target), observed_at))
         except (IndexError, ValueError, ValidationError) as error:
             logger.warning("Skipping malformed telemetry row: %s", error)
             bad_rows += 1

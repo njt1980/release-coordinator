@@ -7,7 +7,12 @@ from typing import Any
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
-from src.core.models import DiscoveryResult, ServiceEnvironment, ServiceNode
+from src.core.models import (
+    DiscoveryResult,
+    ServiceEnvironment,
+    ServiceNode,
+    normalize_api_server,
+)
 from src.core.service_ids import IdentityContext
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
@@ -25,6 +30,7 @@ class KubernetesExtractor:
     def __init__(self) -> None:
         self._core_v1_api: client.CoreV1Api | None = None
         self._apps_v1_api: client.AppsV1Api | None = None
+        self._api_server = ""
         try:
             config.load_kube_config()  # type: ignore[no-untyped-call]
         except ConfigException:
@@ -35,6 +41,19 @@ class KubernetesExtractor:
                 return
         self._core_v1_api = client.CoreV1Api()
         self._apps_v1_api = client.AppsV1Api()
+        self._api_server = _normalized_server(
+            str(client.Configuration.get_default_copy().host or "")
+        )
+
+    @property
+    def api_server(self) -> str:
+        """The API server every request goes to, as ``https://<host>:<port>``.
+
+        Blank when no configuration loaded or the server is not an https
+        URL; a blank server never matches a project policy, so the scan
+        cannot vouch for any cluster.
+        """
+        return self._api_server
 
     def verify_access(self, namespace: str) -> tuple[bool, str]:
         """Confirm read access by listing at most one service in a namespace.
@@ -195,6 +214,15 @@ class KubernetesExtractor:
             services, templates, config_maps, namespace, context
         )
         return DiscoveryResult[ServiceEnvironment].from_items(environments, errors)
+
+
+def _normalized_server(host: str) -> str:
+    """Normalize the configured API server, or return "" if it is unusable."""
+    try:
+        return normalize_api_server(host)
+    except ValueError as error:
+        logger.warning("Kubernetes API server cannot identify a cluster: %s", error)
+        return ""
 
 
 def _list_items(

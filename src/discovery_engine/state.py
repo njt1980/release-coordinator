@@ -8,6 +8,7 @@ from src.core.models import (
     ScannedRevision,
     ServiceEnvironment,
     ServiceNode,
+    TelemetryClusterFilter,
 )
 
 
@@ -23,7 +24,9 @@ class DiscoveryGraphState(TypedDict):
     used to resolve ``env:`` dependency references during reconciliation.
     ``environment`` and ``cluster`` are the deployment target being scanned;
     every service FQURI carries them. ``scanned_revisions`` records the
-    commit each repository was read at.
+    commit each repository was read at. ``kubernetes_api_server`` is the API
+    server the manifest scan read and ``telemetry_cluster`` the cluster
+    filter the telemetry query applied; both prove the ``cluster`` label.
     """
 
     tenant: str
@@ -43,3 +46,5 @@ class DiscoveryGraphState(TypedDict):
     scanned_revisions: list[ScannedRevision]
     reconciled_graph: dict[str, object]
     baseline_snapshot_id: str
+    kubernetes_api_server: str
+    telemetry_cluster: TelemetryClusterFilter | None
