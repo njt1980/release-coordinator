@@ -2,7 +2,8 @@
 
 Pure functions over a baseline's ``static_coverage`` and the pull request
 head's coverage. A source file the scanner couldn't read (an unsupported
-language, a read failure) can declare a dependency nobody sees, in any
+language, a read or parse failure) or read without understanding some of
+its references can declare a dependency nobody sees, in any
 service: an unread call into a target would make its caller upstream. So
 every service's coverage counts, not only the radius's, and live traffic
 doesn't substitute for it. A project accepts specific files with a reviewed
@@ -89,6 +90,19 @@ def _describe(files: list[UnscannedFile]) -> str:
     failed = sum(1 for f in files if f.reason is UnscannedReason.READ_FAILED)
     if failed:
         parts.append(f"{failed} unreadable")
+    unparsed = sum(1 for f in files if f.reason is UnscannedReason.PARSE_FAILED)
+    if unparsed:
+        parts.append(f"{unparsed} unparseable")
+    sites = [
+        f"{f.path}:{site.line} {site.kind.value.lower().replace('_', ' ')}"
+        + (f" {site.detail}" if site.detail else "")
+        for f in files
+        if f.reason is UnscannedReason.REFERENCES_NOT_UNDERSTOOD
+        for site in f.sites
+    ]
+    if sites:
+        more_sites = f" (+{len(sites) - _LISTED} more)" if len(sites) > _LISTED else ""
+        parts.append(f"references not understood ({'; '.join(sites[:_LISTED])}{more_sites})")
     sample = ", ".join(f.path for f in files[:_LISTED])
     more = f" (+{len(files) - _LISTED} more)" if len(files) > _LISTED else ""
     return f"{'; '.join(parts)}: {sample}{more}"
@@ -153,10 +167,10 @@ def static_coverage_issues(
                 code=ReasonCode.STATIC_COVERAGE_INCOMPLETE,
                 detail=(
                     f"{service.service_name} ({record.repository}/{service.root or '.'}) "
-                    f"has {len(open_files)} source file(s) the scan couldn't read at "
-                    f"{where} {record.commit_sha[:12]}, so dependencies they declare "
-                    f"are invisible: {_describe(open_files)}. Exempt reviewed files in "
-                    "the project policy (exemptions.unscanned_files)."
+                    f"has {len(open_files)} source file(s) the scan couldn't read or "
+                    f"understand at {where} {record.commit_sha[:12]}, so dependencies "
+                    f"they declare are invisible: {_describe(open_files)}. Exempt "
+                    "reviewed files in the project policy (exemptions.unscanned_files)."
                 ),
             )
         )

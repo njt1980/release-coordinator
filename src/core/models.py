@@ -448,20 +448,64 @@ class UnscannedReason(str, Enum):
         (Rust, Kotlin, C++...); a dependency it declares is invisible.
     READ_FAILED: the file couldn't be read at the scanned commit.
     PARSE_FAILED: a framework configuration file (appsettings*.json,
-        application*.yml/.properties) couldn't be parsed, so its keys are
-        unknown.
+        application*.yml/.properties) or a build file (*.csproj, pom.xml)
+        couldn't be parsed, so its keys or project references are unknown.
+    REFERENCES_NOT_UNDERSTOOD: the file was read, but some references in
+        it can't be followed (see ``OpaqueReferenceSite``), so a dependency
+        it declares there is invisible.
     """
 
     UNSUPPORTED_LANGUAGE = "UNSUPPORTED_LANGUAGE"
     READ_FAILED = "READ_FAILED"
     PARSE_FAILED = "PARSE_FAILED"
+    REFERENCES_NOT_UNDERSTOOD = "REFERENCES_NOT_UNDERSTOOD"
+
+
+class OpaqueReferenceKind(str, Enum):
+    """A reference the scanner read but can't follow.
+
+    DYNAMIC_CONFIG_KEY: a configuration read whose key isn't a literal
+        (``configuration[name]``, ``GetSection($"...")``, ``getProperty(k)``).
+    DYNAMIC_ENV_NAME: an environment read whose name isn't a literal.
+    CLIENT_ADDRESS_EXPRESSION: an HTTP/gRPC client address that is neither
+        a literal nor a configuration or environment read (``BaseAddress``,
+        ``GrpcChannel.ForAddress``, ``WebClient.baseUrl``...).
+    UNBOUND_SECTION: a configuration section bound to an options class
+        (``GetSection("X")``, ``@ConfigurationProperties("x")``) with no
+        keys in the service's configuration files, so its keys are unknown.
+    PROJECT_REFERENCE_UNRESOLVED: a project reference that doesn't resolve
+        to a project in the repository, so the code it pulls in is unread.
+    """
+
+    DYNAMIC_CONFIG_KEY = "DYNAMIC_CONFIG_KEY"
+    DYNAMIC_ENV_NAME = "DYNAMIC_ENV_NAME"
+    CLIENT_ADDRESS_EXPRESSION = "CLIENT_ADDRESS_EXPRESSION"
+    UNBOUND_SECTION = "UNBOUND_SECTION"
+    PROJECT_REFERENCE_UNRESOLVED = "PROJECT_REFERENCE_UNRESOLVED"
+
+
+class OpaqueReferenceSite(BaseModel, frozen=True):
+    """Where in a file a reference wasn't understood.
+
+    ``detail`` names the section or project reference involved (never
+    code or values, which may hold credentials); blank otherwise.
+    """
+
+    line: int = Field(ge=1)
+    kind: OpaqueReferenceKind
+    detail: str = ""
 
 
 class UnscannedFile(BaseModel):
-    """A source file whose dependencies the scanner could not see."""
+    """A source file whose dependencies the scanner could not see.
+
+    ``sites`` lists, for REFERENCES_NOT_UNDERSTOOD, each reference that
+    wasn't understood.
+    """
 
     path: str = Field(min_length=1)
     reason: UnscannedReason
+    sites: List[OpaqueReferenceSite] = Field(default_factory=list)
 
 
 class ServiceCoverage(BaseModel):
@@ -475,7 +519,9 @@ class ServiceCoverage(BaseModel):
     are not code or configuration (images, Markdown...). ``unscanned`` are
     source files whose references are unknown; any makes coverage
     incomplete. Container-image defaults (Dockerfile ``ENV``) are not
-    source files here; see G6 in docs/release-model.md.
+    source files here; see G6 in docs/release-model.md. ``libraries`` are
+    the roots of the shared-library projects the service consumes
+    (directly or transitively); their files count here too.
     """
 
     service_name: str = Field(min_length=1)
@@ -484,6 +530,7 @@ class ServiceCoverage(BaseModel):
     files_excluded: int = Field(ge=0, default=0)
     files_not_source: int = Field(ge=0, default=0)
     unscanned: List[UnscannedFile] = Field(default_factory=list)
+    libraries: List[str] = Field(default_factory=list)
 
     @property
     def complete(self) -> bool:
@@ -491,17 +538,33 @@ class ServiceCoverage(BaseModel):
         return not self.unscanned
 
 
+class SharedLibrary(BaseModel):
+    """A library project whose code ships inside the services that consume it.
+
+    ``root`` is its repository-relative directory, ``project_file`` the
+    build file declaring it, and ``consumers`` the roots of the services
+    that reference it (directly or through other libraries). A change to
+    its files changes each consumer.
+    """
+
+    root: str
+    project_file: str = Field(min_length=1)
+    consumers: List[str] = Field(default_factory=list)
+
+
 class RepositoryCoverage(BaseModel):
     """Scan coverage for every service in one repository at one commit.
 
     ``unowned_source_files`` are source files outside every service
-    directory (shared libraries, tooling); they are reported, not read.
+    directory and every consumed library (tooling, test projects); they
+    are reported, not read. ``libraries`` are the consumed shared libraries.
     """
 
     repository: str = Field(min_length=1)
     commit_sha: str = Field(pattern=GIT_COMMIT_SHA_PATTERN)
     services: List[ServiceCoverage] = Field(default_factory=list)
     unowned_source_files: List[str] = Field(default_factory=list)
+    libraries: List[SharedLibrary] = Field(default_factory=list)
 
 
 class PipelineVariables(BaseModel):
@@ -1103,6 +1166,12 @@ class LiveCoverage(BaseModel):
     allowance, and ``uncovered_services`` are neither.
     ``expired_exemptions`` names radius services whose silent-service entry
     has expired and was ignored.
+
+    ``unscoped_sources`` (None when not checked) counts, per telemetry
+    source name, the rows the cluster filter dropped because they lack the
+    cluster attribute; ``unscoped_services`` maps uncovered radius services
+    to the unscoped source names that look like them. Unscoped rows never
+    count as coverage; they explain why a service looks silent.
     """
 
     edge_count: int = Field(ge=0)
@@ -1112,6 +1181,8 @@ class LiveCoverage(BaseModel):
     silent_services: List[str] = Field(default_factory=list)
     service_last_seen: Dict[str, datetime] = Field(default_factory=dict)
     expired_exemptions: List[str] = Field(default_factory=list)
+    unscoped_sources: Optional[Dict[str, int]] = None
+    unscoped_services: Dict[str, List[str]] = Field(default_factory=dict)
 
 
 class TelemetryStatus(BaseModel):

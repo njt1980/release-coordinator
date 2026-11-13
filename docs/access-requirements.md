@@ -41,6 +41,22 @@ before falling back to the developer's `az login`.
   attributes processor set it). The project policy's `telemetry_cluster`
   names the attribute and value, and only matching rows are counted, so a
   workspace shared by several clusters is safe.
+- Required resource attributes on every dependency row:
+  - the cluster attribute above (`k8s.cluster.name` by default): rows
+    without it are never counted as this cluster's;
+  - `k8s.namespace.name`: without it a source is matched by bare name,
+    which is ambiguous when the name exists in several namespaces;
+  - `service.name` (or the role name Application Insights derives from it):
+    the workload's name as Kubernetes knows it.
+- Application Insights SDKs and the Azure Monitor exporter may map only
+  `service.*` attributes and drop `k8s.*` ones, so those rows are filtered
+  out and a busy service can look silent. Either add the attributes in the
+  application's OpenTelemetry resource (`OTEL_RESOURCE_ATTRIBUTES`, or the
+  Kubernetes attributes processor of an OpenTelemetry Collector in front of
+  the exporter), or fall back to Beyla (eBPF), which sets them without
+  changing the application. When a radius service is uncovered, assessments
+  count the dropped rows by source name and say which uncovered service they
+  look like (`LiveCoverage.unscoped_sources`); the rows still never count.
 - Role assignments can take a few minutes to take effect.
 
 ## Kubernetes (manifest scan)

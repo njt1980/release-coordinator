@@ -12,6 +12,7 @@ from src.coordinator.coverage import radius_shape_findings, static_coverage_issu
 from src.coordinator.policy import decide_release, needs_model
 from src.coordinator.project_policy import (
     live_coverage,
+    with_unscoped_sources,
     live_runtime_state,
     baseline_freshness_issue,
     baseline_scope_issue,
@@ -771,6 +772,13 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         issues.extend(drift_issues)
     now = utc_now()
     coverage = live_coverage(policy, observed, radius, now)
+    if coverage.uncovered_services and not is_mock and policy is not None:
+        coverage = with_unscoped_sources(
+            coverage,
+            extractor.get_unscoped_sources(
+                policy.runtime_lookback_days, policy.telemetry_cluster
+            ),
+        )
     if is_mock:
         runtime_state, why = RuntimeEvidenceState.MOCK, ""
     elif result.status.is_incomplete:

@@ -251,6 +251,39 @@ def live_coverage(
     )
 
 
+def _unscoped_name_matches(source: str, service_name: str) -> bool:
+    """Whether a telemetry source name looks like ``service_name``.
+
+    Exporters may prefix the name with ``service.namespace`` (``shop.orders``
+    or ``shop/orders``).
+    """
+    name = source.strip().lower()
+    return name == service_name or name.endswith(("." + service_name, "/" + service_name))
+
+
+def with_unscoped_sources(coverage: LiveCoverage, unscoped: dict[str, int] | None) -> LiveCoverage:
+    """Attach the unscoped-telemetry diagnostic to ``coverage``.
+
+    Each uncovered radius service is matched by name to the unscoped
+    sources; matches stay uncovered (the cluster scope is never relaxed)
+    but explain why.
+    """
+    if unscoped is None:
+        return coverage
+    matches: dict[str, list[str]] = {}
+    for service in coverage.uncovered_services:
+        try:
+            name = ServiceIdentity.parse(service).service_name
+        except ValueError:
+            continue
+        found = sorted(source for source in unscoped if _unscoped_name_matches(source, name))
+        if found:
+            matches[service] = found
+    return coverage.model_copy(
+        update={"unscoped_sources": dict(unscoped), "unscoped_services": matches}
+    )
+
+
 def _ago(now: datetime, moment: datetime | None) -> str:
     if moment is None:
         return "not seen in the lookback window"
@@ -296,10 +329,20 @@ def live_runtime_state(
             if coverage.expired_exemptions
             else ""
         )
+        unscoped = "".join(
+            f" {service} sends telemetry without the cluster attribute ("
+            + ", ".join(
+                f"{source}: {(coverage.unscoped_sources or {}).get(source, 0)} rows"
+                for source in sources
+            )
+            + "), which is never counted as this cluster's; add the k8s.cluster.name "
+            "and k8s.namespace.name resource attributes (see docs/access-requirements.md)."
+            for service, sources in sorted(coverage.unscoped_services.items())
+        )
         return RuntimeEvidenceState.LIVE_UNCOVERED, (
             f"Every radius service must be seen within {minutes_allowed} minutes; not "
-            f"seen recently enough: {details}.{expired} Allow intentionally quiet "
-            "services under exemptions.silent_services."
+            f"seen recently enough: {details}.{expired}{unscoped} Allow intentionally "
+            "quiet services under exemptions.silent_services."
         )
     return RuntimeEvidenceState.LIVE, ""
 
