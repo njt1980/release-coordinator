@@ -9,6 +9,15 @@
 # PGPASSWORD from the Secret eshop-postgres. The RabbitMQ connection string
 # is shared through the ConfigMap eshop-eventbus (envFrom).
 #
+# The web app calls catalog-api and ordering-api as https+http://<name>:
+# service discovery tries HTTPS first and, in this deployment, its
+# pass-through fallback always answers with https://<name> (configured
+# http endpoints are not used). As eShop expects in production, those two
+# serve HTTPS in the cluster: Kestrel on 8443 (Service port 443) with a
+# certificate from the lab CA in the Secret eshop-tls (create-secrets.sh),
+# and the web app trusts that CA through SSL_CERT_FILE (a bundle of the
+# image's CAs plus the lab CA, built by an init container).
+#
 # Containers listen on 8080 (the .NET image default); each exposed service
 # maps port 80 to it, so http://<name> resolves through cluster DNS as
 # Aspire service discovery does. order-processor and payment-processor are
@@ -201,12 +210,20 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+            - containerPort: 8443
+              name: https
           envFrom:
             - configMapRef:
                 name: eshop-common
             - configMapRef:
                 name: eshop-eventbus
           env:
+            - name: ASPNETCORE_HTTPS_PORTS
+              value: "8443"
+            - name: Kestrel__Certificates__Default__Path
+              value: "/tls/tls.crt"
+            - name: Kestrel__Certificates__Default__KeyPath
+              value: "/tls/tls.key"
             - name: ConnectionStrings__catalogdb
               value: "Host=postgres;Port=5432;Username=postgres;Database=catalogdb"
             - name: PGPASSWORD
@@ -225,8 +242,21 @@ spec:
               memory: 160Mi
             limits:
               memory: 512Mi
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
+      volumes:
+        - name: tls
+          secret:
+            secretName: eshop-tls
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
 ---
 apiVersion: v1
 kind: Service
@@ -240,6 +270,9 @@ spec:
     - port: 80
       targetPort: http
       name: http
+    - port: 443
+      targetPort: https
+      name: https
 ---
 # Ordering.API
 apiVersion: apps/v1
@@ -269,12 +302,20 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+            - containerPort: 8443
+              name: https
           envFrom:
             - configMapRef:
                 name: eshop-common
             - configMapRef:
                 name: eshop-eventbus
           env:
+            - name: ASPNETCORE_HTTPS_PORTS
+              value: "8443"
+            - name: Kestrel__Certificates__Default__Path
+              value: "/tls/tls.crt"
+            - name: Kestrel__Certificates__Default__KeyPath
+              value: "/tls/tls.key"
             - name: ConnectionStrings__orderingdb
               value: "Host=postgres;Port=5432;Username=postgres;Database=orderingdb"
             - name: PGPASSWORD
@@ -295,8 +336,21 @@ spec:
               memory: 160Mi
             limits:
               memory: 512Mi
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
+      volumes:
+        - name: tls
+          secret:
+            secretName: eshop-tls
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
 ---
 apiVersion: v1
 kind: Service
@@ -310,6 +364,9 @@ spec:
     - port: 80
       targetPort: http
       name: http
+    - port: 443
+      targetPort: https
+      name: https
 ---
 # OrderProcessor
 apiVersion: apps/v1
@@ -570,6 +627,19 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1654  # the .NET images' app user
+      initContainers:
+        # The image's CA bundle plus the lab CA, for SSL_CERT_FILE.
+        - name: ca-bundle
+          image: ${ESHOP_REGISTRY}/eshop/webapp:${ESHOP_TAG}
+          command: ["sh", "-c", "cat /etc/ssl/certs/ca-certificates.crt /lab-ca/ca.crt > /ca-bundle/ca-certificates.crt"]
+          volumeMounts:
+            - name: lab-ca
+              mountPath: /lab-ca
+              readOnly: true
+            - name: ca-bundle
+              mountPath: /ca-bundle
+          securityContext:
+            allowPrivilegeEscalation: false
       containers:
         - name: webapp
           image: ${ESHOP_REGISTRY}/eshop/webapp:${ESHOP_TAG}
@@ -582,6 +652,8 @@ spec:
             - configMapRef:
                 name: eshop-eventbus
           env:
+            - name: SSL_CERT_FILE
+              value: "/ca-bundle/ca-certificates.crt"
             - name: services__basket-api__http__0
               value: "http://basket-api"
             - name: services__catalog-api__http__0
@@ -603,8 +675,21 @@ spec:
               memory: 160Mi
             limits:
               memory: 512Mi
+          volumeMounts:
+            - name: ca-bundle
+              mountPath: /ca-bundle
+              readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
+      volumes:
+        - name: lab-ca
+          secret:
+            secretName: eshop-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: ca-bundle
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

@@ -28,7 +28,7 @@ own); these manifests live here, like the lab's telemetry and traffic.
 | `WithReference(postgres database)` | `ConnectionStrings__<db>=Host=postgres;...;Database=<db>` (no password) + `PGPASSWORD` from the Secret |
 | `WithReference(rabbitMq)` | `ConnectionStrings__eventbus=amqp://eventbus:5672` via ConfigMap `eshop-eventbus` (`envFrom`) |
 | `WithReference(redis)` | `ConnectionStrings__redis=redis:6379` |
-| `WithReference(<project>)` | `services__<project>__http__0=http://<project>` and a Service on port 80 |
+| `WithReference(<project>)` | `services__<project>__http__0=http://<project>` and a Service on port 80; for projects called as `https+http://`, also `services__<project>__https__0` (see `services.yaml`) |
 | `WithEnvironment("Identity__Url", ...)` and the callback URLs | the same variables, with in-cluster URLs |
 | `AddForwardedHeaders()` | `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` (ConfigMap `eshop-common`) |
 
@@ -56,6 +56,9 @@ Then:
 ESHOP_REGISTRY=rclab48a7217e.azurecr.io ESHOP_TAG=913acea deploy/lab/eshop/apply.sh --dry-run  # validates, changes nothing
 ESHOP_REGISTRY=rclab48a7217e.azurecr.io ESHOP_TAG=913acea deploy/lab/eshop/apply.sh
 ```
+
+On a fresh cluster the dry run reports the `eshop` namespace as missing
+(a server-side dry run creates nothing); that is expected.
 
 Services restart until PostgreSQL and RabbitMQ are ready, and
 `order-processor` until `ordering-api` has run the ordering migrations.
