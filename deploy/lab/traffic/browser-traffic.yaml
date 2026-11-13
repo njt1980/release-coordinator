@@ -1,0 +1,64 @@
+# Lab-only browser traffic for the AKS Store front ends.
+#
+# virtual-customer and virtual-worker call the back-end services directly,
+# so store-front and store-admin (nginx serving a single-page app and
+# proxying /api/*) never make calls in the lab and live telemetry can't
+# see them. This loop makes the read-only requests a browser would, through
+# the same nginx proxies, so those calls show up as they do in production.
+#
+# Read-only: GET requests only (pages, product lists, the order queue).
+# It never places, updates or completes orders. It runs in its own
+# namespace, which Beyla doesn't instrument and onboarding doesn't scan.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lab-traffic
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: browser-traffic
+  namespace: lab-traffic
+  labels:
+    app: browser-traffic
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: browser-traffic
+  template:
+    metadata:
+      labels:
+        app: browser-traffic
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+      containers:
+        - name: browser-traffic
+          image: curlimages/curl:8.10.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              FRONT=http://store-front.default.svc.cluster.local
+              ADMIN=http://store-admin.default.svc.cluster.local
+              while true; do
+                for url in \
+                  "$FRONT/" "$FRONT/api/products" \
+                  "$ADMIN/" "$ADMIN/api/products" "$ADMIN/api/makeline/order/fetch"; do
+                  curl -s -o /dev/null -m 5 -w "%{http_code} $url\n" "$url" || echo "failed $url"
+                done
+                sleep 15
+              done
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

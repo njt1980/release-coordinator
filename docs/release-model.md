@@ -135,6 +135,18 @@ the onboarding that built a baseline is kept beside the snapshot
 (`GET /api/baselines/{tenant}/{project}/{snapshot}/run-log`). Logs never
 contain credentials.
 
+### Asking the platform
+
+An **Ask** panel on every page answers questions about the platform's own
+evidence (baselines, services and their dependencies, policies, runs and
+their logs, assessments and reason codes). Claude (`claude-opus-5-5`,
+overridable with `ASSISTANT_MODEL`) answers by calling read-only tools; no
+tool approves, exempts, edits a policy or starts a run. It can draft a
+change, such as a policy entry, for review in a pull request. Questions
+send platform metadata (names, paths, policy contents, run logs) to
+Anthropic's API, never source code or credentials; a written data-egress
+policy (G19) is required before anyone else's data goes through it.
+
 ### Blocking reasons
 
 | Code | Meaning |
@@ -180,7 +192,7 @@ fit for an engineer-reviewed pilot, not for gating releases:
 | G16 | The static scanner is heuristic and `SUCCESS` doesn't mean full coverage; pipeline variables are discarded | A missed reference looks like a missing dependency | Coverage accounting per service directory; read pipeline variables | PR 2b |
 | G17 | Jobs are in memory, not safe across replicas, and have no deadlines | Restarts lose assessments; runs can hang | Durable job store with deadlines | Planned |
 | G18 | Nothing enforces the verdict; an assessment never expires or yields to a newer head | A stale approval could be acted on | Required PR/CD check, superseded on a new head, expiry | Planned |
-| G19 | No policy on what is sent to the risk model | Customer code and topology leave the boundary | Model data-egress policy: what is sent, redaction, opt-out | Planned |
+| G19 | No policy on what is sent to the risk model and the Ask assistant | Customer code and topology leave the boundary | Model data-egress policy: what is sent, redaction, opt-out | Planned |
 | G20 | Packaging and operations; dependencies unpinned | Reproducible, supportable installs | Pinned dependencies, container image, runbooks | Planned |
 | G21 | Kubernetes coverage is Services, Deployments, StatefulSets and bare Pods | DaemonSets, Jobs/CronJobs, Ingress and ExternalName services carry dependencies too | Read the remaining workload and routing kinds | Planned |
 
