@@ -54,8 +54,15 @@ function AccessTestResult({ testState }) {
  * card renders its own "Test Access" button and shows `testState`
  * ({ status: "idle" | "loading" | "success" | "error", message }).
  */
+const STATUS_PILL = {
+  success: { text: "Verified", className: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
+  error: { text: "Failed", className: "bg-red-50 text-red-700 ring-red-200" },
+  loading: { text: "Testing", className: "bg-brand-50 text-brand-700 ring-brand-200" },
+};
+
 export default function ScopeInputCard({
   title,
+  eyebrow,
   description,
   requiredRole,
   securityJustification,
@@ -65,42 +72,64 @@ export default function ScopeInputCard({
   children,
 }) {
   const isTesting = testState.status === "loading";
+  const pill = STATUS_PILL[testState.status];
   return (
-    <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-      <header className="mb-4">
-        <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
-        {description && (
-          <p className="mt-1 text-sm text-slate-600">{description}</p>
+    <section
+      className={`rounded-2xl bg-white p-6 shadow-sm ring-1 transition-shadow sm:p-8 ${
+        testState.status === "success" ? "ring-emerald-300" : "ring-slate-200"
+      }`}
+    >
+      <header className="mb-5 flex items-start justify-between gap-4">
+        <div>
+          {eyebrow && (
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+              {eyebrow}
+            </p>
+          )}
+          <h3 className="mt-0.5 text-lg font-semibold text-slate-900">{title}</h3>
+          {description && (
+            <p className="mt-1 text-sm leading-relaxed text-slate-600">{description}</p>
+          )}
+        </div>
+        {pill && (
+          <span
+            className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset ${pill.className}`}
+          >
+            {pill.text}
+          </span>
         )}
       </header>
 
-      <div className="mb-5 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
-        <div className="flex items-center gap-2 text-sm font-medium text-emerald-800">
-          <ShieldIcon className="h-4 w-4 shrink-0" />
-          <span>
-            Required access: <span className="font-semibold">{requiredRole}</span>
+      <details className="group mb-5 rounded-lg bg-slate-50 px-4 py-3 ring-1 ring-inset ring-slate-200">
+        <summary className="flex cursor-pointer list-none items-start gap-2 text-sm text-slate-700 [&::-webkit-details-marker]:hidden">
+          <ShieldIcon className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+          <span className="min-w-0 flex-1">
+            <span className="font-medium text-slate-900">Read-only access:</span> {requiredRole}
           </span>
-        </div>
+          {securityJustification && (
+            <span className="shrink-0 text-xs font-medium text-brand-600 group-open:hidden">Why?</span>
+          )}
+        </summary>
         {securityJustification && (
-          <p className="mt-1.5 pl-6 text-xs leading-relaxed text-slate-500">
+          <p className="mt-2 pl-6 text-xs leading-relaxed text-slate-500">
             {securityJustification}
           </p>
         )}
-      </div>
+      </details>
 
       <div className="space-y-4">{children}</div>
 
       {onTest && (
         <div
           aria-live="polite"
-          className="mt-5 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-start sm:justify-between"
+          className="mt-6 flex flex-col gap-3 border-t border-slate-100 pt-5 sm:flex-row sm:items-start sm:justify-between"
         >
           <AccessTestResult testState={testState} />
           <button
             type="button"
             onClick={onTest}
             disabled={isTesting || testDisabled}
-            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-md border border-indigo-600 px-4 py-2 text-sm font-semibold text-indigo-600 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50 sm:ml-auto"
+            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-brand-700 ring-1 ring-inset ring-brand-200 hover:bg-brand-50 disabled:cursor-not-allowed disabled:opacity-50 sm:ml-auto"
           >
             {isTesting && <Spinner />}
             Test Access
