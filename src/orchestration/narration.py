@@ -338,17 +338,6 @@ def _radius(before: State, update: State) -> list[EventDraft]:
                 [f"{e.subject} ({e.rule}: {e.reason})" for e in exempted],
             )
         )
-    deferred = list(update.get("unset_env_reaches") or [])
-    if deferred:
-        events.append(
-            _event(
-                stage,
-                RunEventStatus.INFO,
-                f"{_plural(len(deferred), 'unset environment variable')} in the radius; "
-                "accepted only if live telemetry covers the radius.",
-                [reach.node for reach in deferred],
-            )
-        )
     return events + _issue_events(stage, before, update)
 
 
@@ -383,19 +372,6 @@ def _live(before: State, update: State) -> list[EventDraft]:
             message = f"Live telemetry is {state.value}; see the reason below."
             level = RunEventStatus.WARNING
         events.append(_event(stage, level, message, details))
-    accepted = list(update.get("exempted_dependencies") or [])[
-        len(before.get("exempted_dependencies") or []) :
-    ]
-    if accepted:
-        events.append(
-            _event(
-                stage,
-                RunEventStatus.PASSED,
-                f"Accepted {_plural(len(accepted), 'unset environment variable')}: live "
-                "telemetry shows where their defaults point.",
-                [e.subject for e in accepted],
-            )
-        )
     return events + _issue_events(stage, before, update)
 
 

@@ -102,8 +102,13 @@ workspace.
 4. **Live check**: query telemetry for the same workspace, cluster filter
    and lookback (`runtime_lookback_days`). Noise is dropped in the backend
    and counted: loopback calls, targets with no host (an HTTP method or a
-   span name), and targets on an ephemeral port (32768 and up: a reply or
-   a broker delivery reported backwards). The result is **live** evidence
+   span name), and messaging deliveries reported backwards (a messaging
+   dependency type with a target port of 32768 and up). A port alone never
+   proves direction, since servers listen high too (gRPC on 50051): any
+   other edge to such a port is kept and marked *direction uncertain*. An
+   uncertain edge whose reverse the baseline already has is a reply and
+   not drift; any other is reported as drift with that qualification.
+   Discovery treats them the same way. The result is **live** evidence
    only when the query returned rows and **each** radius service was seen
    within `max_telemetry_age_minutes`, judged per service so one busy
    service can't make a quiet one look fresh. A service that is quiet by
@@ -155,7 +160,7 @@ policy (G19) is required before anyone else's data goes through it.
 | `BASELINE_UNAVAILABLE`, `BASELINE_STALE`, `BASELINE_SCOPE_MISMATCH` | No baseline, too old, or scanned for another environment/cluster (or not provably the policy's cluster) |
 | `REQUIRED_SOURCE_MISSING` | A discovery source the policy requires did not succeed, or runtime evidence is weaker than required (e.g. live telemetry empty, stale or not covering the radius) |
 | `UNMAPPED_FILES` | Changed files no service owns and the policy doesn't exempt |
-| `DISCOVERY_GAP` | An unresolved entity in the release radius that the policy doesn't exempt or allow as egress (an unset environment variable counts only without live evidence) |
+| `DISCOVERY_GAP` | An unresolved entity in the release radius that the policy doesn't exempt or allow as egress (an unset environment variable included: only a reviewed `exemptions.dependencies` entry accepts it) |
 | `BASELINE_DRIFT` | Live telemetry shows an edge in the radius that the baseline lacks |
 | `DEPENDENCY_CYCLE` | No safe deployment order exists |
 | `COMPATIBILITY_UNVERIFIED` | No evidence that the contract change is compatible |
@@ -173,7 +178,7 @@ a platform capability, not a lab fix.
 | G3 | Fixed telemetry lookback (30 days at onboarding, 7 at assessment) | Bad or removed edges linger for a month | `runtime_lookback_days` in the project policy. **Done (PR 2a-2).** |
 | G4 | Telemetry only from Azure Monitor `AppDependencies` | Teams use Datadog, Grafana Tempo, Prometheus and others | Telemetry adapter interface; Azure Monitor first |
 | G5 | Code only from Azure DevOps | Many teams use GitHub or GitLab | Code-host adapter interface |
-| G6 | A service's evidence isn't reconciled across sources (an environment variable the code scan can't resolve vs the endpoint telemetry observes; differing service names) | Gaps that other evidence already answers still block | Record each edge's sources, and resolve environment-variable references with observed endpoints. **Partly done (PR 2a-2):** a variable that Kubernetes provably doesn't set (`ENVIRONMENT_VARIABLE_UNSET`) is accepted only with live evidence, where drift catches wherever the code's default points. Secret-backed or imported variables are never treated as unset. |
+| G6 | A service's evidence isn't reconciled across sources (an environment variable the code scan can't resolve vs the endpoint telemetry observes; differing service names) | Gaps that other evidence already answers still block | Record each edge's sources, and resolve environment-variable references with observed endpoints. **Partly done (PR 2a-2, revised in 2a-3):** a variable that Kubernetes provably doesn't set is classified `ENVIRONMENT_VARIABLE_UNSET` but stays a gap: live traffic doesn't prove the code path reading it ran, and defaults set in the code or the container image aren't read. Only a reviewed policy exemption accepts it; capturing code defaults and matching them with observed edges is planned for 2b. Secret-backed or imported variables are never treated as unset, and a name any container sets opaquely, or that a later `envFrom` Secret may override, is never treated as resolved. Each resolved value records the workload and container it came from. |
 | G7 | Messaging is modeled as service → broker | The release risk is producer → queue/topic → consumer | Queues and topics as dependency nodes |
 | G8 | No contract analysis | Nothing can be approved (`COMPATIBILITY_UNVERIFIED`) | Compare API and message schemas (OpenAPI, protobuf, JSON Schema) between base and head |
 | G9 | The agent bundle is a lab directory with fixed names | Every cluster differs | A versioned, parameterized bundle (namespaces, connection string) with documented known issues |

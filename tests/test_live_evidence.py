@@ -42,7 +42,7 @@ from src.core.models import (
 )
 from src.discovery_engine import nodes as discovery_nodes
 from src.tools.baseline_store import BaselineScope, StoredBaseline
-from src.tools.k8s_extractor import _container_env, _service_environments
+from src.tools.k8s_extractor import PodTemplate, _container_env, _service_environments
 from src.tools.policy_store import LoadedPolicy, ProjectPolicy, parse_policy
 from src.tools.telemetry_extractor import TelemetryExtractor, build_dependency_query
 from src.tools.telemetry_normalization import DropReason, normalize_edges, normalize_target
@@ -83,7 +83,13 @@ POLICY = parse_policy(POLICY_YAML, BaselineScope(tenant="acme", project_id="shop
 LOADED = LoadedPolicy(policy=POLICY, sha256="0" * 64)
 
 
-def _edge(source: str, target: str, observed_at: datetime = FRESH) -> DependencyEdge:
+def _edge(
+    source: str,
+    target: str,
+    observed_at: datetime = FRESH,
+    dependency_type: str | None = None,
+    direction_uncertain: bool = False,
+) -> DependencyEdge:
     return DependencyEdge(
         source_service_id=source,
         target_service_id=target,
@@ -91,6 +97,8 @@ def _edge(source: str, target: str, observed_at: datetime = FRESH) -> Dependency
         confidence_score=1.0,
         last_observed_at=observed_at,
         provenance="azure_monitor",
+        dependency_type=dependency_type,
+        direction_uncertain=direction_uncertain,
     )
 
 
@@ -113,11 +121,15 @@ class NormalizationTests(unittest.TestCase):
             "GET": DropReason.NO_HOST,
             "CONNECT": DropReason.NO_HOST,
             "/npm": DropReason.NO_HOST,
+            "find orderdb.orders": DropReason.NO_HOST,
             "": DropReason.NO_HOST,
             "127.0.0.1:5432": DropReason.LOOPBACK,
             "localhost:80": DropReason.LOOPBACK,
             "[::1]:80": DropReason.LOOPBACK,
-            "makeline-service:56100": DropReason.EPHEMERAL_PORT,
+            # A high port alone proves nothing about direction (review #1).
+            "makeline-service:56100": "makeline-service:56100",
+            "payments:50051": "payments:50051",
+            "database:40000": "database:40000",
             "https://Registry.NPMjs.org:443/npm?q=1": "registry.npmjs.org:443",
             "http://ledger:8080/x": "ledger:8080",
             "Rabbitmq:5672": "rabbitmq:5672",
@@ -135,20 +147,36 @@ class NormalizationTests(unittest.TestCase):
                 _edge("shop/order", "http://rabbitmq:5672/"),
                 _edge("shop/order", "GET"),
                 _edge("shop/order", "localhost"),
-                _edge("rabbitmq", "order:41000"),
-                _edge("rabbitmq", "order:41001"),
+                _edge("rabbitmq", "order:41000", dependency_type="Queue Message | rabbitmq"),
+                _edge("rabbitmq", "order:41001", dependency_type="AMQP"),
             ]
         )
         self.assertEqual([e.target_service_id for e in kept], ["rabbitmq:5672"])
-        self.assertEqual(dropped, {"no_host": 1, "loopback": 1, "ephemeral_port": 2})
+        self.assertEqual(dropped, {"no_host": 1, "loopback": 1, "reversed_delivery": 2})
+
+    def test_high_port_calls_are_kept_and_qualified(self) -> None:
+        kept, dropped = normalize_edges(
+            [
+                _edge("shop/order", "payments:50051", dependency_type="gRPC"),
+                _edge("shop/order", "database:40000"),
+                _edge("shop/order", "payments:8080", dependency_type="HTTP"),
+            ]
+        )
+        self.assertEqual(dropped, {})
+        self.assertEqual(
+            [(e.target_service_id, e.direction_uncertain) for e in kept],
+            [("payments:50051", True), ("database:40000", True), ("payments:8080", False)],
+        )
 
 
 def _table(rows: list[list[object]]) -> LogsTable:
-    columns = ["Source", "SourceNamespace", "Target", "LastObservedAt", "Calls", "Failures"]
+    columns = [
+        "Source", "SourceNamespace", "Target", "DependencyType", "LastObservedAt", "Calls", "Failures"
+    ]
     return LogsTable(
         name="PrimaryResult",
         columns=columns,
-        columns_types=["string", "string", "string", "datetime", "long", "long"],
+        columns_types=["string", "string", "string", "string", "datetime", "long", "long"],
         rows=rows,
     )
 
@@ -171,6 +199,7 @@ class ExtractorTests(unittest.TestCase):
         query = build_dependency_query(7)
         self.assertIn("Calls=count()", query)
         self.assertIn("Failures=countif(Success == false)", query)
+        self.assertIn("by Source=SourceName, SourceNamespace, Target, DependencyType", query)
 
     def test_metrics_and_drops_come_from_the_query(self) -> None:
         extractor = _azure_extractor(
@@ -178,9 +207,10 @@ class ExtractorTests(unittest.TestCase):
                 tables=[
                     _table(
                         [
-                            ["order", "shop", "rabbitmq:5672", "2026-11-13T11:55:00Z", 90, 9],
-                            ["order", "shop", "GET", "2026-11-13T11:55:00Z", 10, 1],
-                            ["rabbitmq", "shop", "order:45000", "2026-11-13T11:55:00Z", 5, 0],
+                            ["order", "shop", "rabbitmq:5672", "AMQP", "2026-11-13T11:55:00Z", 90, 9],
+                            ["order", "shop", "GET", "HTTP", "2026-11-13T11:55:00Z", 10, 1],
+                            ["rabbitmq", "shop", "order:45000", "Queue Message | rabbitmq",
+                             "2026-11-13T11:55:00Z", 5, 0],
                         ]
                     )
                 ]
@@ -192,7 +222,8 @@ class ExtractorTests(unittest.TestCase):
             [(e.source_service_id, e.target_service_id) for e in result.items],
             [("shop/order", "rabbitmq:5672")],
         )
-        self.assertEqual(extractor.dropped_records, {"no_host": 1, "ephemeral_port": 1})
+        self.assertEqual(extractor.dropped_records, {"no_host": 1, "reversed_delivery": 1})
+        self.assertEqual(result.items[0].dependency_type, "AMQP")
         self.assertEqual(
             extractor.get_runtime_metrics(),
             {
@@ -439,22 +470,14 @@ class TelemetryNodeTests(unittest.TestCase):
         assert status.coverage is not None
         self.assertEqual(status.coverage.newest_observed_at, FRESH)
 
-    def test_unset_env_var_is_accepted_only_with_live_evidence(self) -> None:
-        reach = UnresolvedReach(node="unresolved:env:order/db_url", detail="db_url unset")
+    def test_live_evidence_does_not_accept_unset_env_vars(self) -> None:
+        # Review #3: live traffic shows services are active, not that the
+        # path reading the variable ran. Unset variables are no longer
+        # deferred to the live check; it leaves them alone.
         covered = [_edge("shop/front", "order"), _edge("shop/order", "rabbitmq:5672")]
-
-        live, _ = self._run(covered, unset_env_reaches=[reach])
+        live, _ = self._run(covered)
         self.assertEqual(live["discovery_issues"], [])
-        (exemption,) = live["exempted_dependencies"]  # type: ignore[misc]
-        self.assertEqual(exemption.subject, reach.node)
-
-        stale, _ = self._run(
-            [_edge("shop/front", "order", NOW - timedelta(hours=2))], unset_env_reaches=[reach]
-        )
-        codes = [issue.code for issue in stale["discovery_issues"]]  # type: ignore[union-attr]
-        self.assertEqual(codes, [ReasonCode.REQUIRED_SOURCE_MISSING, ReasonCode.DISCOVERY_GAP])
-        self.assertIn("live_stale", stale["discovery_issues"][1].detail)  # type: ignore[index]
-        self.assertEqual(stale["exempted_dependencies"], [])
+        self.assertNotIn("exempted_dependencies", live)
 
     def test_report_shows_live_coverage(self) -> None:
         update, _ = self._run([_edge("shop/front", "order")])
@@ -469,8 +492,8 @@ class TelemetryNodeTests(unittest.TestCase):
         self.assertEqual(evidence.live_coverage.uncovered_services, [RABBIT])
 
 
-class RadiusDeferralTests(unittest.TestCase):
-    def test_unset_env_vars_in_the_radius_are_deferred(self) -> None:
+class UnsetEnvironmentRadiusTests(unittest.TestCase):
+    def _radius(self, policy: LoadedPolicy = LOADED) -> dict[str, object]:
         unset = UnresolvedEntity(
             entity_id="unresolved:env:order/db_url",
             reference="env:order/db_url",
@@ -492,14 +515,35 @@ class RadiusDeferralTests(unittest.TestCase):
             snapshot_id="20261113T110000000000Z-abcdef12",
             graph=graph,
         )
-        state: Any = {"tenant": "acme", "project_id": "shop", "project_policy": LOADED, "target_services": [ORDER]}
+        state: Any = {"tenant": "acme", "project_id": "shop", "project_policy": policy, "target_services": [ORDER]}
         with patch.object(coordinator_nodes, "load_baseline", return_value=(baseline, None)):
-            update = coordinator_nodes.calculate_static_radius_node(state)
+            return coordinator_nodes.calculate_static_radius_node(state)
 
-        self.assertEqual([r.node for r in update["unset_env_reaches"]], [unset.entity_id])  # type: ignore[union-attr]
+    def test_unset_env_vars_are_gaps_that_explain_why(self) -> None:
+        update = self._radius()
+        gaps = [i.detail for i in update["discovery_issues"] if i.code is ReasonCode.DISCOVERY_GAP]  # type: ignore[union-attr]
+        self.assertEqual(len(gaps), 2)
+        (unset_gap,) = [g for g in gaps if "db_url" in g]
+        self.assertIn("container image", unset_gap)
+        self.assertIn("exemptions.dependencies", unset_gap)
+
+    def test_a_reviewed_exemption_accepts_an_unset_env_var(self) -> None:
+        policy = parse_policy(
+            POLICY_YAML.replace(
+                "exemptions:\n",
+                "exemptions:\n  dependencies:\n    - entity_id: unresolved:env:order/db_url\n"
+                "      reason: reviewed, default points at shop/postgres\n",
+            ),
+            BaselineScope(tenant="acme", project_id="shop"),
+        )
+        update = self._radius(LoadedPolicy(policy=policy, sha256="1" * 64))
         gaps = [i.detail for i in update["discovery_issues"] if i.code is ReasonCode.DISCOVERY_GAP]  # type: ignore[union-attr]
         self.assertEqual(len(gaps), 1)
-        self.assertIn(unknown.entity_id, gaps[0])
+        self.assertIn("queue_url", gaps[0])
+        self.assertEqual(
+            [e.subject for e in update["exempted_dependencies"]],  # type: ignore[union-attr]
+            ["unresolved:env:order/db_url"],
+        )
 
 
 def _env_var(name: str, value: str | None = None, secret: bool = False) -> SimpleNamespace:
@@ -508,7 +552,15 @@ def _env_var(name: str, value: str | None = None, secret: bool = False) -> Simpl
 
 
 def _spec(*env: SimpleNamespace, env_from: list[SimpleNamespace] | None = None) -> SimpleNamespace:
-    return SimpleNamespace(containers=[SimpleNamespace(env=list(env), env_from=env_from or [])])
+    return SimpleNamespace(containers=[SimpleNamespace(name="app", env=list(env), env_from=env_from or [])])
+
+
+def _env_from(config_map: str | None = None, secret: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(
+        secret_ref=object() if secret else None,
+        config_map_ref=SimpleNamespace(name=config_map) if config_map else None,
+        prefix=None,
+    )
 
 
 class UnsetEnvironmentTests(unittest.TestCase):
@@ -520,7 +572,9 @@ class UnsetEnvironmentTests(unittest.TestCase):
 
     def test_container_env_tracks_opaque_names_and_sources(self) -> None:
         env = _container_env(_spec(_env_var("A", "1"), _env_var("TOKEN", secret=True)), {})
-        self.assertEqual((env.pairs, env.opaque, env.has_opaque_sources), ([("A", "1")], {"TOKEN"}, False))
+        self.assertEqual(
+            (env.pairs, env.opaque, env.has_opaque_sources), ([("A", "1", "app:env")], {"TOKEN"}, False)
+        )
         for source in [
             SimpleNamespace(secret_ref=object(), config_map_ref=None),
             SimpleNamespace(secret_ref=None, config_map_ref=SimpleNamespace(name="missing")),
@@ -539,11 +593,60 @@ class UnsetEnvironmentTests(unittest.TestCase):
 
     def test_service_with_conflicting_values_marks_them_opaque(self) -> None:
         service = SimpleNamespace(metadata=SimpleNamespace(name="order"), spec=SimpleNamespace(selector={"app": "order"}))
-        templates = [({"app": "order"}, _spec(_env_var("A", "1"))), ({"app": "order"}, _spec(_env_var("A", "2")))]
+        templates = [
+            PodTemplate({"app": "order"}, "deployment/order", _spec(_env_var("A", "1"))),
+            PodTemplate({"app": "order"}, "deployment/order-canary", _spec(_env_var("A", "2"))),
+        ]
         (environment,) = _service_environments(
             [service], templates, {}, "shop", IdentityContext(tenant="acme", environment="prod", cluster="aks-1")
         )
         self.assertEqual((environment.variables, environment.opaque_variables), ({}, ["A"]))
+
+    def _service_env(self, *specs: SimpleNamespace, config_maps: dict[str, dict[str, str]] | None = None) -> ServiceEnvironment:
+        service = SimpleNamespace(metadata=SimpleNamespace(name="order"), spec=SimpleNamespace(selector={"app": "order"}))
+        templates = [
+            PodTemplate({"app": "order"}, f"deployment/order-{i}", spec) for i, spec in enumerate(specs)
+        ]
+        (environment,) = _service_environments(
+            [service], templates, config_maps or {}, "shop",
+            IdentityContext(tenant="acme", environment="prod", cluster="aks-1"),
+        )
+        return environment
+
+    def test_a_readable_value_beside_an_opaque_one_is_not_definite(self) -> None:
+        # Review #2, first reproduction: one container sets a literal, the
+        # other the same name from a Secret.
+        environment = self._service_env(
+            _spec(_env_var("PAYMENTS_URL", "http://payments")),
+            _spec(_env_var("PAYMENTS_URL", secret=True)),
+        )
+        self.assertEqual(environment.variables, {})
+        self.assertEqual(environment.opaque_variables, ["PAYMENTS_URL"])
+        self.assertFalse(environment.is_unset("PAYMENTS_URL"))
+
+    def test_a_later_secret_env_from_makes_config_map_values_opaque(self) -> None:
+        # Review #2, second reproduction: a Secret imported after a config
+        # map may override any of its keys.
+        maps = {"base": {"PAYMENTS_URL": "http://payments"}, "late": {"QUEUE": "rabbitmq"}}
+        environment = self._service_env(
+            _spec(env_from=[_env_from("base"), _env_from(secret=True), _env_from("late")]),
+            config_maps=maps,
+        )
+        self.assertEqual(environment.variables, {"QUEUE": "rabbitmq"})
+        self.assertEqual(environment.opaque_variables, ["PAYMENTS_URL"])
+        self.assertTrue(environment.has_opaque_sources)
+
+    def test_an_explicit_env_entry_still_wins_over_an_opaque_env_from(self) -> None:
+        maps = {"base": {"PAYMENTS_URL": "http://old"}}
+        environment = self._service_env(
+            _spec(
+                _env_var("PAYMENTS_URL", "http://payments"),
+                env_from=[_env_from("base"), _env_from(secret=True)],
+            ),
+            config_maps=maps,
+        )
+        self.assertEqual(environment.variables, {"PAYMENTS_URL": "http://payments"})
+        self.assertEqual(environment.variable_sources, {"PAYMENTS_URL": ["deployment/order-0/app:env"]})
 
     def test_reconciliation_classifies_unset_and_unknown_variables(self) -> None:
         static_order = ServiceNode(
@@ -604,3 +707,57 @@ class DiscoveryLookbackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DirectionUncertaintyTests(unittest.TestCase):
+    """Review #1: edges to high ports are kept, and qualified, not dropped."""
+
+    def test_reconciliation_drops_only_reversed_sightings_of_known_edges(self) -> None:
+        reply = _edge(RABBIT, ORDER, direction_uncertain=True)
+        grpc = _edge(ORDER, PAYMENTS, direction_uncertain=True)
+        edges = {
+            (ORDER, RABBIT): _edge(ORDER, RABBIT),
+            (RABBIT, ORDER): reply,
+            (ORDER, PAYMENTS): grpc,
+        }
+        kept = discovery_nodes.drop_reversed_sightings(edges)
+        self.assertEqual(
+            [(e.source_service_id, e.target_service_id, e.direction_uncertain) for e in kept],
+            [(ORDER, RABBIT, False), (ORDER, PAYMENTS, True)],
+        )
+
+    def test_merging_with_certain_evidence_clears_the_qualification(self) -> None:
+        merged = discovery_nodes._merge_edge(
+            _edge(ORDER, PAYMENTS, direction_uncertain=True), _edge(ORDER, PAYMENTS)
+        )
+        self.assertFalse(merged.direction_uncertain)
+
+    def test_drift_ignores_reversed_sightings_but_flags_new_uncertain_edges(self) -> None:
+        from src.coordinator.runtime_drift import drift_issue, unbaselined_edges
+
+        observed = [
+            ObservedEdge(source_id=RABBIT, target_id=ORDER, last_observed_at=FRESH, direction_uncertain=True),
+            ObservedEdge(source_id=RABBIT, target_id=PAYMENTS, last_observed_at=FRESH, direction_uncertain=True),
+            ObservedEdge(source_id=PAYMENTS, target_id=ORDER, last_observed_at=FRESH),
+        ]
+        drift = unbaselined_edges(GRAPH, {ORDER, FRONT, RABBIT, PAYMENTS}, observed, set())
+        self.assertEqual(
+            [(e.source_id, e.target_id) for e in drift], [(RABBIT, PAYMENTS), (PAYMENTS, ORDER)]
+        )
+        issue = drift_issue("snap", drift)
+        assert issue is not None
+        self.assertIn("direction uncertain", issue.detail)
+
+    def test_live_edges_are_uncertain_only_if_every_sighting_is(self) -> None:
+        from src.coordinator.runtime_drift import baseline_identity_context, resolve_live_edges
+
+        context = baseline_identity_context("acme", GRAPH)
+        (edge,) = resolve_live_edges(
+            GRAPH,
+            context,
+            [
+                _edge("shop/order", "payments", direction_uncertain=True),
+                _edge("shop/order", "payments"),
+            ],
+        )
+        self.assertFalse(edge.direction_uncertain)

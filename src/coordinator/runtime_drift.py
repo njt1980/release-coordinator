@@ -61,7 +61,8 @@ def resolve_live_edges(
     anything else becomes its unresolved entity ID. A target's bare name
     resolves in its source's namespace, as discovery and in-cluster DNS
     resolve it. Self-edges are dropped and duplicates merged, keeping the
-    latest observation.
+    latest observation; a merged edge's direction is uncertain only if
+    every sighting's was.
     """
     index = IdentityIndex(service.identity for service in graph.services)
     observed: dict[tuple[str, str], ObservedEdge] = {}
@@ -80,10 +81,15 @@ def resolve_live_edges(
             continue
         seen_at = _utc(edge.last_observed_at)
         existing = observed.get((source, target))
-        if existing is None or seen_at > existing.last_observed_at:
-            observed[(source, target)] = ObservedEdge(
-                source_id=source, target_id=target, last_observed_at=seen_at
-            )
+        observed[(source, target)] = ObservedEdge(
+            source_id=source,
+            target_id=target,
+            last_observed_at=(
+                seen_at if existing is None else max(seen_at, existing.last_observed_at)
+            ),
+            direction_uncertain=edge.direction_uncertain
+            and (existing is None or existing.direction_uncertain),
+        )
     return list(observed.values())
 
 
@@ -96,15 +102,23 @@ def unbaselined_edges(
     """Return observed edges touching ``radius`` that the baseline lacks.
 
     An edge counts as known when the baseline has an edge with the same
-    source and target from any discovery method. Edges with an endpoint the
-    project policy exempts (an exempted unresolved entity) are not drift.
+    source and target from any discovery method; an edge whose direction is
+    uncertain also counts as known when the baseline has it reversed (a
+    reply reported in reverse). Edges with an endpoint the project policy
+    exempts (an exempted unresolved entity) are not drift.
     """
     known = {(edge.source_service_id, edge.target_service_id) for edge in graph.edges}
+
+    def is_known(edge: ObservedEdge) -> bool:
+        return (edge.source_id, edge.target_id) in known or (
+            edge.direction_uncertain and (edge.target_id, edge.source_id) in known
+        )
+
     return [
         edge
         for edge in observed
         if (edge.source_id in radius or edge.target_id in radius)
-        and (edge.source_id, edge.target_id) not in known
+        and not is_known(edge)
         and edge.source_id not in exempt_entities
         and edge.target_id not in exempt_entities
     ]
@@ -114,7 +128,12 @@ def drift_issue(snapshot_id: str, edges: list[ObservedEdge]) -> EvidenceIssue | 
     """Return a BASELINE_DRIFT issue naming ``edges``, if there are any."""
     if not edges:
         return None
-    listed = ", ".join(f"{edge.source_id} -> {edge.target_id}" for edge in edges)
+    listed = ", ".join(
+        f"{edge.source_id} -> {edge.target_id}"
+        + (" (direction uncertain: target port in the ephemeral range)"
+           if edge.direction_uncertain else "")
+        for edge in edges
+    )
     return EvidenceIssue(
         code=ReasonCode.BASELINE_DRIFT,
         detail=(
