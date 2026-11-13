@@ -26,6 +26,7 @@ from src.core.models import (
     unresolved_entity_id,
 )
 from src.core.edge_resolution import (
+    pipeline_index,
     resolve_endpoint,
     service_environment_index,
     target_context,
@@ -117,8 +118,11 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     configured, and FAILED when they are configured but no repositories are
     selected. A repository that cannot be scanned makes the stage PARTIAL
     (or FAILED if no repository could be scanned) instead of silently
-    contributing no edges. Each scanned repository's pinned commit is added
-    to ``scanned_revisions``.
+    contributing no edges; a file that can't be read makes it PARTIAL. Each
+    scanned repository's pinned commit is added to ``scanned_revisions``,
+    how completely each service directory was scanned to
+    ``static_coverage``, and what its build pipelines define (read at the
+    same commit) to ``pipeline_variables``.
     """
     if not state.get("devops_org_url") or not state.get("devops_project"):
         return _skipped(state, DiscoveryMethod.STATIC_CODE)
@@ -133,18 +137,23 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     discovered_services = list(state.get("discovered_services", []))
     registered = {_static_key(service) for service in discovered_services}
     scanned_revisions: list[ScannedRevision] = list(state.get("scanned_revisions", []))
+    static_coverage = list(state.get("static_coverage", []))
+    pipeline_variables = list(state.get("pipeline_variables", []))
     statuses: list[DiscoveryStatus] = []
     errors: list[str] = []
     edge_count = 0
 
     for repo_name in state["target_repositories"]:
-        extractor.get_pipeline_variables(repo_name)
         result = extractor.scan_repository(repo_name)
         statuses.append(result.status)
         errors.extend(result.errors)
         scans = []
         for repository_scan in result.items:
             scanned_revisions.append(repository_scan.revision)
+            static_coverage.append(repository_scan.coverage())
+            pipeline_variables.append(
+                extractor.read_pipeline_variables(repo_name, repository_scan.revision)
+            )
             scans.extend(repository_scan.services)
         for scan in scans:
             source_id = context.identity(scan.service.name, scan.service.namespace).uri
@@ -196,6 +205,8 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
         "static_edges": static_edges,
         "discovered_services": discovered_services,
         "scanned_revisions": scanned_revisions,
+        "static_coverage": static_coverage,
+        "pipeline_variables": pipeline_variables,
         "discovery_reports": _append_report(state, report),
     }
 
@@ -212,12 +223,13 @@ def _static_key(service: ServiceNode) -> tuple[str, str | None, str | None]:
 def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
     """Enrich the service baseline with Kubernetes deployment topology.
 
-    During the initial deep dive, this stage will inspect manifests and
-    deployment configuration in the selected namespaces to find deployed
-    services and topology-based relationships. It also records the container
-    environment variables each service's workloads receive
-    (``service_environments``), which reconciliation uses to resolve
-    ``env:`` references. A namespace whose services or workload environments
+    Reads each selected namespace (see
+    ``KubernetesExtractor.get_namespace_topology``): its Services and the
+    workloads no Service selects become service nodes, the container
+    environment each one's workloads receive goes to
+    ``service_environments`` (reconciliation resolves ``env:`` references
+    through it), ExternalName aliases to ``manifest_edges``, and objects
+    outside the supported shape to ``kubernetes_shape``. A namespace whose services or workload environments
     could not be fully read makes the stage PARTIAL. The stage is skipped
     when no namespaces are configured. The API server actually read is
     recorded (``kubernetes_api_server``) so the baseline proves which
@@ -230,19 +242,21 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
     context = identity_context(state)
     discovered_services = list(state.get("discovered_services", []))
     service_environments = list(state.get("service_environments", []))
+    manifest_edges = list(state.get("manifest_edges", []))
+    kubernetes_shape = list(state.get("kubernetes_shape", []))
     statuses: list[DiscoveryStatus] = []
     errors: list[str] = []
     service_count = 0
     for namespace in state["target_namespaces"]:
-        result = extractor.get_namespace_services(namespace, context)
+        result = extractor.get_namespace_topology(namespace, context)
         statuses.append(result.status)
         errors.extend(result.errors)
-        discovered_services.extend(result.items)
-        service_count += len(result.items)
-        env_result = extractor.get_namespace_environments(namespace, context)
-        statuses.append(env_result.status)
-        errors.extend(env_result.errors)
-        service_environments.extend(env_result.items)
+        for topology in result.items:
+            discovered_services.extend(topology.services)
+            service_environments.extend(topology.environments)
+            manifest_edges.extend(topology.edges)
+            kubernetes_shape.extend(topology.findings)
+            service_count += len(topology.services)
     report = DiscoveryStageReport(
         source=DiscoveryMethod.K8S_MANIFEST,
         status=combine_statuses(statuses),
@@ -252,6 +266,8 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
     return {
         "discovered_services": discovered_services,
         "service_environments": service_environments,
+        "manifest_edges": manifest_edges,
+        "kubernetes_shape": kubernetes_shape,
         "kubernetes_api_server": extractor.api_server,
         "discovery_reports": _append_report(state, report),
     }
@@ -493,20 +509,26 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
     environments = service_environment_index(
         list(state.get("service_environments", []))
     )
+    pipelines = pipeline_index(services, list(state.get("pipeline_variables", [])))
 
     unresolved: dict[str, UnresolvedEntity] = {
         entity.entity_id: entity for entity in ambiguous.values()
     }
     merged_edges: dict[tuple[str, str], DependencyEdge] = {}
     static_edges = list(state.get("static_edges", []))
-    for position, edge in enumerate([*static_edges, *state.get("runtime_edges", [])]):
+    edges = [
+        *static_edges,
+        *state.get("runtime_edges", []),
+        *state.get("manifest_edges", []),
+    ]
+    for position, edge in enumerate(edges):
         entity = (
             ambiguous.get(edge.source_service_id)
             if position < len(static_edges)
             else None
         )
         source = entity.entity_id if entity else resolve_endpoint(
-            edge.source_service_id, index, context, environments, unresolved
+            edge.source_service_id, index, context, environments, unresolved, pipelines
         )
         target = resolve_endpoint(
             edge.target_service_id,
@@ -514,6 +536,7 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
             target_context(source, context),
             environments,
             unresolved,
+            pipelines,
         )
         if source == target:
             continue
@@ -593,6 +616,10 @@ def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
                 environment.for_storage()
                 for environment in state.get("service_environments", [])
             ],
+            # Lists, never None: None marks a snapshot predating the record.
+            "static_coverage": list(state.get("static_coverage", [])),
+            "pipeline_variables": list(state.get("pipeline_variables", [])),
+            "kubernetes_shape": list(state.get("kubernetes_shape", [])),
         }
     )
     scope = BaselineScope(

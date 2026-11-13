@@ -20,7 +20,16 @@ from azure.identity import DefaultAzureCredential
 from msrest.authentication import BasicTokenAuthentication
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from src.core.models import DiscoveryResult, ScannedRevision
+from src.core.models import (
+    DiscoveryResult,
+    PipelineVariables,
+    RepositoryCoverage,
+    ScannedRevision,
+    ServiceCoverage,
+    UnscannedFile,
+    UnscannedReason,
+    storable_pipeline_value,
+)
 from src.core.env_names import is_endpoint_variable
 from src.core.service_ids import env_var_reference, is_private_dns_host
 from src.tools._timeout import (
@@ -53,7 +62,24 @@ _TEXT_FILE_SUFFIXES = {
     ".xml",
     ".yaml",
     ".yml",
+    # JavaScript-family files the JavaScript patterns already read.
+    ".cjs",
+    ".jsx",
+    ".mjs",
+    ".svelte",
+    ".tsx",
+    ".vue",
 }
+# Source code the scanner can't read: a dependency declared in one of these
+# files is invisible, so the file makes its service's coverage incomplete.
+_UNSUPPORTED_SOURCE_SUFFIXES: Final[frozenset[str]] = frozenset(
+    {
+        ".c", ".cc", ".clj", ".cpp", ".cxx", ".dart", ".erl", ".ex", ".exs",
+        ".fs", ".fsx", ".groovy", ".h", ".hpp", ".hs", ".jl", ".kt", ".kts",
+        ".lua", ".m", ".ml", ".nim", ".pl", ".pm", ".r", ".rs", ".scala",
+        ".swift", ".vb", ".zig",
+    }
+)
 _URL_PATTERN = re.compile(r"""https?://[^\s"'<>)}\]`]+""", re.IGNORECASE)
 _EXCLUDED_DIRECTORIES = {
     ".git",
@@ -172,6 +198,7 @@ class ServiceScan(BaseModel):
 
     service: ServiceBoundary
     references: list[EndpointReference] = Field(default_factory=list)
+    coverage: ServiceCoverage | None = None
 
 
 class RepositoryScan(BaseModel):
@@ -179,6 +206,16 @@ class RepositoryScan(BaseModel):
 
     revision: ScannedRevision
     services: list[ServiceScan] = Field(default_factory=list)
+    unowned_source_files: list[str] = Field(default_factory=list)
+
+    def coverage(self) -> RepositoryCoverage:
+        """Return the scan's coverage record, as a snapshot stores it."""
+        return RepositoryCoverage(
+            repository=self.revision.repository,
+            commit_sha=self.revision.commit_sha,
+            services=[scan.coverage for scan in self.services if scan.coverage],
+            unowned_source_files=self.unowned_source_files,
+        )
 
 
 class CommitComparison(BaseModel):
@@ -326,21 +363,43 @@ def _path_segments(path: str) -> list[str]:
     return [segment for segment in path.split("/") if segment]
 
 
-def _is_scannable_path(path: str) -> bool:
-    """Return True for application or configuration source files.
+class FileClass(str, Enum):
+    """How the scanner treats one repository file.
 
-    Documentation, dependency/vendor trees, build output, and lock files are
-    skipped because they mostly reference third-party sites.
+    SCANNED: application or configuration source the scanner reads.
+    EXCLUDED: skipped by design (documentation, vendored dependencies,
+        build output, lock files), which mostly reference third-party sites.
+    UNSUPPORTED: source code in a language the scanner can't read.
+    NOT_SOURCE: anything else (images, Markdown, licenses...).
     """
+
+    SCANNED = "SCANNED"
+    EXCLUDED = "EXCLUDED"
+    UNSUPPORTED = "UNSUPPORTED"
+    NOT_SOURCE = "NOT_SOURCE"
+
+
+def classify_path(path: str) -> FileClass:
+    """Classify a repository file for scanning and coverage accounting."""
     segments = [segment.lower() for segment in _path_segments(path)]
-    if not segments or _EXCLUDED_DIRECTORIES.intersection(segments[:-1]):
-        return False
+    if not segments:
+        return FileClass.NOT_SOURCE
     filename = segments[-1]
-    if filename in _EXCLUDED_FILENAMES:
-        return False
+    if _EXCLUDED_DIRECTORIES.intersection(segments[:-1]) or filename in _EXCLUDED_FILENAMES:
+        return FileClass.EXCLUDED
     if filename == ".env" or filename.startswith(".env."):
-        return True
-    return os.path.splitext(filename)[1] in _TEXT_FILE_SUFFIXES
+        return FileClass.SCANNED
+    suffix = os.path.splitext(filename)[1]
+    if suffix in _TEXT_FILE_SUFFIXES:
+        return FileClass.SCANNED
+    if suffix in _UNSUPPORTED_SOURCE_SUFFIXES:
+        return FileClass.UNSUPPORTED
+    return FileClass.NOT_SOURCE
+
+
+def _is_scannable_path(path: str) -> bool:
+    """Return True for application or configuration source files."""
+    return classify_path(path) is FileClass.SCANNED
 
 
 def _dns_label(name: str) -> str | None:
@@ -502,6 +561,169 @@ def _extract_references(
     return references
 
 
+# A script setting a pipeline variable at run time: ##vso[task.setvariable variable=X]
+_SET_VARIABLE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"##vso\[task\.setvariable\b[^\]]*?\bvariable=([A-Za-z_][\w.-]*)", re.IGNORECASE
+)
+_PIPELINE_EXPRESSION_MARKERS: Final[tuple[str, ...]] = ("$(", "${{", "$[")
+
+
+class PipelineCollector:
+    """Variables gathered across a repository's pipeline definitions.
+
+    ``values`` maps a name to every literal value it was given, with where;
+    a name with several values, or any non-literal one, ends up opaque.
+    """
+
+    def __init__(self) -> None:
+        self.values: dict[str, dict[str, set[str]]] = {}
+        self.opaque: set[str] = set()
+        self.opaque_sources: set[str] = set()
+
+    def define(self, name: object, value: object, source: str) -> None:
+        """Record ``name`` defined as ``value`` (opaque unless a literal)."""
+        key = str(name).strip()
+        if not key:
+            return
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            self.opaque.add(key)
+            return
+        text = str(value)
+        if any(marker in text for marker in _PIPELINE_EXPRESSION_MARKERS):
+            self.opaque.add(key)
+            return
+        self.values.setdefault(key, {}).setdefault(text, set()).add(source)
+
+    def result(self, repository: str, commit_sha: str) -> PipelineVariables:
+        """Return the stored form: endpoint values kept, others by name only."""
+        opaque = set(self.opaque) | {
+            name for name, found in self.values.items() if len(found) > 1
+        }
+        variables: dict[str, str] = {}
+        sources: dict[str, list[str]] = {}
+        withheld: set[str] = set()
+        for name, found in self.values.items():
+            if name in opaque:
+                continue
+            (value, where), = found.items()
+            kept = storable_pipeline_value(name, value)
+            if kept is None:
+                withheld.add(name)
+            else:
+                variables[name] = kept
+                sources[name] = sorted(where)
+        return PipelineVariables(
+            repository=repository,
+            commit_sha=commit_sha,
+            variables=variables,
+            variable_sources=sources,
+            withheld_variables=sorted(withheld),
+            opaque_variables=sorted(opaque),
+            opaque_sources=sorted(self.opaque_sources),
+        )
+
+
+def collect_yaml_variables(content: str, source: str, collected: PipelineCollector) -> None:
+    """Collect the variables a pipeline YAML file defines.
+
+    ``variables`` blocks are read wherever they appear (pipeline, stage,
+    job), in mapping or list form. Variable groups and templates may define
+    any name, so they are opaque sources; a variable under a conditional
+    (``${{ if }}``), a macro or expression value, or a name a script sets
+    (``##vso[task.setvariable]``) is opaque.
+    """
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError:
+        collected.opaque_sources.add(f"{source}: not valid YAML")
+        return
+    _walk_pipeline(document, source, collected)
+    collected.opaque.update(_SET_VARIABLE_PATTERN.findall(content))
+
+
+def _walk_pipeline(node: object, source: str, collected: PipelineCollector) -> None:
+    if isinstance(node, list):
+        for item in node:
+            _walk_pipeline(item, source, collected)
+        return
+    if not isinstance(node, dict):
+        return
+    for key, value in node.items():
+        if key == "variables":
+            _variables_block(value, source, collected)
+        elif key == "template" and isinstance(value, str):
+            collected.opaque_sources.add(f"{source}: template {value}")
+        else:
+            _walk_pipeline(value, source, collected)
+
+
+def _variables_block(block: object, source: str, collected: PipelineCollector) -> None:
+    if isinstance(block, dict):
+        for name, value in block.items():
+            if str(name).startswith("${{"):
+                _conditional_variables(value, source, collected)
+            else:
+                collected.define(name, value, source)
+    elif isinstance(block, list):
+        for entry in block:
+            if not isinstance(entry, dict):
+                continue
+            if "group" in entry:
+                collected.opaque_sources.add(f"{source}: variable group {entry['group']}")
+            elif "template" in entry:
+                collected.opaque_sources.add(f"{source}: template {entry['template']}")
+            elif "name" in entry:
+                collected.define(entry["name"], entry.get("value"), source)
+            else:
+                for name, value in entry.items():
+                    if str(name).startswith("${{"):
+                        _conditional_variables(value, source, collected)
+    elif block is not None:
+        collected.opaque_sources.add(f"{source}: variables in an unrecognized form")
+
+
+def _conditional_variables(block: object, source: str, collected: PipelineCollector) -> None:
+    """Variables inserted under a template condition: set or not, opaque."""
+    inner = PipelineCollector()
+    _variables_block(block, source, inner)
+    collected.opaque.update(inner.values, inner.opaque)
+    collected.opaque_sources.update(inner.opaque_sources)
+
+
+def collect_definition_variables(
+    definition: Any, label: str, collected: PipelineCollector
+) -> None:
+    """Collect variables and variable groups set on a pipeline definition.
+
+    Secret variables and ones settable at queue time are opaque.
+    """
+    for name, variable in (getattr(definition, "variables", None) or {}).items():
+        if getattr(variable, "is_secret", False) or getattr(variable, "allow_override", False):
+            collected.opaque.add(str(name))
+        else:
+            collected.define(name, getattr(variable, "value", None), f"{label} (definition)")
+    for group in getattr(definition, "variable_groups", None) or []:
+        name = getattr(group, "name", None) or getattr(group, "id", None) or "?"
+        collected.opaque_sources.add(f"{label}: variable group {name}")
+
+
+_SOURCE_CLASSES: Final[frozenset[FileClass]] = frozenset(
+    {FileClass.SCANNED, FileClass.UNSUPPORTED}
+)
+
+
+def _count(coverage: ServiceCoverage, path: str, file_class: FileClass) -> None:
+    """Account for a file the scan does not read."""
+    if file_class is FileClass.EXCLUDED:
+        coverage.files_excluded += 1
+    elif file_class is FileClass.UNSUPPORTED:
+        coverage.unscanned.append(
+            UnscannedFile(path=path.lstrip("/"), reason=UnscannedReason.UNSUPPORTED_LANGUAGE)
+        )
+    else:
+        coverage.files_not_source += 1
+
+
 class DevOpsExtractor:
     """Read-only client boundary for DevOps pipeline and repository data."""
 
@@ -587,55 +809,6 @@ class DevOpsExtractor:
         return b"".join(content).decode("utf-8", errors="replace")
 
     @staticmethod
-    def _parse_yaml_variables(content: str) -> dict[str, str]:
-        variables: dict[str, str] = {}
-        lines = content.splitlines()
-        section_start = next(
-            (
-                index
-                for index, line in enumerate(lines)
-                if re.match(r"^variables\s*:", line)
-            ),
-            None,
-        )
-        if section_start is None:
-            return variables
-
-        pending_name: str | None = None
-        for line in lines[section_start + 1 :]:
-            if not line.strip() or line.lstrip().startswith("#"):
-                continue
-            indent = len(line) - len(line.lstrip())
-            if indent == 0:
-                break
-
-            list_entry = re.match(r"^\s*-\s*name\s*:\s*(.+?)\s*$", line)
-            if list_entry:
-                pending_name = list_entry.group(1).strip("\"'")
-                continue
-
-            value_entry = re.match(r"^\s+value\s*:\s*(.*?)\s*$", line)
-            if pending_name and value_entry:
-                value = value_entry.group(1).strip()
-                variables[pending_name] = value.strip("\"'")
-                pending_name = None
-                continue
-
-            mapping_entry = re.match(
-                r"^\s*(?:-\s*)?([A-Za-z_][\w.-]*)\s*:\s*(.*?)\s*$", line
-            )
-            if mapping_entry and mapping_entry.group(1) not in {
-                "name",
-                "value",
-                "group",
-            }:
-                key, value = mapping_entry.groups()
-                variables[key] = value.strip().strip("\"'")
-                pending_name = None
-
-        return variables
-
-    @staticmethod
     def _find_repository(git_client: Any, project: str, repo_name: str) -> Any:
         return next(
             (
@@ -646,73 +819,72 @@ class DevOpsExtractor:
             None,
         )
 
-    def get_pipeline_variables(self, repo_name: str) -> dict[str, str]:
-        """Return the configured variables for a repository's pipeline.
+    def read_pipeline_variables(
+        self, repo_name: str, revision: ScannedRevision
+    ) -> PipelineVariables:
+        """Return what the repository's build pipelines define.
 
-        This method is intended to read pipeline configuration only. It must
-        not create, update, or delete pipelines, variables, or repository data.
-
-        Args:
-            repo_name: Name of the repository whose pipeline variables to read.
-
-        Returns:
-            A mapping of pipeline variable names to their string values.
+        Read-only. Every pipeline definition bound to the repository is
+        read: its YAML file at ``revision`` (see
+        ``collect_yaml_variables``) and the variables and variable groups
+        set on the definition. Secret and queue-time-settable definition
+        variables are opaque, as are variable groups and YAML that lives in
+        another repository. Never raises: when the pipelines can't be read
+        the result is ``readable=False`` with the error, so no variable of
+        this repository is ever treated as provably unset.
         """
         try:
             build_client, git_client, project = self._get_clients()
-            source_repository = self._find_repository(
-                git_client, project, repo_name
-            )
-            if source_repository is None:
-                logger.warning(
-                    "Azure DevOps repository %s was not found", repo_name
-                )
-                return {}
-
+            repository = self._find_repository(git_client, project, repo_name)
+            if repository is None:
+                return PipelineVariables.unreadable(repo_name, "repository was not found")
             definitions = build_client.get_definitions(
                 project=project,
-                repository_id=source_repository.id,
-                repository_type=getattr(source_repository, "type", "TfsGit"),
+                repository_id=repository.id,
+                repository_type=getattr(repository, "type", None) or "TfsGit",
             )
-            if not definitions:
-                logger.warning(
-                    "No Azure DevOps pipeline definitions found for repository %s",
-                    repo_name,
-                )
-                return {}
-
-            variables: dict[str, str] = {}
-            for definition_summary in definitions:
+            collected = PipelineCollector()
+            for summary in definitions or []:
                 definition = build_client.get_definition(
-                    definition_id=definition_summary.id, project=project
+                    definition_id=summary.id, project=project
                 )
-                process = getattr(definition, "process", None)
-                yaml_filename = getattr(process, "yaml_filename", None)
-                if yaml_filename:
-                    definition_repository = getattr(
-                        definition, "repository", None
-                    )
-                    repository_id = (
-                        getattr(definition_repository, "id", None)
-                        or source_repository.id
-                    )
-                    if repository_id:
-                        yaml_content = self._read_item_content(
-                            git_client, repository_id, yaml_filename, project
-                        )
-                        variables.update(self._parse_yaml_variables(yaml_content))
+                label = f"pipeline {getattr(definition, 'name', None) or summary.id}"
+                self._collect_definition_yaml(
+                    git_client, repository, project, revision, definition, label, collected
+                )
+                collect_definition_variables(definition, label, collected)
+            return collected.result(repo_name, revision.commit_sha)
+        except Exception as error:
+            logger.warning("Cannot read pipeline variables of %s: %s", repo_name, error)
+            return PipelineVariables.unreadable(repo_name, str(error))
 
-                definition_variables = getattr(definition, "variables", None) or {}
-                for name, variable in definition_variables.items():
-                    value = getattr(variable, "value", None)
-                    if value is not None and not getattr(variable, "is_secret", False):
-                        variables[name] = str(value)
-            return variables
-        except Exception:
-            logger.exception(
-                "Failed to read pipeline variables for repository %s", repo_name
+    def _collect_definition_yaml(
+        self,
+        git_client: Any,
+        repository: Any,
+        project: str,
+        revision: ScannedRevision,
+        definition: Any,
+        label: str,
+        collected: "PipelineCollector",
+    ) -> None:
+        """Collect the variables a YAML pipeline's file defines at ``revision``."""
+        yaml_filename = getattr(getattr(definition, "process", None), "yaml_filename", None)
+        if not yaml_filename:
+            return
+        bound_to = getattr(getattr(definition, "repository", None), "id", None)
+        if bound_to and bound_to != repository.id:
+            collected.opaque_sources.add(f"{label}: YAML in another repository")
+            return
+        try:
+            content = self._read_item_content(
+                git_client, repository.id, yaml_filename, project, revision.commit_sha
             )
-            return {}
+        except Exception as error:
+            logger.warning("Cannot read %s at %s: %s", yaml_filename, revision.commit_sha, error)
+            collected.opaque_sources.add(f"{label}: {yaml_filename} unreadable at the commit")
+            return
+        collect_yaml_variables(content, f"{label} ({yaml_filename.lstrip('/')})", collected)
 
     def compare_commits(
         self, repo_name: str, base: str, target: str
@@ -894,15 +1066,36 @@ class DevOpsExtractor:
             references: dict[str, dict[tuple[ReferenceKind, str], EndpointReference]] = {
                 boundary.root: {} for boundary in boundaries
             }
+            coverage = {
+                boundary.root: ServiceCoverage(service_name=boundary.name, root=boundary.root)
+                for boundary in boundaries
+            }
+            unowned: list[str] = []
+            errors: list[str] = []
             for path in file_paths:
-                if path == RELEASE_COORD_MANIFEST_PATH or not _is_scannable_path(path):
+                if path == RELEASE_COORD_MANIFEST_PATH:
                     continue
+                file_class = classify_path(path)
                 owner = _owning_boundary(path, boundaries)
                 if owner is None:
+                    if only_roots is None and file_class in _SOURCE_CLASSES:
+                        unowned.append(path.lstrip("/"))
                     continue
-                content = self._read_item_content(
-                    git_client, repository.id, path, project, commit_sha
-                )
+                if file_class is not FileClass.SCANNED:
+                    _count(coverage[owner.root], path, file_class)
+                    continue
+                try:
+                    content = self._read_item_content(
+                        git_client, repository.id, path, project, commit_sha
+                    )
+                except Exception as error:
+                    logger.warning("Cannot read %s in %s: %s", path, repo_name, error)
+                    errors.append(f"{repo_name}: cannot read {path}: {error}")
+                    coverage[owner.root].unscanned.append(
+                        UnscannedFile(path=path.lstrip("/"), reason=UnscannedReason.READ_FAILED)
+                    )
+                    continue
+                coverage[owner.root].files_scanned += 1
                 for reference in _extract_references(content, owner.name, path):
                     references[owner.root].setdefault(
                         (reference.kind, reference.endpoint), reference
@@ -912,11 +1105,17 @@ class DevOpsExtractor:
                 ServiceScan(
                     service=boundary,
                     references=list(references[boundary.root].values()),
+                    coverage=coverage[boundary.root],
                 )
                 for boundary in boundaries
             ]
-            return DiscoveryResult[RepositoryScan].success(
-                [RepositoryScan(revision=revision, services=scans)]
+            return DiscoveryResult[RepositoryScan].from_items(
+                [
+                    RepositoryScan(
+                        revision=revision, services=scans, unowned_source_files=unowned
+                    )
+                ],
+                errors,
             )
         except Exception as error:
             logger.exception("Failed to scan repository %s", repo_name)

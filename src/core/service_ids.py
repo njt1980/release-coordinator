@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, ValidationError
 from src.core.models import (
     IDENTITY_SEGMENT_PATTERN,
     UNKNOWN_LABEL,
+    PipelineVariables,
     ServiceEnvironment,
     ServiceIdentity,
     UnresolvedEntity,
@@ -288,12 +289,15 @@ def is_unset_env_var_reference(
     environments: Mapping[str, ServiceEnvironment],
     index: IdentityIndex,
     context: IdentityContext,
+    pipelines: Mapping[str, PipelineVariables] | None = None,
 ) -> bool:
     """Whether ``env:<service>/<VARIABLE>`` names a variable provably unset.
 
     The owning service must resolve to exactly one registered service whose
     Kubernetes environment was read, and that environment must neither set
-    the variable (readably or opaquely) nor import sources that could.
+    the variable (readably or opaquely) nor import sources that could. When
+    ``pipelines`` (by service FQURI) is given, the service's repository
+    pipelines must not define it either: a build can bake it into the image.
     """
     parsed = parse_env_var_reference(reference)
     if parsed is None:
@@ -301,7 +305,10 @@ def is_unset_env_var_reference(
     service_name, variable = parsed
     owner = resolve_reference(service_name, index, context)
     environment = environments.get(owner.uri) if owner else None
-    return environment is not None and environment.is_unset(variable)
+    if environment is None or not environment.is_unset(variable):
+        return False
+    pipeline = pipelines.get(owner.uri) if pipelines is not None and owner else None
+    return pipeline is None or not pipeline.may_define(variable)
 
 
 def classify_unresolved(reference: str) -> UnresolvedEntityKind:

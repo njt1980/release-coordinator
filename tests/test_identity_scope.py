@@ -320,8 +320,7 @@ class DiscoveryScopeTests(unittest.TestCase):
         with patch.object(discovery_nodes, "KubernetesExtractor") as k8s_cls:
             extractor = k8s_cls.return_value
             extractor.api_server = "https://aks-1.example.io:443"
-            extractor.get_namespace_services.return_value = DiscoveryResult.success([])
-            extractor.get_namespace_environments.return_value = DiscoveryResult.success([])
+            extractor.get_namespace_topology.return_value = DiscoveryResult.success([])
             result = discovery_nodes.extract_k8s_topology(self._state())
         self.assertEqual(result["kubernetes_api_server"], "https://aks-1.example.io:443")
 

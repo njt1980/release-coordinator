@@ -11,7 +11,16 @@ the head declares.
 
 from typing import Any
 
-from src.core.models import DiscoveryResult, ScannedRevision
+from collections.abc import Iterable
+
+from src.core.models import (
+    DiscoveryResult,
+    RepositoryCoverage,
+    ScannedRevision,
+    ServiceCoverage,
+    ServiceNode,
+    UnscannedFile,
+)
 from src.tools.devops_extractor import (
     BoundarySource,
     CommitComparison,
@@ -21,6 +30,34 @@ from src.tools.devops_extractor import (
     ServiceBoundary,
     ServiceScan,
 )
+
+
+def coverage_for(
+    services: Iterable[ServiceNode],
+    commit_sha: str = "a" * 40,
+    unscanned: dict[tuple[str, str], list[UnscannedFile]] | None = None,
+) -> list[RepositoryCoverage]:
+    """Full coverage records for every repository-scanned service, with
+    ``unscanned`` (by repository and service root) marking files the scan
+    couldn't read."""
+    by_repository: dict[str, list[ServiceCoverage]] = {}
+    for service in services:
+        repository = service.metadata.get("repository")
+        if repository is None:
+            continue
+        root = service.metadata.get("service_root", "")
+        by_repository.setdefault(repository, []).append(
+            ServiceCoverage(
+                service_name=service.name,
+                root=root,
+                files_scanned=1,
+                unscanned=(unscanned or {}).get((repository, root), []),
+            )
+        )
+    return [
+        RepositoryCoverage(repository=repository, commit_sha=commit_sha, services=records)
+        for repository, records in by_repository.items()
+    ]
 
 
 def sha(prefix: str) -> str:
@@ -49,6 +86,7 @@ class FakeDevOps:
         fail_scan: bool = False,
         missing_roots: set[str] | None = None,
         branch: list[str] | None = None,
+        head_unscanned: dict[str, list[UnscannedFile]] | None = None,
     ) -> None:
         self.history = [sha(c) for c in history]
         self.branch = [sha(c) for c in branch or []]
@@ -58,6 +96,7 @@ class FakeDevOps:
         self.fail_compare = fail_compare
         self.fail_scan = fail_scan
         self.missing_roots = missing_roots or set()
+        self.head_unscanned = head_unscanned or {}
         self.scanned: list[tuple[ScannedRevision | None, set[str] | None]] = []
 
     def __call__(self, **_: Any) -> "FakeDevOps":
@@ -109,6 +148,12 @@ class FakeDevOps:
                     source=BoundarySource.MARKER,
                 ),
                 references=self.head_references.get(root, []),
+                coverage=ServiceCoverage(
+                    service_name=root.rsplit("/", 1)[-1] or "monorepo",
+                    root=root,
+                    files_scanned=1,
+                    unscanned=self.head_unscanned.get(root, []),
+                ),
             )
             for root in sorted(only_roots or set())
             if root not in self.missing_roots

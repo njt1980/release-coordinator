@@ -273,11 +273,17 @@ class SourceControl(_StrictModel):
 
 
 class Exemptions(_StrictModel):
-    """Explicit allowlist of evidence gaps a project accepts, each justified."""
+    """Explicit allowlist of evidence gaps a project accepts, each justified.
+
+    ``unscanned_files`` are source files the static scan can't read (an
+    unsupported language) whose dependencies a reviewer has checked; the
+    same path globs as ``files``.
+    """
 
     files: list[FileExemption] = Field(default_factory=list)
     dependencies: list[DependencyExemption] = Field(default_factory=list)
     silent_services: list[SilentServiceExemption] = Field(default_factory=list)
+    unscanned_files: list[FileExemption] = Field(default_factory=list)
 
 
 class ProjectPolicy(_StrictModel):

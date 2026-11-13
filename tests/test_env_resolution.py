@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from src.core.models import (
+    DiscoveryResult,
     DependencyEdge,
     DiscoveryMethod,
     DiscoveryStatus,
@@ -107,8 +108,19 @@ def _extractor(core: object | None, apps: object | None) -> KubernetesExtractor:
     extractor = KubernetesExtractor.__new__(KubernetesExtractor)
     extractor._core_v1_api = core  # type: ignore[assignment]
     extractor._apps_v1_api = apps  # type: ignore[assignment]
+    extractor._batch_v1_api = MagicMock() if apps is not None else None  # type: ignore[assignment]
     extractor._api_server = "https://aks-1.example.azmk8s.io:443"
     return extractor
+
+
+def _environments(extractor: KubernetesExtractor) -> DiscoveryResult[ServiceEnvironment]:
+    """The namespace's service environments, with the topology read's status."""
+    result = extractor.get_namespace_topology("default", CONTEXT)
+    return DiscoveryResult[ServiceEnvironment](
+        status=result.status,
+        items=[env for topology in result.items for env in topology.environments],
+        errors=result.errors,
+    )
 
 
 def _order_service_apis() -> tuple[MagicMock, MagicMock]:
@@ -137,9 +149,7 @@ def _order_service_apis() -> tuple[MagicMock, MagicMock]:
 
 class KubernetesEnvironmentExtractionTests(unittest.TestCase):
     def test_reads_literal_and_config_map_values_per_selected_service(self) -> None:
-        result = _extractor(*_order_service_apis()).get_namespace_environments(
-            "default", CONTEXT
-        )
+        result = _environments(_extractor(*_order_service_apis()))
 
         self.assertEqual(result.status, S.SUCCESS)
         self.assertEqual(
@@ -175,7 +185,7 @@ class KubernetesEnvironmentExtractionTests(unittest.TestCase):
                 _pod("job-abc", {"app": "job"}, _env("API_URL", "http://x:80"), owned=True),
             ],
         )
-        result = _extractor(core, apps).get_namespace_environments("default", CONTEXT)
+        result = _environments(_extractor(core, apps))
 
         self.assertEqual(
             {env.service_id: env.variables for env in result.items},
@@ -194,7 +204,7 @@ class KubernetesEnvironmentExtractionTests(unittest.TestCase):
             ],
         )
         with self.assertLogs("src.tools.k8s_extractor", level="WARNING"):
-            result = _extractor(core, apps).get_namespace_environments("default", CONTEXT)
+            result = _environments(_extractor(core, apps))
 
         self.assertEqual(result.items[0].variables, {"Q_HOST": "q"})
 
@@ -212,7 +222,7 @@ class KubernetesEnvironmentExtractionTests(unittest.TestCase):
             ],
             config_maps=[_config_map("cfg", {"other": "x"})],
         )
-        result = _extractor(core, apps).get_namespace_environments("default", CONTEXT)
+        result = _environments(_extractor(core, apps))
 
         self.assertEqual(result.status, S.SUCCESS)
         self.assertEqual(
@@ -261,7 +271,7 @@ class KubernetesEnvironmentExtractionTests(unittest.TestCase):
                 _config_map("override", {"QUEUE_HOST": "rabbitmq"}),
             ],
         )
-        result = _extractor(core, apps).get_namespace_environments("default", CONTEXT)
+        result = _environments(_extractor(core, apps))
 
         self.assertEqual(
             result.items[0].variables,
@@ -279,7 +289,7 @@ class KubernetesEnvironmentExtractionTests(unittest.TestCase):
         core, apps = _order_service_apis()
         apps.list_namespaced_deployment.side_effect = RuntimeError("403")
         with self.assertLogs("src.tools.k8s_extractor", level="WARNING"):
-            result = _extractor(core, apps).get_namespace_environments("default", CONTEXT)
+            result = _environments(_extractor(core, apps))
 
         self.assertEqual(result.status, S.PARTIAL)
         self.assertIn("deployments", result.errors[0])
@@ -288,10 +298,10 @@ class KubernetesEnvironmentExtractionTests(unittest.TestCase):
         core, apps = _order_service_apis()
         core.list_namespaced_service.side_effect = RuntimeError("403")
         with self.assertLogs("src.tools.k8s_extractor", level="WARNING"):
-            result = _extractor(core, apps).get_namespace_environments("default", CONTEXT)
+            result = _environments(_extractor(core, apps))
         self.assertEqual(result.status, S.FAILED)
 
-        missing = _extractor(None, None).get_namespace_environments("default", CONTEXT)
+        missing = _environments(_extractor(None, None))
         self.assertEqual(missing.status, S.FAILED)
 
 

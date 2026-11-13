@@ -5,8 +5,13 @@ a pull request head's references against the baseline it is assessed
 against), so both resolve a reference the same way.
 """
 
+from collections.abc import Iterable, Mapping
+
 from src.core.models import (
+    REPOSITORY_METADATA_KEY,
+    PipelineVariables,
     ServiceEnvironment,
+    ServiceNode,
     ServiceIdentity,
     UnresolvedEntity,
     UnresolvedEntityKind,
@@ -66,12 +71,32 @@ def service_environment_index(
     return index
 
 
+def pipeline_index(
+    services: Iterable[ServiceNode], pipelines: Iterable[PipelineVariables] | None
+) -> dict[str, PipelineVariables] | None:
+    """Map each repository-scanned service's FQURI to its repository's pipelines.
+
+    None when ``pipelines`` is None (a snapshot predating pipeline records),
+    so resolution behaves as it did when that snapshot was written.
+    """
+    if pipelines is None:
+        return None
+    by_repository = {pipeline.repository.lower(): pipeline for pipeline in pipelines}
+    index: dict[str, PipelineVariables] = {}
+    for service in services:
+        repository = str(service.metadata.get(REPOSITORY_METADATA_KEY, "")).lower()
+        if repository in by_repository:
+            index[service.service_id] = by_repository[repository]
+    return index
+
+
 def resolve_endpoint(
     reference: str,
     index: IdentityIndex,
     context: IdentityContext,
     environments: dict[str, ServiceEnvironment],
     unresolved: dict[str, UnresolvedEntity],
+    pipelines: Mapping[str, PipelineVariables] | None = None,
 ) -> str:
     """Return the node ID an edge endpoint points at.
 
@@ -79,7 +104,10 @@ def resolve_endpoint(
     service's FQURI, including ``env:`` references whose Kubernetes value
     names one. Anything else is recorded in ``unresolved`` and its
     unresolved-entity ID is returned; an ``env:`` reference to a variable
-    the service's workloads provably don't set is ENVIRONMENT_VARIABLE_UNSET.
+    the service's workloads provably don't set, and its repository's
+    pipelines don't define (see ``pipeline_index``), is
+    ENVIRONMENT_VARIABLE_UNSET. Pipeline values never resolve a reference:
+    the cluster's environment already reflects deploy-time substitution.
     """
     values = {uri: env.variables for uri, env in environments.items()}
     identity = resolve_reference(
@@ -88,7 +116,7 @@ def resolve_endpoint(
     if identity is not None:
         return identity.uri
     entity = unresolved_entity(reference)
-    if is_unset_env_var_reference(reference, environments, index, context):
+    if is_unset_env_var_reference(reference, environments, index, context, pipelines):
         entity = entity.model_copy(
             update={"kind": UnresolvedEntityKind.ENVIRONMENT_VARIABLE_UNSET}
         )

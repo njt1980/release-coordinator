@@ -42,7 +42,7 @@ from src.core.models import (
 )
 from src.discovery_engine import nodes as discovery_nodes
 from src.tools.baseline_store import BaselineScope, StoredBaseline
-from src.tools.k8s_extractor import PodTemplate, _container_env, _service_environments
+from src.tools.k8s_extractor import PodTemplate, _container_env, _service_environment
 from src.tools.policy_store import LoadedPolicy, ProjectPolicy, parse_policy
 from src.tools.telemetry_extractor import TelemetryExtractor, build_dependency_query
 from src.tools.telemetry_normalization import DropReason, normalize_edges, normalize_target
@@ -592,26 +592,19 @@ class UnsetEnvironmentTests(unittest.TestCase):
         )
 
     def test_service_with_conflicting_values_marks_them_opaque(self) -> None:
-        service = SimpleNamespace(metadata=SimpleNamespace(name="order"), spec=SimpleNamespace(selector={"app": "order"}))
         templates = [
             PodTemplate({"app": "order"}, "deployment/order", _spec(_env_var("A", "1"))),
             PodTemplate({"app": "order"}, "deployment/order-canary", _spec(_env_var("A", "2"))),
         ]
-        (environment,) = _service_environments(
-            [service], templates, {}, "shop", IdentityContext(tenant="acme", environment="prod", cluster="aks-1")
-        )
+        with self.assertLogs("src.tools.k8s_extractor", level="WARNING"):
+            environment = _service_environment(ORDER, templates, {})
         self.assertEqual((environment.variables, environment.opaque_variables), ({}, ["A"]))
 
     def _service_env(self, *specs: SimpleNamespace, config_maps: dict[str, dict[str, str]] | None = None) -> ServiceEnvironment:
-        service = SimpleNamespace(metadata=SimpleNamespace(name="order"), spec=SimpleNamespace(selector={"app": "order"}))
         templates = [
             PodTemplate({"app": "order"}, f"deployment/order-{i}", spec) for i, spec in enumerate(specs)
         ]
-        (environment,) = _service_environments(
-            [service], templates, config_maps or {}, "shop",
-            IdentityContext(tenant="acme", environment="prod", cluster="aks-1"),
-        )
-        return environment
+        return _service_environment(ORDER, templates, config_maps or {})
 
     def test_a_readable_value_beside_an_opaque_one_is_not_definite(self) -> None:
         # Review #2, first reproduction: one container sets a literal, the

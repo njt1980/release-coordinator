@@ -34,7 +34,8 @@ from src.core.models import (
 from src.tools.baseline_store import BaselineScope, BaselineStore, new_snapshot_id
 from src.tools.policy_store import LoadedPolicy, PolicyStore
 from src.webhooks import PrAssessmentJob, PullRequestWebhook
-from tests.fake_devops import FakeDevOps, sha, url
+from src.core.models import ShapeFinding, ShapeFindingKind, UnscannedFile, UnscannedReason
+from tests.fake_devops import FakeDevOps, coverage_for, sha, url
 
 BASE = sha("3f1c2aa")
 HEAD = sha("9b7e410c0ffee")
@@ -255,7 +256,12 @@ class PrAssessmentWebhookTests(unittest.TestCase):
             last_observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
         return KnowledgeGraph(
-            services=SERVICES, edges=[edge], discovery=REPORTS, scan=scan, service_environments=[]
+            services=SERVICES,
+            edges=[edge],
+            discovery=REPORTS,
+            scan=scan,
+            service_environments=[],
+            static_coverage=coverage_for(SERVICES),
         )
 
     def _write_baseline(self) -> str:
@@ -818,6 +824,72 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         self.assertEqual(
             state["target_services"], [_id("order-service"), _id("store-front")]
         )
+
+
+    # --- Static coverage (review finding #5) ---
+
+    RUST = [UnscannedFile(path="src/order-service/native/hash.rs", reason=UnscannedReason.UNSUPPORTED_LANGUAGE)]
+
+    def _assess_unscanned(self, devops: FakeDevOps, policy_extra: str = "") -> Any:
+        if policy_extra:
+            self._write_policy(POLICY_YAML + policy_extra)
+        graph = self._graph().model_copy(
+            update={"static_coverage": coverage_for(SERVICES, BASE, {("Shop", "src/order-service"): self.RUST})}
+        )
+        self.store.write(self.scope, graph)
+        verdict = RiskAssessment(risk_score=0.1, approved=True, justification="why")
+        final, _ = self._run_graph(_payload(changed_files=[self.ORDER_FILE]), verdict, devops)
+        return final
+
+    def test_source_the_scanner_cannot_read_blocks_the_release(self) -> None:
+        # The head scan reads order-service again; it still has the Rust file.
+        devops = self._real_pr(head_unscanned={"src/order-service": self.RUST})
+        final = self._assess_unscanned(devops)
+        assessment = final["release_assessment"]
+
+        self.assertIn(ReasonCode.STATIC_COVERAGE_INCOMPLETE, self._codes(assessment))
+        self.assertFalse(assessment.actionable)
+        detail = self._issue(assessment, ReasonCode.STATIC_COVERAGE_INCOMPLETE)
+        self.assertIn("src/order-service/native/hash.rs", detail)
+        self.assertIn("the pull request's head", detail)
+
+    def test_a_reviewed_exemption_accepts_the_unscanned_file(self) -> None:
+        devops = self._real_pr(head_unscanned={"src/order-service": self.RUST})
+        final = self._assess_unscanned(
+            devops,
+            "  unscanned_files:\n"
+            "    - pattern: \"src/order-service/native/*.rs\"\n"
+            "      reason: \"Hashing only; no network calls\"\n",
+        )
+        assessment = final["release_assessment"]
+
+        self.assertEqual(self._codes(assessment), [ReasonCode.COMPATIBILITY_UNVERIFIED])
+        self.assertEqual(
+            [(e.subject, e.reason) for e in assessment.evidence.exempted_unscanned_files],
+            [("src/order-service/native/hash.rs", "Hashing only; no network calls")],
+        )
+        self.assertIn("Hashing only; no network calls", final["evidence_report"])
+
+    def test_a_head_that_removes_the_unreadable_file_clears_it(self) -> None:
+        final = self._assess_unscanned(self._real_pr())
+        self.assertEqual(
+            self._codes(final["release_assessment"]), [ReasonCode.COMPATIBILITY_UNVERIFIED]
+        )
+
+    def test_shape_findings_in_the_radius_are_reported(self) -> None:
+        finding = ShapeFinding(
+            namespace="shop",
+            object="deployment/store-front-worker",
+            kind=ShapeFindingKind.UNEXPOSED_WORKLOAD,
+            detail="no Service selects it",
+            service_id=_id("store-front"),
+        )
+        self.store.write(self.scope, self._graph().model_copy(update={"kubernetes_shape": [finding]}))
+        verdict = RiskAssessment(risk_score=0.1, approved=True, justification="why")
+        final, _ = self._run_graph(_payload(changed_files=[self.ORDER_FILE]), verdict, self._real_pr())
+
+        self.assertEqual(final["release_assessment"].evidence.shape_findings, [finding])
+        self.assertIn("shop/deployment/store-front-worker [UNEXPOSED_WORKLOAD]", final["evidence_report"])
 
 
 if __name__ == "__main__":

@@ -434,6 +434,175 @@ class ScannedRevision(BaseModel, frozen=True):
     commit_sha: str = Field(pattern=GIT_COMMIT_SHA_PATTERN)
 
 
+class UnscannedReason(str, Enum):
+    """Why a source file in a service directory was not scanned.
+
+    UNSUPPORTED_LANGUAGE: source code in a language the scanner can't read
+        (Rust, Kotlin, C++...); a dependency it declares is invisible.
+    READ_FAILED: the file couldn't be read at the scanned commit.
+    """
+
+    UNSUPPORTED_LANGUAGE = "UNSUPPORTED_LANGUAGE"
+    READ_FAILED = "READ_FAILED"
+
+
+class UnscannedFile(BaseModel):
+    """A source file whose dependencies the scanner could not see."""
+
+    path: str = Field(min_length=1)
+    reason: UnscannedReason
+
+
+class ServiceCoverage(BaseModel):
+    """How completely one service directory was scanned at one commit.
+
+    ``root`` is the service's repository-relative directory (as in the
+    service node's metadata). Counts are files under that directory the
+    service owns: ``files_scanned`` were read for references,
+    ``files_excluded`` were skipped by design (vendored dependencies, build
+    output, documentation directories, lock files), ``files_not_source``
+    are not code or configuration (images, Markdown...). ``unscanned`` are
+    source files whose references are unknown; any makes coverage
+    incomplete. Container-image defaults (Dockerfile ``ENV``) are not
+    source files here; see G6 in docs/release-model.md.
+    """
+
+    service_name: str = Field(min_length=1)
+    root: str
+    files_scanned: int = Field(ge=0, default=0)
+    files_excluded: int = Field(ge=0, default=0)
+    files_not_source: int = Field(ge=0, default=0)
+    unscanned: List[UnscannedFile] = Field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        """Whether every source file the service owns was scanned."""
+        return not self.unscanned
+
+
+class RepositoryCoverage(BaseModel):
+    """Scan coverage for every service in one repository at one commit.
+
+    ``unowned_source_files`` are source files outside every service
+    directory (shared libraries, tooling); they are reported, not read.
+    """
+
+    repository: str = Field(min_length=1)
+    commit_sha: str = Field(pattern=GIT_COMMIT_SHA_PATTERN)
+    services: List[ServiceCoverage] = Field(default_factory=list)
+    unowned_source_files: List[str] = Field(default_factory=list)
+
+
+class PipelineVariables(BaseModel):
+    """What a repository's build pipelines define, as read at one commit.
+
+    Pipelines never decide a dependency on their own: the live cluster's
+    container environment already reflects any deploy-time substitution.
+    They matter because a pipeline variable can be baked into the image at
+    build time, so a variable Kubernetes doesn't set is not provably unset
+    when a pipeline may define it.
+
+    ``variables`` keeps values only for endpoint-like names, credentials
+    stripped (as ``ServiceEnvironment.for_storage``); every other readable
+    name is in ``withheld_variables``. ``opaque_variables`` are defined
+    with a value we can't know (secret, settable at queue time, an
+    expression or macro, set by a script). ``opaque_sources`` describe what
+    may define any name (variable groups, templates, YAML in another
+    repository). ``readable`` is false when the pipelines couldn't be read
+    at all (``error`` says why); then any name may be defined.
+    ``variable_sources`` names where each kept value was defined.
+    """
+
+    repository: str = Field(min_length=1)
+    commit_sha: str = ""
+    readable: bool = True
+    error: str = ""
+    variables: Dict[str, str] = Field(default_factory=dict)
+    variable_sources: Dict[str, List[str]] = Field(default_factory=dict)
+    withheld_variables: List[str] = Field(default_factory=list)
+    opaque_variables: List[str] = Field(default_factory=list)
+    opaque_sources: List[str] = Field(default_factory=list)
+
+    @classmethod
+    def unreadable(cls, repository: str, error: str) -> "PipelineVariables":
+        """Record that the repository's pipelines couldn't be read."""
+        return cls(repository=repository, readable=False, error=error or "unreadable")
+
+    def may_define(self, name: str) -> bool:
+        """Whether a pipeline defines ``name``, or might."""
+        return (
+            not self.readable
+            or bool(self.opaque_sources)
+            or name in self.variables
+            or name in self.withheld_variables
+            or name in self.opaque_variables
+        )
+
+    def describe(self, name: str) -> str:
+        """Say how the pipelines may define ``name`` (call when ``may_define``)."""
+        if not self.readable:
+            return f"the pipelines of {self.repository} couldn't be read ({self.error})"
+        if name in self.variables:
+            sources = ", ".join(self.variable_sources.get(name, [])) or "a pipeline"
+            return f"{sources} in {self.repository} sets {name}={self.variables[name]}"
+        if name in self.withheld_variables or name in self.opaque_variables:
+            return f"a pipeline in {self.repository} sets {name} (value not readable)"
+        return (
+            f"pipelines in {self.repository} import variables we can't read ("
+            + ", ".join(self.opaque_sources)
+            + ")"
+        )
+
+
+def storable_pipeline_value(name: str, value: str) -> str | None:
+    """Return the value a snapshot may keep for a pipeline variable, or None."""
+    return storable_endpoint_value(value) if is_endpoint_variable(name) else None
+
+
+class ShapeFindingKind(str, Enum):
+    """A namespace object outside the supported application shape.
+
+    UNEXPOSED_WORKLOAD: a long-running workload (or CronJob) no Service
+        selects, such as a queue worker; registered as a service so its
+        calls count, with ``exposed=false``.
+    TRANSIENT_WORKLOAD: a bare Job or Pod no Service selects; not
+        registered, since it comes and goes.
+    UNREAD_CONTROLLER: pods owned by a controller kind discovery doesn't
+        read (Argo Rollouts, operators); their running pod specs are read
+        instead, so a scaled-to-zero workload is invisible.
+    SELECTORLESS_SERVICE: a Service without a selector; its backends are
+        managed outside Kubernetes selectors and their environment is unknown.
+    SERVICE_SELECTS_NO_WORKLOAD: a Service whose selector matches no
+        workload read; its environment is unknown.
+    EXTERNAL_NAME_SERVICE: a DNS alias to ``externalName``; calls to it are
+        calls to that host.
+    NAME_COLLISION: an unexposed workload has the name of a Service that
+        doesn't select it; it is not registered.
+    """
+
+    UNEXPOSED_WORKLOAD = "UNEXPOSED_WORKLOAD"
+    TRANSIENT_WORKLOAD = "TRANSIENT_WORKLOAD"
+    UNREAD_CONTROLLER = "UNREAD_CONTROLLER"
+    SELECTORLESS_SERVICE = "SELECTORLESS_SERVICE"
+    SERVICE_SELECTS_NO_WORKLOAD = "SERVICE_SELECTS_NO_WORKLOAD"
+    EXTERNAL_NAME_SERVICE = "EXTERNAL_NAME_SERVICE"
+    NAME_COLLISION = "NAME_COLLISION"
+
+
+class ShapeFinding(BaseModel):
+    """One namespace object outside the supported shape.
+
+    ``object`` is ``<kind>/<name>`` (``service/x``, ``cronjob/y``);
+    ``service_id`` is the FQURI of the service it concerns, when it has one.
+    """
+
+    namespace: str = Field(min_length=1)
+    object: str = Field(min_length=1)
+    kind: ShapeFindingKind
+    detail: str = Field(min_length=1)
+    service_id: Optional[str] = None
+
+
 _DEFAULT_HTTPS_PORT: Final[int] = 443
 
 
@@ -586,6 +755,10 @@ class KnowledgeGraph(BaseModel):
     ``service_environments`` are the container environments the manifest
     scan read (None in snapshots written before they were recorded); a
     pull request's head references are resolved through them.
+    ``static_coverage`` records how completely each service directory was
+    scanned, ``pipeline_variables`` what each repository's pipelines
+    define, and ``kubernetes_shape`` the namespace objects outside the
+    supported shape; each is None in snapshots written before it was.
     """
 
     services: List[ServiceNode]
@@ -594,6 +767,9 @@ class KnowledgeGraph(BaseModel):
     unresolved_entities: List[UnresolvedEntity] = Field(default_factory=list)
     scan: Optional[ScanContext] = None
     service_environments: Optional[List[ServiceEnvironment]] = None
+    static_coverage: Optional[List[RepositoryCoverage]] = None
+    pipeline_variables: Optional[List[PipelineVariables]] = None
+    kubernetes_shape: Optional[List[ShapeFinding]] = None
 
     @model_validator(mode="after")
     def _services_match_scan(self) -> Self:
@@ -856,6 +1032,10 @@ class ReasonCode(str, Enum):
     BASELINE_REVISION_MISMATCH: the commits between the baseline's scanned
         revision and the pull request's base change services in the radius,
         or the two revisions can't be related; re-run discovery or rebase.
+    STATIC_COVERAGE_INCOMPLETE: a service directory has source files the
+        scanner couldn't read (an unsupported language, a read failure), at
+        the baseline or the pull request's head, or the baseline predates
+        coverage accounting; a dependency they declare is invisible.
 
     Every code except MODEL_REJECTED makes the assessment non-actionable: the
     evidence is insufficient to rely on the verdict, which is different from
@@ -877,6 +1057,7 @@ class ReasonCode(str, Enum):
     BASELINE_SCOPE_MISMATCH = "BASELINE_SCOPE_MISMATCH"
     REVISION_UNVERIFIED = "REVISION_UNVERIFIED"
     BASELINE_REVISION_MISMATCH = "BASELINE_REVISION_MISMATCH"
+    STATIC_COVERAGE_INCOMPLETE = "STATIC_COVERAGE_INCOMPLETE"
 
     @property
     def limits_actionability(self) -> bool:
@@ -930,6 +1111,9 @@ class AssessmentEvidence(BaseModel):
     when the pull request's revisions were verified and its changed
     services scanned at the head; ``dependencies_added`` and
     ``dependencies_removed`` are the code dependencies the head changed.
+    ``exempted_unscanned_files`` are unscanned source files the policy
+    accepts; ``shape_findings`` are out-of-shape Kubernetes objects that
+    concern a service in the release radius.
     """
 
     pr_id: str = Field(min_length=1)
@@ -955,6 +1139,8 @@ class AssessmentEvidence(BaseModel):
     head_scanned: bool = False
     dependencies_added: List[DependencyChange] = Field(default_factory=list)
     dependencies_removed: List[DependencyChange] = Field(default_factory=list)
+    exempted_unscanned_files: List[Exemption] = Field(default_factory=list)
+    shape_findings: List[ShapeFinding] = Field(default_factory=list)
 
 
 class ReleaseAssessment(BaseModel):

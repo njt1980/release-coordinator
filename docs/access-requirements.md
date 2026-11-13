@@ -17,6 +17,10 @@ before falling back to the developer's `az login`.
 - Add the identity to the organization (**Organization settings → Users**,
   access level Basic) and to the project's **Readers** group. It reads
   repositories, files and build definitions.
+- Build definitions are read for their variables (the pipeline YAML at the
+  scanned commit, definition variables and variable groups by name). If
+  they can't be read, discovery still succeeds, but no environment variable
+  of that repository can be shown unset.
 - The organization must be connected to the Microsoft Entra tenant the
   identity belongs to.
 - Personal Microsoft accounts (e.g. a Gmail or Outlook login, even when
@@ -41,9 +45,11 @@ before falling back to the developer's `az login`.
 
 ## Kubernetes (manifest scan)
 
-- Read-only (`get`, `list`) on `services`, `configmaps`, `pods`,
-  `deployments` and `statefulsets` in each target namespace. Secrets are
-  never read.
+- Read-only (`get`, `list`) on `services`, `configmaps` and `pods` (core),
+  `deployments`, `statefulsets`, `daemonsets` and `replicasets` (apps), and
+  `jobs` and `cronjobs` (batch) in each target namespace. Secrets are never
+  read. A kind that can't be listed makes the stage PARTIAL, so no baseline
+  is written.
 - Locally the backend uses the current kubeconfig context; on Azure it uses
   the in-cluster service account or the cluster's Entra integration.
 - Whichever it uses, discovery records the API server it actually read. The
