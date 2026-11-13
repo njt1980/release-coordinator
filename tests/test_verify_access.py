@@ -474,6 +474,7 @@ class DiscoveryNodeSkipTests(unittest.TestCase):
         with patch.object(
             discovery_nodes, "TelemetryExtractor"
         ) as telemetry_cls, patch.object(discovery_nodes, "POLICY_STORE", policy_store):
+            telemetry_cls.return_value.dropped_records = {}
             telemetry_cls.return_value.get_active_dependencies.return_value = (
                 DiscoveryResult.success([])
             )

@@ -151,7 +151,10 @@ class KubernetesEnvironmentExtractionTests(unittest.TestCase):
                         "ORDER_QUEUE_HOST": "rabbitmq.default.svc.cluster.local",
                         "ORDER_QUEUE_PORT": "5672",
                     },
-                )
+                ),
+                # A service whose workloads set nothing still gets an entry,
+                # so its variables can be proven unset.
+                ServiceEnvironment(service_id=f"{DEFAULT_NS}:rabbitmq"),
             ],
         )
 

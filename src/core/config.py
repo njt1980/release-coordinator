@@ -23,3 +23,11 @@ DEFAULT_PROJECT_ID: Final[str] = "default"
 # Claude model used for Day-Two release risk reasoning. Override with the
 # RISK_REASONER_MODEL environment variable.
 DEFAULT_RISK_REASONER_MODEL: Final[str] = "claude-opus-5-5"
+
+# Telemetry lookback when the project policy doesn't set
+# runtime_lookback_days (or there is no policy), and its upper bound.
+DEFAULT_RUNTIME_LOOKBACK_DAYS: Final[int] = 7
+MAX_RUNTIME_LOOKBACK_DAYS: Final[int] = 30
+
+# How old the newest live telemetry row may be for live evidence to count.
+DEFAULT_MAX_TELEMETRY_AGE_MINUTES: Final[int] = 60

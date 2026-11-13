@@ -8,6 +8,7 @@ coordinator blocks the release.
 """
 
 import hashlib
+import ipaddress
 import re
 from enum import Enum
 from pathlib import Path
@@ -131,11 +132,122 @@ class DependencyExemption(_StrictModel):
         return self
 
 
+_DNS_NAME = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+_DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+# Broadest network an egress rule may allow; anything wider is a mistake.
+_MIN_PREFIX = {4: 8, 6: 16}
+
+
+class SilentServiceExemption(_StrictModel):
+    """A radius service live telemetry may legitimately not observe.
+
+    ``service`` is ``<namespace>/<name>``: for example a batch job that only
+    runs nightly, or a database that is only ever called.
+    """
+
+    service: str
+    reason: str = Field(min_length=1)
+
+    @field_validator("service")
+    @classmethod
+    def _namespaced_name(cls, value: str) -> str:
+        namespace, separator, name = value.strip().lower().partition("/")
+        if not (separator and _DNS_LABEL.match(namespace) and _DNS_LABEL.match(name)):
+            raise ValueError(f"service must be '<namespace>/<name>': {value!r}")
+        return f"{namespace}/{name}"
+
+
+class EgressRule(_StrictModel):
+    """An external destination the project calls on purpose (gap G2).
+
+    Exactly one of: ``host`` (one DNS name), ``host_suffix`` (a leading-dot
+    zone such as ``.blob.core.windows.net`` matching every name in it) or
+    ``cidr`` (an IP network, at most /8 for IPv4 and /16 for IPv6). Host
+    rules match only unresolved DNS names and CIDR rules only IP addresses:
+    an IP-only sighting of an allowed host still blocks.
+    """
+
+    host: str | None = None
+    host_suffix: str | None = None
+    cidr: str | None = None
+    reason: str = Field(min_length=1)
+
+    @field_validator("host")
+    @classmethod
+    def _valid_host(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        host = value.strip().lower().rstrip(".")
+        if not _DNS_NAME.match(host):
+            raise ValueError(f"host must be a DNS name without port or wildcard: {value!r}")
+        return host
+
+    @field_validator("host_suffix")
+    @classmethod
+    def _valid_suffix(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        suffix = value.strip().lower().rstrip(".")
+        if not suffix.startswith(".") or not _DNS_NAME.match(suffix[1:]):
+            raise ValueError(
+                f"host_suffix must be a zone with a leading dot, e.g. '.example.com': {value!r}"
+            )
+        return suffix
+
+    @field_validator("cidr")
+    @classmethod
+    def _valid_cidr(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            network = ipaddress.ip_network(value.strip(), strict=True)
+        except ValueError as error:
+            raise ValueError(f"cidr must be an IP network: {error}") from error
+        if network.prefixlen < _MIN_PREFIX[network.version]:
+            raise ValueError(f"cidr {value!r} is too broad")
+        return str(network)
+
+    @model_validator(mode="after")
+    def _exactly_one_target(self) -> Self:
+        given = [v for v in (self.host, self.host_suffix, self.cidr) if v is not None]
+        if len(given) != 1:
+            raise ValueError("an egress rule names exactly one of host, host_suffix or cidr")
+        return self
+
+    @property
+    def label(self) -> str:
+        """How the rule is cited in an assessment."""
+        if self.host is not None:
+            return f"egress host {self.host}"
+        if self.host_suffix is not None:
+            return f"egress host_suffix {self.host_suffix}"
+        return f"egress cidr {self.cidr}"
+
+    def allows_host(self, host: str) -> bool:
+        """Whether this rule allows the DNS name ``host``."""
+        host = host.lower().rstrip(".")
+        if self.host is not None:
+            return host == self.host
+        return self.host_suffix is not None and host.endswith(self.host_suffix)
+
+    def allows_ip(self, address: str) -> bool:
+        """Whether this rule allows the IP ``address``."""
+        if self.cidr is None:
+            return False
+        try:
+            return ipaddress.ip_address(address) in ipaddress.ip_network(self.cidr)
+        except ValueError:
+            return False
+
+
 class Exemptions(_StrictModel):
     """Explicit allowlist of evidence gaps a project accepts, each justified."""
 
     files: list[FileExemption] = Field(default_factory=list)
     dependencies: list[DependencyExemption] = Field(default_factory=list)
+    silent_services: list[SilentServiceExemption] = Field(default_factory=list)
 
 
 class ProjectPolicy(_StrictModel):
@@ -153,6 +265,11 @@ class ProjectPolicy(_StrictModel):
     ``telemetry_cluster`` restricts every telemetry query to rows emitted
     from this cluster (required when RUNTIME_TELEMETRY is a required source
     or runtime evidence must be live).
+
+    ``runtime_lookback_days`` is how far back every telemetry query reads.
+    ``max_telemetry_age_minutes`` bounds how old the newest live row may be
+    for live evidence to count. ``egress`` lists external destinations the
+    project calls on purpose.
     """
 
     policy_version: int = Field(ge=1)
@@ -170,6 +287,15 @@ class ProjectPolicy(_StrictModel):
     exemptions: Exemptions = Field(default_factory=Exemptions)
     kubernetes_api_server: str = ""
     telemetry_cluster: TelemetryClusterFilter | None = None
+    runtime_lookback_days: int = Field(
+        default=config.DEFAULT_RUNTIME_LOOKBACK_DAYS,
+        ge=1,
+        le=config.MAX_RUNTIME_LOOKBACK_DAYS,
+    )
+    max_telemetry_age_minutes: int = Field(
+        default=config.DEFAULT_MAX_TELEMETRY_AGE_MINUTES, ge=5, le=1440
+    )
+    egress: list[EgressRule] = Field(default_factory=list)
 
     @field_validator("kubernetes_api_server")
     @classmethod

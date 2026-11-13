@@ -21,7 +21,6 @@ from src.core.models import (
     ServiceEnvironment,
     ServiceIdentity,
     ServiceNode,
-    TelemetryClusterFilter,
     UnresolvedEntity,
     UnresolvedEntityKind,
     baseline_problems,
@@ -32,6 +31,7 @@ from src.core.service_ids import (
     IdentityContext,
     IdentityIndex,
     env_var_reference,
+    is_unset_env_var_reference,
     resolve_env_var_reference,
     resolve_reference,
     unresolved_entity,
@@ -47,6 +47,7 @@ from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.policy_store import (
     PolicyInvalidError,
     PolicyMissingError,
+    ProjectPolicy,
     default_policy_store,
 )
 from src.tools.telemetry_extractor import TelemetryExtractor
@@ -56,6 +57,9 @@ __all__ = ["DiscoveryIncompleteError"]
 logger = logging.getLogger(__name__)
 BASELINE_STORE = default_store()
 POLICY_STORE = default_policy_store()
+# Onboarding without a usable policy keeps the original 30-day window; such
+# a baseline can't be approved anyway (POLICY_MISSING or a scope mismatch).
+NO_POLICY_LOOKBACK_DAYS = 30
 STATIC_CODE_PROVENANCE = "azure_devops"
 
 
@@ -279,25 +283,31 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
 
     This Day-Zero batch stage will establish a runtime dependency baseline and
     place its evidence-backed relationships in ``runtime_edges``. The stage is
-    skipped when no telemetry workspace ID is configured. The query is
-    restricted to the project policy's ``telemetry_cluster`` when the
-    project has a valid policy naming one; the filter applied is recorded
-    (``telemetry_cluster``) and checked against the policy at assessment.
+    skipped when no telemetry workspace ID is configured. With a valid
+    project policy, the query is restricted to its ``telemetry_cluster``
+    and reads ``runtime_lookback_days`` back; the filter applied is
+    recorded (``telemetry_cluster``) and checked against the policy at
+    assessment. Without one, it is unfiltered and reads
+    ``NO_POLICY_LOOKBACK_DAYS`` back. Rows dropped as noise are counted in
+    the stage report.
     """
     workspace_id = (state.get("workspace_id") or "").strip()
     if not workspace_id:
         return _skipped(state, DiscoveryMethod.RUNTIME_TELEMETRY)
 
-    cluster_filter = _policy_cluster_filter(state)
+    policy = _project_policy(state)
+    cluster_filter = policy.telemetry_cluster if policy else None
     extractor = TelemetryExtractor(workspace_id=workspace_id)
     result = extractor.get_active_dependencies(
-        days_back=30, cluster_filter=cluster_filter
+        days_back=policy.runtime_lookback_days if policy else NO_POLICY_LOOKBACK_DAYS,
+        cluster_filter=cluster_filter,
     )
     report = DiscoveryStageReport(
         source=DiscoveryMethod.RUNTIME_TELEMETRY,
         status=result.status,
         item_count=len(result.items),
         errors=result.errors,
+        dropped_records=extractor.dropped_records,
     )
     return {
         "runtime_edges": list(result.items),
@@ -306,10 +316,10 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
     }
 
 
-def _policy_cluster_filter(state: DiscoveryGraphState) -> TelemetryClusterFilter | None:
-    """Return the project policy's telemetry cluster filter, if any.
+def _project_policy(state: DiscoveryGraphState) -> ProjectPolicy | None:
+    """Return the project's valid policy, or None.
 
-    Without a usable policy the query is unfiltered; the snapshot then
+    Without a usable policy telemetry is unfiltered; the snapshot then
     records no filter, which a policy that requires one rejects.
     """
     scope = BaselineScope(
@@ -317,7 +327,7 @@ def _policy_cluster_filter(state: DiscoveryGraphState) -> TelemetryClusterFilter
         project_id=state.get("project_id") or config.DEFAULT_PROJECT_ID,
     )
     try:
-        return POLICY_STORE.load(scope).policy.telemetry_cluster
+        return POLICY_STORE.load(scope).policy
     except (PolicyMissingError, PolicyInvalidError) as error:
         logger.warning("Telemetry is not scoped to a cluster: %s", error)
         return None
@@ -417,13 +427,21 @@ def _canonicalize_services(
     return merged, ambiguous
 
 
-def _environment_index(
+def _service_environment_index(
     environments: list[ServiceEnvironment],
-) -> dict[str, dict[str, str]]:
-    """Map service FQURIs to their Kubernetes environment variables."""
-    index: dict[str, dict[str, str]] = {}
+) -> dict[str, ServiceEnvironment]:
+    """Map service FQURIs to everything Kubernetes sets for them."""
+    index: dict[str, ServiceEnvironment] = {}
     for environment in environments:
-        index.setdefault(environment.service_id, {}).update(environment.variables)
+        existing = index.get(environment.service_id)
+        index[environment.service_id] = environment if existing is None else ServiceEnvironment(
+            service_id=environment.service_id,
+            variables={**existing.variables, **environment.variables},
+            opaque_variables=sorted(
+                {*existing.opaque_variables, *environment.opaque_variables}
+            ),
+            has_opaque_sources=existing.has_opaque_sources or environment.has_opaque_sources,
+        )
     return index
 
 
@@ -431,7 +449,7 @@ def _resolve_endpoint(
     reference: str,
     index: IdentityIndex,
     context: IdentityContext,
-    environments: dict[str, dict[str, str]],
+    environments: dict[str, ServiceEnvironment],
     unresolved: dict[str, UnresolvedEntity],
 ) -> str:
     """Return the node ID an edge endpoint points at.
@@ -439,14 +457,20 @@ def _resolve_endpoint(
     References that resolve to exactly one registered service become that
     service's FQURI, including ``env:`` references whose Kubernetes value
     names one. Anything else is recorded in ``unresolved`` and its
-    unresolved-entity ID is returned.
+    unresolved-entity ID is returned; an ``env:`` reference to a variable
+    the service's workloads provably don't set is ENVIRONMENT_VARIABLE_UNSET.
     """
+    values = {uri: env.variables for uri, env in environments.items()}
     identity = resolve_reference(
         reference, index, context
-    ) or resolve_env_var_reference(reference, environments, index, context)
+    ) or resolve_env_var_reference(reference, values, index, context)
     if identity is not None:
         return identity.uri
     entity = unresolved_entity(reference)
+    if is_unset_env_var_reference(reference, environments, index, context):
+        entity = entity.model_copy(
+            update={"kind": UnresolvedEntityKind.ENVIRONMENT_VARIABLE_UNSET}
+        )
     unresolved.setdefault(entity.entity_id, entity)
     return entity.entity_id
 
@@ -522,7 +546,9 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
         list(state.get("discovered_services", [])), context
     )
     index = IdentityIndex(service.identity for service in services)
-    environments = _environment_index(list(state.get("service_environments", [])))
+    environments = _service_environment_index(
+        list(state.get("service_environments", []))
+    )
 
     unresolved: dict[str, UnresolvedEntity] = {
         entity.entity_id: entity for entity in ambiguous.values()

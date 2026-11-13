@@ -51,6 +51,7 @@ def _live_extractor(extractor_cls: MagicMock, result: DiscoveryResult) -> MagicM
     extractor.is_mock = False
     extractor.get_active_dependencies.return_value = result
     extractor.get_runtime_metrics.return_value = {}
+    extractor.dropped_records = {}
     return extractor
 
 
@@ -163,7 +164,7 @@ class CoordinatorNodeTests(unittest.TestCase):
             result["telemetry_status"],
             TelemetryStatus(
                 source="knowledge_graph",
-                runtime_observed_edges=[f"{URN}:store-front -> {TARGET}"],
+                baseline_runtime_edges=[f"{URN}:store-front -> {TARGET}"],
             ),
         )
 
@@ -398,7 +399,7 @@ class CoordinatorNodeTests(unittest.TestCase):
         status = result["telemetry_status"]
         assert isinstance(status, TelemetryStatus)
         self.assertEqual(status.source, "live")
-        self.assertEqual(set(status.runtime_metrics), {"order-service", "rabbitmq"})
+        self.assertEqual(set(status.runtime_metrics), {TARGET, f"{URN}:rabbitmq"})
 
     def test_compile_node_emits_typed_release_assessment(self) -> None:
         sequence = [f"{URN}:store-front", TARGET]

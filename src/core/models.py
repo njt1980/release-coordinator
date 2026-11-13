@@ -107,6 +107,9 @@ class DiscoveryStageReport(BaseModel):
     status: DiscoveryStatus
     item_count: int = Field(ge=0, default=0)
     errors: List[str] = Field(default_factory=list)
+    # Records deliberately left out as noise, counted per reason (e.g.
+    # telemetry loopback calls). Not errors: they don't make a stage PARTIAL.
+    dropped_records: Dict[str, int] = Field(default_factory=dict)
 
 
 MOCK_FIXTURE_PROVENANCE: Final[str] = "mock_fixture"
@@ -244,10 +247,27 @@ class ServiceEnvironment(BaseModel):
     matches the workloads; ``variables`` maps each variable name to its
     resolved value (literal ``value`` or ``configMapKeyRef``). Variables
     whose value could not be determined unambiguously are left out.
+
+    ``opaque_variables`` are names that are set but whose value can't be
+    read (Secret or field references, missing config maps, conflicting
+    values). ``has_opaque_sources`` is true when a workload imports a whole
+    Secret or a config map that couldn't be read (``envFrom``), so any name
+    may be set. Together they let a variable be proven unset: absent from
+    all three.
     """
 
     service_id: str
     variables: Dict[str, str] = Field(default_factory=dict)
+    opaque_variables: List[str] = Field(default_factory=list)
+    has_opaque_sources: bool = False
+
+    def is_unset(self, variable: str) -> bool:
+        """Whether ``variable`` is provably not set for this service."""
+        return not (
+            self.has_opaque_sources
+            or variable in self.variables
+            or variable in self.opaque_variables
+        )
 
     @field_validator("service_id")
     @classmethod
@@ -266,6 +286,10 @@ class UnresolvedEntityKind(str, Enum):
         service in the inventory matches it (exactly one match is required).
     ENVIRONMENT_VARIABLE: an address read from an environment variable
         (``env:<service>/<VARIABLE>``) whose value is not yet known.
+    ENVIRONMENT_VARIABLE_UNSET: an address read from an environment
+        variable that the service's Kubernetes workloads provably don't set,
+        so the code's built-in default is used. Live telemetry shows where
+        that default points; without live evidence it blocks like any gap.
     AMBIGUOUS_SERVICE: source code declares a service that cannot be tied
         to exactly one identity: two repository directories claim the same
         service, or a service with no namespace matches services in several
@@ -279,6 +303,7 @@ class UnresolvedEntityKind(str, Enum):
     UNREGISTERED_SERVICE = "UNREGISTERED_SERVICE"
     ENVIRONMENT_VARIABLE = "ENVIRONMENT_VARIABLE"
     AMBIGUOUS_SERVICE = "AMBIGUOUS_SERVICE"
+    ENVIRONMENT_VARIABLE_UNSET = "ENVIRONMENT_VARIABLE_UNSET"
 
 
 UNRESOLVED_ID_PREFIX: Final[str] = "unresolved:"
@@ -644,8 +669,12 @@ class PullRequestPayload(BaseModel):
 class RuntimeEvidenceState(str, Enum):
     """What runtime evidence backs one assessment.
 
-    LIVE: a telemetry workspace was queried for this assessment and the
-        query completed.
+    LIVE: a telemetry workspace was queried for this assessment, the query
+        completed, its newest row is fresh, and every service in the release
+        radius was observed (or is an allowlisted silent service).
+    LIVE_EMPTY: the live query completed but returned no usable rows.
+    LIVE_STALE: the newest live row is older than the policy allows.
+    LIVE_UNCOVERED: some service in the release radius was not observed.
     LIVE_INCOMPLETE: the live query FAILED or was PARTIAL.
     MOCK: the live query was answered from the demo fixture.
     BASELINE: no workspace was queried; the baseline snapshot's
@@ -655,6 +684,9 @@ class RuntimeEvidenceState(str, Enum):
     """
 
     LIVE = "live"
+    LIVE_EMPTY = "live_empty"
+    LIVE_STALE = "live_stale"
+    LIVE_UNCOVERED = "live_uncovered"
     LIVE_INCOMPLETE = "live_incomplete"
     MOCK = "mock"
     BASELINE = "baseline"
@@ -672,6 +704,31 @@ class ObservedEdge(BaseModel):
     last_observed_at: datetime
 
 
+class UnresolvedReach(BaseModel):
+    """An unresolved node reached by the radius traversal, and why it matters."""
+
+    node: str
+    detail: str
+
+
+class LiveCoverage(BaseModel):
+    """How well one live telemetry query covered the release radius.
+
+    ``edge_count`` counts resolved live edges after normalization,
+    ``newest_observed_at`` is the latest of them (None when there are
+    none), ``observed_services`` the radius services seen as a source or
+    target, ``uncovered_services`` those that weren't and aren't
+    allowlisted, and ``silent_services`` those the policy allows to be
+    silent.
+    """
+
+    edge_count: int = Field(ge=0)
+    newest_observed_at: Optional[datetime] = None
+    observed_services: List[str] = Field(default_factory=list)
+    uncovered_services: List[str] = Field(default_factory=list)
+    silent_services: List[str] = Field(default_factory=list)
+
+
 class TelemetryStatus(BaseModel):
     """Runtime evidence available for the services in a release radius.
 
@@ -683,13 +740,22 @@ class TelemetryStatus(BaseModel):
     ``RuntimeEvidenceState``); it defaults to NONE so an unclassified status
     never counts as runtime evidence. ``unbaselined_edges`` are live edges
     touching the release radius that the baseline does not have.
+
+    ``runtime_observed_edges`` are the edges this assessment's live query
+    observed in the radius (empty without a live query);
+    ``baseline_runtime_edges`` the radius edges the baseline holds from
+    telemetry. ``runtime_metrics`` is keyed by service FQURI.
+    ``coverage`` and ``dropped_records`` describe the live query.
     """
 
     source: Literal["knowledge_graph", "live", "mock"]
     runtime_evidence: RuntimeEvidenceState = RuntimeEvidenceState.NONE
     runtime_observed_edges: List[str] = Field(default_factory=list)
+    baseline_runtime_edges: List[str] = Field(default_factory=list)
     runtime_metrics: Dict[str, Dict[str, float]] = Field(default_factory=dict)
     unbaselined_edges: List[ObservedEdge] = Field(default_factory=list)
+    coverage: Optional[LiveCoverage] = None
+    dropped_records: Dict[str, int] = Field(default_factory=dict)
 
 
 class RiskAssessment(BaseModel):
@@ -810,6 +876,8 @@ class AssessmentEvidence(BaseModel):
     baseline_cluster: Optional[str] = None
     scanned_revisions: List[ScannedRevision] = Field(default_factory=list)
     unbaselined_edges: List[ObservedEdge] = Field(default_factory=list)
+    # How the live query covered the radius (None without a real live query).
+    live_coverage: Optional["LiveCoverage"] = None
 
 
 class ReleaseAssessment(BaseModel):

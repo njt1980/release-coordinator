@@ -160,6 +160,7 @@ class DiscoveryStageAggregationTests(unittest.TestCase):
     def test_failed_telemetry_stage_contributes_no_edges(self) -> None:
         state: Any = {"workspace_id": "ws-1", "discovery_reports": []}
         with patch.object(discovery_nodes, "TelemetryExtractor") as telemetry_cls:
+            telemetry_cls.return_value.dropped_records = {}
             telemetry_cls.return_value.get_active_dependencies.return_value = (
                 DiscoveryResult.failed("query timed out")
             )

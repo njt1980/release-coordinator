@@ -6,6 +6,7 @@ from typing import Required, TypedDict
 from src.coordinator.policy import ReleaseVerdict
 from src.coordinator.sequencing import DeploymentPlan
 from src.core.models import (
+    UnresolvedReach,
     DependencyEdge,
     EvidenceIssue,
     Exemption,
@@ -48,7 +49,9 @@ class ReleaseGraphState(TypedDict, total=False):
     before the LLM runs; ``deployment_sequence`` is its sequence, which the
     LLM cannot change. ``advisory_assessment`` is the model's opinion (None
     when it was not consulted) and ``verdict`` the deterministic policy
-    decision (see ``decide_release``).
+    decision (see ``decide_release``). ``unset_env_reaches`` are unset
+    environment variables in the radius whose verdict waits for the runtime
+    evidence: accepted with LIVE evidence, a DISCOVERY_GAP otherwise.
     """
 
     trigger_event: Required[dict[str, object]]
@@ -64,6 +67,7 @@ class ReleaseGraphState(TypedDict, total=False):
     unmapped_files: list[str]
     exempted_files: list[Exemption]
     exempted_dependencies: list[Exemption]
+    unset_env_reaches: list[UnresolvedReach]
     pull_request: PullRequestPayload
     target_services: list[str]
     upstream_services: list[str]

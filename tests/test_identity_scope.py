@@ -331,6 +331,7 @@ class DiscoveryScopeTests(unittest.TestCase):
         with patch.object(discovery_nodes, "POLICY_STORE", store), patch.object(
             discovery_nodes, "TelemetryExtractor"
         ) as telemetry_cls:
+            telemetry_cls.return_value.dropped_records = {}
             telemetry_cls.return_value.get_active_dependencies.return_value = (
                 DiscoveryResult.success([])
             )
@@ -338,7 +339,7 @@ class DiscoveryScopeTests(unittest.TestCase):
 
         store.load.assert_called_once_with(BaselineScope(tenant="acme", project_id="shop"))
         telemetry_cls.return_value.get_active_dependencies.assert_called_once_with(
-            days_back=30, cluster_filter=POLICY.telemetry_cluster
+            days_back=POLICY.runtime_lookback_days, cluster_filter=POLICY.telemetry_cluster
         )
         self.assertEqual(result["telemetry_cluster"], POLICY.telemetry_cluster)
 
@@ -363,6 +364,7 @@ class AssessmentScopeTests(unittest.TestCase):
             extractor.is_mock = False
             extractor.get_active_dependencies.return_value = DiscoveryResult.success([])
             extractor.get_runtime_metrics.return_value = {}
+            extractor.dropped_records = {}
             state: Any = {"workspace_id": "ws-1", "project_policy": loaded}
             coordinator_nodes.validate_runtime_telemetry_node(state)
 

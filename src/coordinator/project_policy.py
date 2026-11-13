@@ -8,20 +8,27 @@ check is an ``EvidenceIssue`` whose reason code limits actionability, so
 the advisory model is not consulted and the release is not approved.
 """
 
-from collections.abc import Iterable
-from datetime import datetime, timedelta
+from collections.abc import Collection, Iterable
+from datetime import datetime, timedelta, timezone
 
+from src.core import config
 from src.core.models import (
     DiscoveryMethod,
     DiscoveryStageReport,
     DiscoveryStatus,
+    UNRESOLVED_ID_PREFIX,
     EvidenceIssue,
     Exemption,
+    LiveCoverage,
+    ObservedEdge,
     ReasonCode,
     RuntimeEvidenceState,
     ScanContext,
+    ServiceIdentity,
     TelemetryClusterFilter,
+    UnresolvedEntityKind,
 )
+from src.core.service_ids import classify_unresolved, host_of
 from src.tools.policy_store import ProjectPolicy, RuntimeEvidenceRequirement
 
 _ACCEPTED_RUNTIME: dict[RuntimeEvidenceRequirement, frozenset[RuntimeEvidenceState]] = {
@@ -156,10 +163,10 @@ def baseline_runtime_state(
 
 
 def runtime_evidence_issue(
-    policy: ProjectPolicy, state: RuntimeEvidenceState
+    policy: ProjectPolicy, state: RuntimeEvidenceState, why: str = ""
 ) -> EvidenceIssue | None:
     """Return a REQUIRED_SOURCE_MISSING issue if ``state`` is weaker than the
-    policy's runtime evidence requirement."""
+    policy's runtime evidence requirement; ``why`` explains the state."""
     if state in _ACCEPTED_RUNTIME[policy.runtime_evidence]:
         return None
     return EvidenceIssue(
@@ -167,8 +174,77 @@ def runtime_evidence_issue(
         detail=(
             f"The project policy requires {policy.runtime_evidence.value} runtime "
             f"evidence, but this assessment has {state.value} runtime evidence."
+            + (f" {why}" if why else "")
         ),
     )
+
+
+def _utc(moment: datetime) -> datetime:
+    return moment if moment.utcoffset() is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def _namespaced_name(service_id: str) -> str:
+    try:
+        identity = ServiceIdentity.parse(service_id)
+    except ValueError:
+        return service_id
+    return f"{identity.namespace}/{identity.service_name}"
+
+
+def live_coverage(
+    policy: ProjectPolicy | None,
+    observed: Collection[ObservedEdge],
+    radius: Collection[str],
+) -> LiveCoverage:
+    """Describe how a live query's resolved edges cover the release radius.
+
+    A radius service is observed when it is the source or target of any
+    resolved live edge. The policy's ``silent_services`` (by
+    ``<namespace>/<name>``) are reported apart from the uncovered ones.
+    """
+    seen = {edge.source_id for edge in observed} | {edge.target_id for edge in observed}
+    silent_names = {rule.service for rule in policy.exemptions.silent_services} if policy else set()
+    unseen = sorted(service for service in radius if service not in seen)
+    return LiveCoverage(
+        edge_count=len(observed),
+        newest_observed_at=max((_utc(e.last_observed_at) for e in observed), default=None),
+        observed_services=sorted(service for service in radius if service in seen),
+        uncovered_services=[s for s in unseen if _namespaced_name(s) not in silent_names],
+        silent_services=[s for s in unseen if _namespaced_name(s) in silent_names],
+    )
+
+
+def live_runtime_state(
+    policy: ProjectPolicy | None, coverage: LiveCoverage, now: datetime
+) -> tuple[RuntimeEvidenceState, str]:
+    """Classify a completed, real live query and explain a weak result.
+
+    Empty beats stale beats uncovered: each later check needs the earlier
+    one to pass. Without a policy the default telemetry age applies.
+    """
+    if coverage.edge_count == 0 or coverage.newest_observed_at is None:
+        return RuntimeEvidenceState.LIVE_EMPTY, (
+            "The live telemetry query returned no usable rows for this cluster."
+        )
+    max_age = timedelta(
+        minutes=policy.max_telemetry_age_minutes
+        if policy
+        else config.DEFAULT_MAX_TELEMETRY_AGE_MINUTES
+    )
+    age = now - coverage.newest_observed_at
+    if age > max_age:
+        minutes = int(age.total_seconds() // 60)
+        return RuntimeEvidenceState.LIVE_STALE, (
+            f"The newest live telemetry row is {minutes} minutes old; at most "
+            f"{int(max_age.total_seconds() // 60)} minutes is allowed."
+        )
+    if coverage.uncovered_services:
+        return RuntimeEvidenceState.LIVE_UNCOVERED, (
+            "Live telemetry did not observe these radius services: "
+            + ", ".join(coverage.uncovered_services)
+            + ". Allowlist intentionally silent ones under exemptions.silent_services."
+        )
+    return RuntimeEvidenceState.LIVE, ""
 
 
 def is_normalized_relative_path(path: str) -> bool:
@@ -208,8 +284,36 @@ def partition_exempt_files(
 def dependency_exemption(
     policy: ProjectPolicy | None, entity_id: str
 ) -> Exemption | None:
-    """Return the policy's exemption for unresolved ``entity_id``, if any."""
+    """Return the policy's exemption for unresolved ``entity_id``, if any.
+
+    An exact dependency exemption wins; otherwise an egress rule may allow
+    it (see ``egress_exemption``).
+    """
     for rule in policy.exemptions.dependencies if policy else []:
         if rule.entity_id == entity_id:
             return Exemption(subject=entity_id, rule=rule.entity_id, reason=rule.reason)
+    return egress_exemption(policy, entity_id)
+
+
+def egress_exemption(policy: ProjectPolicy | None, entity_id: str) -> Exemption | None:
+    """Return the egress rule allowing unresolved ``entity_id``, if any.
+
+    Host rules allow only external or private DNS names, CIDR rules only IP
+    addresses. Service-shaped names, environment variables and ambiguous
+    services are never egress.
+    """
+    if policy is None or not entity_id.startswith(UNRESOLVED_ID_PREFIX):
+        return None
+    reference = entity_id[len(UNRESOLVED_ID_PREFIX) :]
+    kind = classify_unresolved(reference)
+    host = host_of(reference)
+    for rule in policy.egress:
+        if kind in (UnresolvedEntityKind.EXTERNAL_DNS, UnresolvedEntityKind.PRIVATE_DNS):
+            allowed = rule.allows_host(host)
+        elif kind is UnresolvedEntityKind.IP_ADDRESS:
+            allowed = rule.allows_ip(host)
+        else:
+            allowed = False
+        if allowed:
+            return Exemption(subject=entity_id, rule=rule.label, reason=rule.reason)
     return None

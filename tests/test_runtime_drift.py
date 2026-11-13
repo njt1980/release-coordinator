@@ -1,7 +1,7 @@
 """Tests for holding a release when live telemetry finds edges the baseline lacks."""
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -230,11 +230,17 @@ class TelemetryNodeDriftTests(unittest.TestCase):
             "upstream_services": [FRONT],
             "downstream_services": [RABBIT],
         }
-        with patch.object(coordinator_nodes, "TelemetryExtractor") as extractor_cls:
+        # Live rows are observed at T0 or T1; assess shortly after.
+        with patch.object(
+            coordinator_nodes, "TelemetryExtractor"
+        ) as extractor_cls, patch.object(
+            coordinator_nodes, "utc_now", return_value=T1 + timedelta(minutes=5)
+        ):
             extractor = extractor_cls.return_value
             extractor.is_mock = is_mock
             extractor.get_active_dependencies.return_value = result
             extractor.get_runtime_metrics.return_value = {}
+            extractor.dropped_records = {}
             update = coordinator_nodes.validate_runtime_telemetry_node(state)
         status = update["telemetry_status"]
         assert isinstance(status, TelemetryStatus)
@@ -245,9 +251,10 @@ class TelemetryNodeDriftTests(unittest.TestCase):
     def test_new_edge_in_radius_holds_the_release(self) -> None:
         result = DiscoveryResult.success(
             [
-                _edge("store-front", "order-service"),
+                _edge("store-front", "order-service", T1),
                 _edge("order-service", "payments"),
                 _edge("order-service", "api.stripe.com"),
+                _edge("order-service", "rabbitmq"),
             ]
         )
 
@@ -263,10 +270,17 @@ class TelemetryNodeDriftTests(unittest.TestCase):
 
     def test_matching_live_edges_add_no_issue(self) -> None:
         status, codes, _ = self._run(
-            DiscoveryResult.success([_edge("order-service", "rabbitmq")])
+            DiscoveryResult.success(
+                [_edge("order-service", "rabbitmq", T1), _edge("store-front", "order-service")]
+            )
         )
         self.assertEqual(codes, [])
         self.assertEqual(status.unbaselined_edges, [])
+        self.assertIs(status.runtime_evidence, RuntimeEvidenceState.LIVE)
+        self.assertEqual(
+            status.runtime_observed_edges,
+            [f"{ORDER} -> {RABBIT}", f"{FRONT} -> {ORDER}"],
+        )
 
     def test_incomplete_query_still_reports_the_drift_it_saw(self) -> None:
         result = DiscoveryResult.from_items(
@@ -298,14 +312,18 @@ class TelemetryNodeDriftTests(unittest.TestCase):
             DiscoveryResult.success([_edge("order-service", "payments")]),
             workspace_id="ws-staging",
         )
-        self.assertEqual(codes, [ReasonCode.DISCOVERY_GAP])
+        # Partial coverage is reported too; the edges are never compared.
+        self.assertEqual(codes, [ReasonCode.DISCOVERY_GAP, ReasonCode.REQUIRED_SOURCE_MISSING])
         self.assertEqual(status.unbaselined_edges, [])
 
     def test_no_baseline_means_nothing_to_compare(self) -> None:
         status, codes, _ = self._run(
             DiscoveryResult.success([_edge("order-service", "payments")]), graph=None
         )
-        self.assertEqual(codes, [])
+        # Without a baseline (already BASELINE_UNAVAILABLE) live edges can't
+        # be resolved, so they can't count as covering the radius either.
+        self.assertIs(status.runtime_evidence, RuntimeEvidenceState.LIVE_UNCOVERED)
+        self.assertEqual(codes, [ReasonCode.REQUIRED_SOURCE_MISSING])
         self.assertEqual(status.unbaselined_edges, [])
 
     def test_assessment_evidence_cites_the_drift(self) -> None:

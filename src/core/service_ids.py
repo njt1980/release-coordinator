@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, ValidationError
 from src.core.models import (
     IDENTITY_SEGMENT_PATTERN,
     UNKNOWN_LABEL,
+    ServiceEnvironment,
     ServiceIdentity,
     UnresolvedEntity,
     UnresolvedEntityKind,
@@ -185,6 +186,11 @@ def _host_of(reference: str) -> str:
     return raw.split(":", 1)[0].rstrip(".")
 
 
+def host_of(reference: str) -> str:
+    """Return the lower-case host of a hostname, ``host:port`` or URL."""
+    return _host_of(reference)
+
+
 def _is_ip(host: str) -> bool:
     if _IP_LIKE_PATTERN.match(host):
         return True
@@ -275,6 +281,27 @@ def resolve_env_var_reference(
     if value is None:
         return None
     return resolve_reference(value, index, context.in_namespace(owner.namespace))
+
+
+def is_unset_env_var_reference(
+    reference: str,
+    environments: Mapping[str, ServiceEnvironment],
+    index: IdentityIndex,
+    context: IdentityContext,
+) -> bool:
+    """Whether ``env:<service>/<VARIABLE>`` names a variable provably unset.
+
+    The owning service must resolve to exactly one registered service whose
+    Kubernetes environment was read, and that environment must neither set
+    the variable (readably or opaquely) nor import sources that could.
+    """
+    parsed = parse_env_var_reference(reference)
+    if parsed is None:
+        return False
+    service_name, variable = parsed
+    owner = resolve_reference(service_name, index, context)
+    environment = environments.get(owner.uri) if owner else None
+    return environment is not None and environment.is_unset(variable)
 
 
 def classify_unresolved(reference: str) -> UnresolvedEntityKind:

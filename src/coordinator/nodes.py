@@ -10,6 +10,8 @@ from pydantic import BaseModel
 
 from src.coordinator.policy import decide_release, needs_model
 from src.coordinator.project_policy import (
+    live_coverage,
+    live_runtime_state,
     baseline_freshness_issue,
     baseline_scope_issue,
     baseline_runtime_state,
@@ -43,6 +45,8 @@ from src.core.models import (
     RuntimeEvidenceState,
     ServiceIdentity,
     TelemetryStatus,
+    UnresolvedEntityKind,
+    UnresolvedReach,
 )
 from src.core.service_ids import IdentityIndex
 from src.tools.baseline_store import BaselineScope, StoredBaseline, default_store
@@ -158,13 +162,6 @@ def extract_trigger_node(state: ReleaseGraphState) -> dict[str, object]:
 
 Direction = Literal["upstream", "downstream"]
 _Adjacency = Mapping[str, list[tuple[str, int]]]
-
-
-class UnresolvedReach(BaseModel):
-    """An unresolved node reached by the radius traversal, and why it matters."""
-
-    node: str
-    detail: str
 
 
 class BlastRadius(BaseModel):
@@ -415,7 +412,19 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         baseline.graph, list(state.get("target_services", []))
     )
     radius = traverse_blast_radius(baseline.graph, targets)
-    gaps, exempted = unresolved_gaps(policy, radius.unresolved)
+    unset_kind = {
+        entity.entity_id
+        for entity in baseline.graph.unresolved_entities
+        if entity.kind is UnresolvedEntityKind.ENVIRONMENT_VARIABLE_UNSET
+    }
+    deferred = [
+        reach
+        for reach in radius.unresolved
+        if reach.node in unset_kind and dependency_exemption(policy, reach.node) is None
+    ]
+    gaps, exempted = unresolved_gaps(
+        policy, [reach for reach in radius.unresolved if reach not in deferred]
+    )
     issues.extend(_gap(issue) for issue in target_issues)
     issues.extend(gaps)
     issues.extend(policy_baseline_issues(policy, baseline, utc_now()))
@@ -436,6 +445,7 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         "matched_edges": radius.matched_edges,
         "discovery_issues": issues,
         "exempted_dependencies": exempted,
+        "unset_env_reaches": deferred,
         "baseline_snapshot_id": baseline.snapshot_id,
         "baseline_created_at": baseline.created_at,
         "baseline_demo_mode": baseline.demo_mode,
@@ -447,25 +457,24 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
 def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, object]:
     """Gather runtime evidence for the services in the release radius.
 
-    With a blank ``workspace_id`` only the knowledge graph is used: runtime
-    evidence is the matched edges that carry RUNTIME_TELEMETRY. Otherwise the
-    telemetry workspace is queried live and its metrics are filtered to the
-    services in the radius. A FAILED or PARTIAL live query is added to
-    ``discovery_issues`` as a DISCOVERY_GAP, and a query answered from the
-    mock fixture as DEMO_EVIDENCE (its status ``source`` is then ``mock``).
+    With a blank ``workspace_id`` only the baseline is used: its runtime
+    edges in the radius are reported as ``baseline_runtime_edges`` and the
+    evidence is the baseline's state. Otherwise the telemetry workspace is
+    queried live, restricted to the project policy's telemetry cluster and
+    lookback (``runtime_lookback_days``). A FAILED or PARTIAL live query is
+    a DISCOVERY_GAP, and a query answered from the mock fixture
+    DEMO_EVIDENCE.
 
-    The status's ``runtime_evidence`` classifies the result (see
-    ``RuntimeEvidenceState``); when it is weaker than the project policy
-    requires, a REQUIRED_SOURCE_MISSING issue is added.
-
-    The live query is restricted to the project policy's telemetry cluster
-    filter, so rows from another cluster sharing the workspace are not
-    counted. Real (non-mock) live edges are compared with the baseline (see
-    ``live_drift_issues``): a workspace other than the baseline's is a
-    DISCOVERY_GAP, and edges touching the radius that the baseline lacks
-    are BASELINE_DRIFT.
+    Real live edges are resolved against the baseline. Their coverage of
+    the radius classifies the evidence (``live_runtime_state``): no rows is
+    LIVE_EMPTY, an old newest row LIVE_STALE, an unobserved radius service
+    LIVE_UNCOVERED, otherwise LIVE. When that is weaker than the policy
+    requires, a REQUIRED_SOURCE_MISSING issue explains why. The resolved
+    edges touching the radius are ``runtime_observed_edges``; a workspace
+    other than the baseline's is a DISCOVERY_GAP, and radius edges the
+    baseline lacks are BASELINE_DRIFT. Metrics are keyed by service FQURI.
     """
-    observed_edges = [
+    baseline_edges = [
         f"{edge.source_service_id} -> {edge.target_service_id}"
         for edge in state.get("matched_edges", [])
         if DiscoveryMethod.RUNTIME_TELEMETRY in edge.discovery_methods
@@ -477,24 +486,20 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
             runtime_evidence=state.get(
                 "baseline_runtime_state", RuntimeEvidenceState.NONE
             ),
-            runtime_observed_edges=observed_edges,
+            baseline_runtime_edges=baseline_edges,
         )
         return _apply_runtime_policy(
             state, status, list(state.get("discovery_issues", []))
         )
 
-    radius = {
-        _service_name(service)
-        for service in [
-            *state.get("target_services", []),
-            *state.get("upstream_services", []),
-            *state.get("downstream_services", []),
-        ]
-    }
+    radius = _radius(state)
     policy = _policy(state)
     extractor = TelemetryExtractor(workspace_id=workspace_id)
     result = extractor.get_active_dependencies(
-        days_back=7, cluster_filter=policy.telemetry_cluster if policy else None
+        days_back=(
+            policy.runtime_lookback_days if policy else config.DEFAULT_RUNTIME_LOOKBACK_DAYS
+        ),
+        cluster_filter=policy.telemetry_cluster if policy else None,
     )
     issues = list(state.get("discovery_issues", []))
     if result.status.is_incomplete:
@@ -509,35 +514,94 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
                 detail="Live telemetry was answered from the mock fixture.",
             )
         )
-    runtime_metrics = {
-        service: {name: float(value) for name, value in metrics.items()}
-        for service, metrics in extractor.get_runtime_metrics().items()
-        if _service_name(service) in radius
-    }
+    metrics = radius_metrics(radius, extractor.get_runtime_metrics())
+    graph = state.get("baseline_graph")
+    observed: list[ObservedEdge] = []
     drift: list[ObservedEdge] = []
-    if not is_mock:
-        drift_issues, drift = live_drift_issues(state, workspace_id, result.items)
+    if not is_mock and graph is not None:
+        observed = resolve_live_edges(
+            graph, baseline_identity_context(_scope(state).tenant, graph), result.items
+        )
+        drift_issues, drift = live_drift_issues(state, workspace_id, observed)
         issues.extend(drift_issues)
+    coverage = live_coverage(policy, observed, radius)
+    if is_mock:
+        runtime_state, why = RuntimeEvidenceState.MOCK, ""
+    elif result.status.is_incomplete:
+        runtime_state, why = RuntimeEvidenceState.LIVE_INCOMPLETE, ""
+    elif graph is None:
+        runtime_state, why = (
+            RuntimeEvidenceState.LIVE_UNCOVERED,
+            "There is no baseline to resolve live telemetry against.",
+        )
+    else:
+        runtime_state, why = live_runtime_state(policy, coverage, utc_now())
     status = TelemetryStatus(
         source="mock" if is_mock else "live",
-        runtime_evidence=_live_runtime_state(is_mock, result.status.is_incomplete),
-        runtime_observed_edges=observed_edges,
-        runtime_metrics=runtime_metrics,
+        runtime_evidence=runtime_state,
+        runtime_observed_edges=[
+            f"{edge.source_id} -> {edge.target_id}"
+            for edge in observed
+            if edge.source_id in radius or edge.target_id in radius
+        ],
+        baseline_runtime_edges=baseline_edges,
+        runtime_metrics=metrics,
         unbaselined_edges=drift,
+        coverage=None if is_mock else coverage,
+        dropped_records=extractor.dropped_records,
     )
-    return _apply_runtime_policy(state, status, issues)
+    return _apply_runtime_policy(state, status, issues, why)
+
+
+def _radius(state: ReleaseGraphState) -> set[str]:
+    return {
+        *state.get("target_services", []),
+        *state.get("upstream_services", []),
+        *state.get("downstream_services", []),
+    }
+
+
+def radius_metrics(
+    radius: Iterable[str], metrics: Mapping[str, Mapping[str, int | float]]
+) -> dict[str, dict[str, float]]:
+    """Key per-source telemetry metrics by the radius FQURI they belong to.
+
+    A ``<namespace>/<name>`` key matches that exact service; a bare name
+    matches when exactly one radius service has it. Other keys are dropped.
+    """
+    identities = []
+    for service_id in radius:
+        try:
+            identities.append(ServiceIdentity.parse(service_id))
+        except ValueError:
+            continue
+    keyed: dict[str, dict[str, float]] = {}
+    for key, values in metrics.items():
+        namespace, separator, name = key.partition("/")
+        matches = [
+            identity
+            for identity in identities
+            if (
+                (identity.namespace, identity.service_name) == (namespace, name)
+                if separator
+                else identity.service_name == key
+            )
+        ]
+        if len(matches) == 1:
+            keyed[matches[0].uri] = {metric: float(value) for metric, value in values.items()}
+    return keyed
 
 
 def live_drift_issues(
-    state: ReleaseGraphState, workspace_id: str, live_edges: list[DependencyEdge]
+    state: ReleaseGraphState, workspace_id: str, observed: list[ObservedEdge]
 ) -> tuple[list[EvidenceIssue], list[ObservedEdge]]:
-    """Compare real live edges with the baseline.
+    """Compare resolved real live edges with the baseline.
 
     Returns the issues and the unbaselined edges. Nothing is compared when
     there is no baseline (already BASELINE_UNAVAILABLE) or the live
     workspace is not the baseline's (a DISCOVERY_GAP: the edges are not
-    comparable). Edges to an unresolved entity the project policy exempts
-    are not drift.
+    comparable). Edges to an unresolved entity the project policy exempts,
+    by dependency exemption or egress rule, are not drift.
     """
     graph = state.get("baseline_graph")
     if graph is None:
@@ -546,38 +610,56 @@ def live_drift_issues(
     if mismatch is not None:
         return [mismatch], []
     policy = _policy(state)
-    exempt = {rule.entity_id for rule in policy.exemptions.dependencies} if policy else set()
-    radius = {
-        *state.get("target_services", []),
-        *state.get("upstream_services", []),
-        *state.get("downstream_services", []),
-    }
-    observed = resolve_live_edges(
-        graph, baseline_identity_context(_scope(state).tenant, graph), live_edges
-    )
-    drift = unbaselined_edges(graph, radius, observed, exempt)
+    endpoints = {edge.source_id for edge in observed} | {edge.target_id for edge in observed}
+    exempt = {node for node in endpoints if dependency_exemption(policy, node) is not None}
+    drift = unbaselined_edges(graph, _radius(state), observed, exempt)
     issue = drift_issue(state.get("baseline_snapshot_id") or "unknown", drift)
     return ([issue] if issue else []), drift
 
 
-def _live_runtime_state(is_mock: bool, incomplete: bool) -> RuntimeEvidenceState:
-    if is_mock:
-        return RuntimeEvidenceState.MOCK
-    if incomplete:
-        return RuntimeEvidenceState.LIVE_INCOMPLETE
-    return RuntimeEvidenceState.LIVE
-
-
 def _apply_runtime_policy(
-    state: ReleaseGraphState, status: TelemetryStatus, issues: list[EvidenceIssue]
+    state: ReleaseGraphState,
+    status: TelemetryStatus,
+    issues: list[EvidenceIssue],
+    why: str = "",
 ) -> dict[str, object]:
-    """Return the node update, adding the policy's runtime evidence issue."""
+    """Return the node update with the runtime evidence decisions applied.
+
+    Adds the policy's runtime evidence issue, and settles deferred unset
+    environment variables: accepted (and recorded as exempt) only with LIVE
+    evidence, since live telemetry then shows where each default points;
+    a DISCOVERY_GAP otherwise.
+    """
     policy = _policy(state)
     if policy is not None:
-        issue = runtime_evidence_issue(policy, status.runtime_evidence)
+        issue = runtime_evidence_issue(policy, status.runtime_evidence, why)
         if issue is not None:
             issues.append(issue)
-    return {"telemetry_status": status, "discovery_issues": issues}
+    exempted = list(state.get("exempted_dependencies", []))
+    for reach in state.get("unset_env_reaches", []):
+        if status.runtime_evidence is RuntimeEvidenceState.LIVE:
+            exempted.append(
+                Exemption(
+                    subject=reach.node,
+                    rule="unset environment variable with live runtime evidence",
+                    reason=(
+                        "Kubernetes doesn't set it, so the code's default is used; live "
+                        "telemetry covers the radius and any unknown edge is drift."
+                    ),
+                )
+            )
+        else:
+            issues.append(
+                _gap(
+                    f"{reach.detail}. An unset variable is accepted only with live "
+                    f"runtime evidence; this assessment has {status.runtime_evidence.value}."
+                )
+            )
+    return {
+        "telemetry_status": status,
+        "discovery_issues": issues,
+        "exempted_dependencies": exempted,
+    }
 
 
 def sequence_deployment_node(state: ReleaseGraphState) -> dict[str, object]:
@@ -659,6 +741,7 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         baseline_cluster=scan.cluster if scan else None,
         scanned_revisions=list(scan.scanned_revisions) if scan else [],
         unbaselined_edges=list(telemetry.unbaselined_edges) if telemetry else [],
+        live_coverage=telemetry.coverage if telemetry else None,
     )
 
 
@@ -741,6 +824,17 @@ def _render_report(assessment: ReleaseAssessment, state: ReleaseGraphState) -> s
         for revision in evidence.scanned_revisions
     ]
     drift = [f"{edge.source_id} -> {edge.target_id}" for edge in evidence.unbaselined_edges]
+    coverage = evidence.live_coverage
+    coverage_text = (
+        "No live query"
+        if coverage is None
+        else (
+            f"{coverage.edge_count} live edge(s), newest "
+            f"{coverage.newest_observed_at.isoformat() if coverage.newest_observed_at else 'none'}; "
+            f"unobserved radius services: {_list(coverage.uncovered_services)}; "
+            f"allowlisted silent: {_list(coverage.silent_services)}"
+        )
+    )
     return (
         "## Release Impact Assessment\n\n"
         f"**Pull Request:** {pull_request.pr_id}: {pull_request.title}\n\n"
@@ -751,6 +845,7 @@ def _render_report(assessment: ReleaseAssessment, state: ReleaseGraphState) -> s
         f"**Scanned Revisions:** {_list(revisions)}\n\n"
         f"**Release Policy:** {policy}\n\n"
         f"**Runtime Evidence:** {evidence.runtime_evidence.value}\n\n"
+        f"**Live Coverage:** {coverage_text}\n\n"
         f"**Live Edges Missing From Baseline:** {_list(drift)}\n\n"
         f"**Policy Exemptions:** {_list(exemptions)}\n\n"
         f"**Target Services:** {_list(state.get('target_services', []))}\n\n"
