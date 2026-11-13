@@ -309,6 +309,26 @@ def _trigger(before: State, update: State) -> list[EventDraft]:
     return events + _issue_events(stage, before, update)
 
 
+def _revision(before: State, update: State) -> list[EventDraft]:
+    stage = "Pull request revisions"
+    events: list[EventDraft] = []
+    changes = update.get("dependency_changes")
+    if changes is not None:
+        added = [f"+ {short_name(c.source_id)} -> {short_name(c.target_id)}" for c in changes.added]
+        removed = [f"- {short_name(c.source_id)} -> {short_name(c.target_id)}" for c in changes.removed]
+        events.append(
+            _event(
+                stage,
+                RunEventStatus.PASSED,
+                "Revisions checked with source control; changed services read at the head: "
+                f"{_plural(len(added), 'dependency', 'dependencies')} added, "
+                f"{len(removed)} removed.",
+                added + removed,
+            )
+        )
+    return events + _issue_events(stage, before, update)
+
+
 def _radius(before: State, update: State) -> list[EventDraft]:
     stage = "Release radius"
     events = []
@@ -439,6 +459,7 @@ def _verdict(before: State, update: State) -> list[EventDraft]:
 _ASSESSMENT = {
     "load_policy_node": _policy,
     "extract_trigger_node": _trigger,
+    "verify_revision_node": _revision,
     "calculate_static_radius_node": _radius,
     "validate_runtime_telemetry_node": _live,
     "sequence_deployment_node": _sequence,

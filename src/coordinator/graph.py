@@ -10,6 +10,7 @@ from src.coordinator.nodes import (
     load_policy_node,
     sequence_deployment_node,
     validate_runtime_telemetry_node,
+    verify_revision_node,
 )
 from src.coordinator.state import ReleaseGraphState
 
@@ -17,6 +18,7 @@ from src.coordinator.state import ReleaseGraphState
 workflow = StateGraph(ReleaseGraphState)
 workflow.add_node("load_policy_node", load_policy_node)
 workflow.add_node("extract_trigger_node", extract_trigger_node)
+workflow.add_node("verify_revision_node", verify_revision_node)
 workflow.add_node("calculate_static_radius_node", calculate_static_radius_node)
 workflow.add_node("validate_runtime_telemetry_node", validate_runtime_telemetry_node)
 workflow.add_node("sequence_deployment_node", sequence_deployment_node)
@@ -25,7 +27,8 @@ workflow.add_node("compile_evidence_node", compile_evidence_node)
 
 workflow.set_entry_point("load_policy_node")
 workflow.add_edge("load_policy_node", "extract_trigger_node")
-workflow.add_edge("extract_trigger_node", "calculate_static_radius_node")
+workflow.add_edge("extract_trigger_node", "verify_revision_node")
+workflow.add_edge("verify_revision_node", "calculate_static_radius_node")
 workflow.add_edge("calculate_static_radius_node", "validate_runtime_telemetry_node")
 workflow.add_edge("validate_runtime_telemetry_node", "sequence_deployment_node")
 workflow.add_edge("sequence_deployment_node", "assess_risk_and_sequence_node")

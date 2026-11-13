@@ -386,3 +386,21 @@ class HttpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RevisionNarrationTests(unittest.TestCase):
+    def test_head_scan_and_revision_issues_are_narrated(self) -> None:
+        from src.coordinator.revision import HeadTopology
+        from src.core.models import DependencyChange, EvidenceIssue, KnowledgeGraph, ReasonCode
+
+        changes = HeadTopology(
+            graph=KnowledgeGraph(services=[], edges=[]),
+            added=[DependencyChange(source_id=f"{URN}:order", target_id="unresolved:fraud-check")],
+        )
+        issue = EvidenceIssue(code=ReasonCode.REVISION_UNVERIFIED, detail="base is not an ancestor")
+        events = narrate_assessment(
+            "verify_revision_node", {}, {"dependency_changes": changes, "discovery_issues": [issue]}
+        )
+        self.assertEqual([e.status for e in events], [S.PASSED, S.BLOCKED])
+        self.assertIn("1 dependency added, 0 removed", events[0].message)
+        self.assertEqual(events[1].message, "REVISION_UNVERIFIED: base is not an ancestor")

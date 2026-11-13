@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Required, TypedDict
 
 from src.coordinator.policy import ReleaseVerdict
+from src.coordinator.revision import HeadTopology, RevisionLag
 from src.coordinator.sequencing import DeploymentPlan
 from src.core.models import (
     DependencyEdge,
@@ -48,7 +49,12 @@ class ReleaseGraphState(TypedDict, total=False):
     before the LLM runs; ``deployment_sequence`` is its sequence, which the
     LLM cannot change. ``advisory_assessment`` is the model's opinion (None
     when it was not consulted) and ``verdict`` the deterministic policy
-    decision (see ``decide_release``).
+    decision (see ``decide_release``). ``assessed_graph`` is the baseline
+    with the changed services' code dependencies read at the pull
+    request's head (None when the head couldn't be verified and scanned);
+    the radius is walked over it. ``dependency_changes`` records what the
+    head added and removed; ``revision_lag`` what changed between the
+    baseline's scanned revision and the base.
     """
 
     trigger_event: Required[dict[str, object]]
@@ -64,6 +70,9 @@ class ReleaseGraphState(TypedDict, total=False):
     unmapped_files: list[str]
     exempted_files: list[Exemption]
     exempted_dependencies: list[Exemption]
+    assessed_graph: KnowledgeGraph | None
+    revision_lag: RevisionLag | None
+    dependency_changes: HeadTopology | None
     pull_request: PullRequestPayload
     target_services: list[str]
     upstream_services: list[str]

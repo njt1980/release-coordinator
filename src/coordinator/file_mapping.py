@@ -40,6 +40,14 @@ def _segments(path: str) -> list[str] | None:
     return segments
 
 
+def normalize_changed_path(path: str) -> str:
+    """Return a changed file's path as source control reports it: relative,
+    ``/``-separated, without ``.`` segments. Paths escaping the repository
+    are returned unchanged so they never match a real path."""
+    segments = _segments(path)
+    return "/".join(segments) if segments is not None else path
+
+
 def _service_roots(
     graph: KnowledgeGraph, repository: str
 ) -> list[tuple[list[str], ServiceNode]]:

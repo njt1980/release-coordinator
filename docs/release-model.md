@@ -60,7 +60,7 @@ Identity is namespace-safe:
 | Repositories and project | Static code scan: service boundaries and the addresses each service uses | Read on the repositories |
 | Cluster and namespaces | Manifest scan: Services, workloads, ConfigMaps, environment variables | `get`/`list` on those kinds; never Secrets |
 | Telemetry workspace | Observed calls between services | Read on the workspace |
-| Project policy | What evidence is required, what is exempt, and what proves the cluster | Reviewed file in the repo (`policies/{tenant}/{project}.yaml`) |
+| Project policy | What evidence is required, what is exempt, what proves the cluster, and where the code lives (`source_control`) | Reviewed file in the repo (`policies/{tenant}/{project}.yaml`) |
 
 The policy's `cluster` is a label. Two fields prove it:
 
@@ -73,6 +73,10 @@ The policy's `cluster` is a label. Two fields prove it:
 
 A baseline that read another API server, or telemetry with another filter
 or none, is `BASELINE_SCOPE_MISMATCH`.
+
+`source_control` (organization URL and project) is where pull request
+revisions are verified. It comes only from the policy, never from the
+caller; without it every assessment is `REVISION_UNVERIFIED`.
 
 Telemetry comes from either:
 
@@ -90,16 +94,31 @@ Discovery runs the three scans and merges them into a **baseline
 snapshot**: the services, the dependency edges (each labeled with the
 methods that found it) and the unresolved entities. The snapshot records
 what was scanned: commits, namespaces, environment, cluster and telemetry
-workspace.
+workspace. It also records each service's container environment so a pull
+request's head can be resolved the same way, storing only what
+resolution needs: values of endpoint-like variables (`*_URL`, `*_HOST`...)
+with credentials, query strings and secret-bearing connection strings
+removed. Every other variable is recorded by name only.
 
 ### A pull request is assessed against the baseline
 
 1. **Policy**: load the project policy. A project without a valid policy is
    never approved.
 2. **Mapping**: map changed files to services by their directories.
-3. **Radius**: walk the baseline from the changed services to every
+3. **Revisions**: verify the pull request with source control. The base
+   and head (full commit IDs) must exist, the base must be an ancestor of
+   the head, and the changed files must be exactly what the commits change
+   (`REVISION_UNVERIFIED` otherwise). The baseline's scanned commit must
+   relate to the base: if the base is ahead, commits in between must not
+   change any service in the radius; if the baseline is ahead and the head
+   doesn't contain it, they must not change the services being changed
+   (`BASELINE_REVISION_MISMATCH` otherwise). The changed services are then
+   scanned **at the head**, and their code dependencies replace the
+   baseline's, so a dependency the pull request adds is in the radius and
+   one it removes is not. The report lists both.
+4. **Radius**: walk that graph from the changed services to every
    upstream consumer and downstream dependency.
-4. **Live check**: query telemetry for the same workspace, cluster filter
+5. **Live check**: query telemetry for the same workspace, cluster filter
    and lookback (`runtime_lookback_days`). Noise is dropped in the backend
    and counted: loopback calls, targets with no host (an HTTP method or a
    span name), and messaging deliveries reported backwards (a messaging
@@ -120,7 +139,7 @@ workspace.
    live evidence blocks with the reason. An observed edge in the radius
    that the baseline lacks means the baseline no longer describes the
    system (drift).
-5. **Sequence**: order the deployment deterministically. For an additive
+6. **Sequence**: order the deployment deterministically. For an additive
    change, providers deploy before consumers. For a breaking change,
    consumers deploy first, and consumers the PR doesn't change are reported
    as stale.
@@ -162,6 +181,8 @@ policy (G19) is required before anyone else's data goes through it.
 | `UNMAPPED_FILES` | Changed files no service owns and the policy doesn't exempt |
 | `DISCOVERY_GAP` | An unresolved entity in the release radius that the policy doesn't exempt or allow as egress (an unset environment variable included: only a reviewed `exemptions.dependencies` entry accepts it) |
 | `BASELINE_DRIFT` | Live telemetry shows an edge in the radius that the baseline lacks |
+| `REVISION_UNVERIFIED` | The PR's commits can't be verified: missing, base not an ancestor of head, changed files that don't match the commits, no `source_control` in the policy, or the head couldn't be scanned |
+| `BASELINE_REVISION_MISMATCH` | Commits between the baseline's scanned revision and the PR's base change the release, the two have diverged, or the baseline predates recorded container environments |
 | `DEPENDENCY_CYCLE` | No safe deployment order exists |
 | `COMPATIBILITY_UNVERIFIED` | No evidence that the contract change is compatible |
 | `DEMO_EVIDENCE`, `MODEL_REJECTED` | Mock data, or the risk model rejected the release |
@@ -193,7 +214,7 @@ fit for an engineer-reviewed pilot, not for gating releases:
 | G12 | Same-named services merged: code services had an unknown namespace, and the lab collector dropped the telemetry namespace | Two services could share one node, hiding a dependency | Declared namespaces, ambiguous services, targets resolved in the caller's namespace, namespaced telemetry sources | Done (PR 2a-1) |
 | G13 | A live query with zero rows counted as live evidence; the reported runtime edges came from the baseline; real metrics were empty | "Live" didn't prove the radius was observed | Live evidence states (empty, stale, uncovered), live edges in the report, metrics from the query | Done (PR 2a-2) |
 | G14 | One PR-wide additive/breaking flag | A PR changes several interfaces, each with its own compatibility | Per-interface change classification, from contract analysis (G8) | After G8 |
-| G15 | The PR's base and head commits aren't verified, and the head isn't scanned for new dependencies; no evidence of what is deployed | The assessment may describe code other than what will ship | Verify base ancestry and scan the head; record deployed versions | PR 2b |
+| G15 | The PR's base and head commits aren't verified, and the head isn't scanned for new dependencies; no evidence of what is deployed | The assessment may describe code other than what will ship | Verify base ancestry and scan the head; record deployed versions | **Partly done (PR 2b-1):** revisions verified against the policy's `source_control`, baseline-to-base lag checked, changed services scanned at the head. Deployed-version evidence is still open. |
 | G16 | The static scanner is heuristic and `SUCCESS` doesn't mean full coverage; pipeline variables are discarded | A missed reference looks like a missing dependency | Coverage accounting per service directory; read pipeline variables | PR 2b |
 | G17 | Jobs are in memory, not safe across replicas, and have no deadlines | Restarts lose assessments; runs can hang | Durable job store with deadlines | Planned |
 | G18 | Nothing enforces the verdict; an assessment never expires or yields to a newer head | A stale approval could be acted on | Required PR/CD check, superseded on a new head, expiry | Planned |

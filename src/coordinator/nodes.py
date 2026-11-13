@@ -20,6 +20,14 @@ from src.coordinator.project_policy import (
     required_source_issues,
     runtime_evidence_issue,
 )
+from src.coordinator.revision import (
+    RevisionLag,
+    changed_services,
+    head_topology,
+    missing_head_services,
+    pull_request_issues,
+    target_roots,
+)
 from src.coordinator.runtime_drift import (
     baseline_identity_context,
     drift_issue,
@@ -43,6 +51,7 @@ from src.core.models import (
     ReasonCode,
     ReleaseAssessment,
     RuntimeEvidenceState,
+    ScannedRevision,
     ServiceIdentity,
     TelemetryStatus,
     UnresolvedEntityKind,
@@ -57,6 +66,7 @@ from src.tools.policy_store import (
     ProjectPolicy,
     default_policy_store,
 )
+from src.tools.devops_extractor import CommitComparison, DevOpsExtractor
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
 from src.tools.telemetry_extractor import TelemetryExtractor
 
@@ -396,6 +406,161 @@ def load_baseline(
     return baseline, None
 
 
+def _revision_issue(detail: str) -> EvidenceIssue:
+    return EvidenceIssue(code=ReasonCode.REVISION_UNVERIFIED, detail=detail)
+
+
+def _compare(
+    extractor: DevOpsExtractor, repository: str, base: str, target: str
+) -> CommitComparison | None:
+    result = extractor.compare_commits(repository, base, target)
+    return result.items[0] if result.items else None
+
+
+def baseline_lag(
+    extractor: DevOpsExtractor, graph: KnowledgeGraph, repository: str, base: str, head: str
+) -> tuple[RevisionLag | None, EvidenceIssue | None]:
+    """Relate the baseline's scanned revision of ``repository`` to ``base``.
+
+    Returns the services changed between them (see ``RevisionLag``); none
+    when the head already contains the scanned revision (the branch merged
+    the baseline's commit, so the head scan sees what the baseline saw). Or a
+    BASELINE_REVISION_MISMATCH issue when they can't be related: the
+    baseline didn't scan the repository, or the two have diverged.
+    """
+    scanned = next(
+        (
+            revision
+            for revision in (graph.scan.scanned_revisions if graph.scan else [])
+            if revision.repository.lower() == repository.lower()
+        ),
+        None,
+    )
+    mismatch = ReasonCode.BASELINE_REVISION_MISMATCH
+    if scanned is None:
+        return None, EvidenceIssue(
+            code=mismatch,
+            detail=f"The baseline records no scanned revision of {repository}.",
+        )
+    if scanned.commit_sha == base:
+        return RevisionLag(), None
+    forward = _compare(extractor, repository, scanned.commit_sha, base)
+    if forward is not None and forward.base_is_ancestor:
+        return RevisionLag(
+            radius_services=sorted(changed_services(graph, repository, [forward]))
+        ), None
+    backward = _compare(extractor, repository, base, scanned.commit_sha)
+    if backward is not None and backward.base_is_ancestor:
+        contained = _compare(extractor, repository, scanned.commit_sha, head)
+        if contained is not None and contained.base_is_ancestor:
+            return RevisionLag(), None
+        return RevisionLag(
+            target_services=sorted(changed_services(graph, repository, [backward]))
+        ), None
+    return None, EvidenceIssue(
+        code=mismatch,
+        detail=(
+            f"The baseline scanned {repository}@{scanned.commit_sha[:12]}, which "
+            f"has diverged from the pull request's base {base[:12]} (or they "
+            "couldn't be compared); re-run discovery."
+        ),
+    )
+
+
+def verify_revision_node(state: ReleaseGraphState) -> dict[str, object]:
+    """Verify the pull request's revisions and read its head's dependencies.
+
+    Source control is the project policy's ``source_control``, never a
+    caller-supplied URL. The base must be an ancestor of the head and the
+    changed files exactly what the commits change; the baseline's scanned
+    revision must relate to the base (see ``baseline_lag``); and the
+    changed services are scanned at the head, so the radius is walked over
+    the dependencies that will ship (``assessed_graph``). Any failure is a
+    REVISION_UNVERIFIED or BASELINE_REVISION_MISMATCH issue, which makes
+    the verdict non-actionable.
+
+    Without a policy (already POLICY_MISSING/INVALID) or a loadable
+    baseline (reported by the radius node) there is nothing to verify.
+    """
+    policy = _policy(state)
+    baseline, _ = load_baseline(_scope(state), state.get("baseline_snapshot_id"))
+    if policy is None or baseline is None:
+        return {}
+    pull_request: PullRequestPayload = state["pull_request"]
+    issues = list(state.get("discovery_issues", []))
+    source = policy.source_control
+    if source is None:
+        issues.append(
+            _revision_issue(
+                "The project policy names no source_control, so the pull "
+                "request's revisions can't be verified or its head scanned."
+            )
+        )
+        return {"discovery_issues": issues}
+    repository = pull_request.repository
+    extractor = DevOpsExtractor(
+        org_url=source.organization_url, project=source.project, repositories=[repository]
+    )
+    compared = extractor.compare_commits(repository, pull_request.base_sha, pull_request.head_sha)
+    if not compared.items:
+        issues.append(_revision_issue("; ".join(compared.errors) or "Commits can't be compared."))
+        return {"discovery_issues": issues}
+    comparison = compared.items[0]
+    issues.extend(pull_request_issues(comparison, pull_request.changed_files))
+
+    graph = baseline.graph
+    lag, lag_problem = baseline_lag(
+        extractor, graph, repository, comparison.base, comparison.target
+    )
+    if lag_problem is not None:
+        issues.append(lag_problem)
+    if graph.scan and graph.scan.namespaces and graph.service_environments is None:
+        issues.append(
+            EvidenceIssue(
+                code=ReasonCode.BASELINE_REVISION_MISMATCH,
+                detail=(
+                    f"Baseline {baseline.snapshot_id} predates recorded container "
+                    "environments, so the head's environment variables can't be "
+                    "resolved as discovery resolved them; re-run discovery."
+                ),
+            )
+        )
+
+    roots = target_roots(graph, repository, state.get("target_services", []))
+    head = extractor.scan_repository(
+        repository,
+        commit=ScannedRevision(
+            repository=repository,
+            branch=pull_request.source_branch or "pull-request",
+            commit_sha=comparison.target,
+        ),
+        only_roots=set(roots),
+    )
+    if not head.items:
+        issues.append(
+            _revision_issue("The head couldn't be scanned: " + "; ".join(head.errors))
+        )
+        return {"discovery_issues": issues, "revision_lag": lag}
+    head_services = [scan for repo_scan in head.items for scan in repo_scan.services]
+    for service in missing_head_services(roots, head_services):
+        issues.append(
+            _revision_issue(
+                f"{service} is no longer a service boundary at the head (removed "
+                "or moved); re-run discovery after merging, or declare it in "
+                "release-coord.yaml."
+            )
+        )
+    topology = head_topology(
+        graph, baseline_identity_context(_scope(state).tenant, graph), roots, head_services
+    )
+    return {
+        "discovery_issues": issues,
+        "assessed_graph": topology.graph,
+        "dependency_changes": topology,
+        "revision_lag": lag,
+    }
+
+
 def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     """Compute the full transitive blast radius of the target services.
 
@@ -411,7 +576,10 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     dependency anywhere in the radius that the project policy does not
     exempt, a baseline relying on mock data, a baseline that did not scan
     the policy's environment and cluster, a baseline older than the policy
-    allows, or a required evidence source that did not succeed.
+    allows, a required evidence source that did not succeed, or commits
+    between the baseline and the base that change the release (see
+    ``RevisionLag``). The radius is walked over ``assessed_graph`` (the
+    head's dependencies) when the head was scanned, the baseline otherwise.
     """
     scope = _scope(state)
     policy = _policy(state)
@@ -428,13 +596,18 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
             "baseline_graph": None,
         }
 
-    targets, target_issues = resolve_targets(
-        baseline.graph, list(state.get("target_services", []))
+    graph = state.get("assessed_graph") or baseline.graph
+    targets, target_issues = resolve_targets(graph, list(state.get("target_services", [])))
+    radius = traverse_blast_radius(graph, targets)
+    lag = state.get("revision_lag")
+    lag_issue = (
+        lag.issue(targets, [*radius.upstream, *radius.downstream]) if lag else None
     )
-    radius = traverse_blast_radius(baseline.graph, targets)
+    if lag_issue is not None:
+        issues.append(lag_issue)
     unset_kind = {
         entity.entity_id
-        for entity in baseline.graph.unresolved_entities
+        for entity in graph.unresolved_entities
         if entity.kind is UnresolvedEntityKind.ENVIRONMENT_VARIABLE_UNSET
     }
     gaps, exempted = unresolved_gaps(
@@ -714,6 +887,7 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
     loaded = state.get("project_policy")
     graph = state.get("baseline_graph")
     scan = graph.scan if graph else None
+    changes = state.get("dependency_changes")
     return AssessmentEvidence(
         pr_id=pull_request.pr_id,
         repository=pull_request.repository,
@@ -737,6 +911,9 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         scanned_revisions=list(scan.scanned_revisions) if scan else [],
         unbaselined_edges=list(telemetry.unbaselined_edges) if telemetry else [],
         live_coverage=telemetry.coverage if telemetry else None,
+        head_scanned=changes is not None,
+        dependencies_added=list(changes.added) if changes else [],
+        dependencies_removed=list(changes.removed) if changes else [],
     )
 
 
@@ -811,13 +988,20 @@ def _render_report(assessment: ReleaseAssessment, state: ReleaseGraphState) -> s
         f"{revision.repository}@{revision.commit_sha} ({revision.branch})"
         + (
             f" [PR base {evidence.base_sha} differs]"
-            if revision.repository == evidence.repository
+            if revision.repository.lower() == evidence.repository.lower()
             and evidence.base_sha
             and not revision.commit_sha.startswith(evidence.base_sha.lower())
             else ""
         )
         for revision in evidence.scanned_revisions
     ]
+    head_text = (
+        "Verified; changed services read at the head"
+        if evidence.head_scanned
+        else "Not verified (see evidence issues)"
+    )
+    added = [f"{c.source_id} -> {c.target_id}" for c in evidence.dependencies_added]
+    removed = [f"{c.source_id} -> {c.target_id}" for c in evidence.dependencies_removed]
     drift = [f"{edge.source_id} -> {edge.target_id}" for edge in evidence.unbaselined_edges]
     coverage = evidence.live_coverage
     coverage_text = (
@@ -838,6 +1022,9 @@ def _render_report(assessment: ReleaseAssessment, state: ReleaseGraphState) -> s
         f"**Baseline Created:** {created}\n\n"
         f"**Baseline Environment/Cluster:** {target}\n\n"
         f"**Scanned Revisions:** {_list(revisions)}\n\n"
+        f"**Pull Request Head:** {head_text}\n\n"
+        f"**Dependencies Added by the PR:** {_list(added)}\n\n"
+        f"**Dependencies Removed by the PR:** {_list(removed)}\n\n"
         f"**Release Policy:** {policy}\n\n"
         f"**Runtime Evidence:** {evidence.runtime_evidence.value}\n\n"
         f"**Live Coverage:** {coverage_text}\n\n"

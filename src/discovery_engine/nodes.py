@@ -2,7 +2,6 @@
 
 import logging
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
 
 from src.core import config
 from src.core.models import (
@@ -18,7 +17,6 @@ from src.core.models import (
     KnowledgeGraph,
     ScanContext,
     ScannedRevision,
-    ServiceEnvironment,
     ServiceIdentity,
     ServiceNode,
     UnresolvedEntity,
@@ -27,22 +25,15 @@ from src.core.models import (
     combine_statuses,
     unresolved_entity_id,
 )
-from src.core.service_ids import (
-    IdentityContext,
-    IdentityIndex,
-    env_var_reference,
-    is_unset_env_var_reference,
-    resolve_env_var_reference,
-    resolve_reference,
-    unresolved_entity,
+from src.core.edge_resolution import (
+    resolve_endpoint,
+    service_environment_index,
+    target_context,
 )
+from src.core.service_ids import IdentityContext, IdentityIndex
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools.baseline_store import BaselineScope, default_store
-from src.tools.devops_extractor import (
-    DevOpsExtractor,
-    EndpointReference,
-    ReferenceKind,
-)
+from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.policy_store import (
     PolicyInvalidError,
@@ -102,18 +93,6 @@ def initialize_scan_scope(state: DiscoveryGraphState) -> dict[str, object]:
         "target_repositories": list(state.get("target_repositories") or []),
         "target_namespaces": list(state.get("target_namespaces") or []),
     }
-
-
-def _static_target(reference: EndpointReference) -> str | None:
-    """Return the edge target for a static reference.
-
-    URLs are reduced to their hostname; environment variables become a
-    per-service ``env:`` reference that reconciliation resolves through the
-    variable's Kubernetes-configured value, when one is known.
-    """
-    if reference.kind is ReferenceKind.ENV_VAR:
-        return env_var_reference(reference.service_name, reference.endpoint)
-    return urlsplit(reference.endpoint).hostname or None
 
 
 def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object]:
@@ -185,7 +164,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
                     )
                 )
             for reference in scan.references:
-                target_service_id = _static_target(reference)
+                target_service_id = reference.dependency_target()
                 if not target_service_id:
                     continue
                 static_edges.append(
@@ -427,67 +406,6 @@ def _canonicalize_services(
     return merged, ambiguous
 
 
-def _service_environment_index(
-    environments: list[ServiceEnvironment],
-) -> dict[str, ServiceEnvironment]:
-    """Map service FQURIs to everything Kubernetes sets for them."""
-    index: dict[str, ServiceEnvironment] = {}
-    for environment in environments:
-        existing = index.get(environment.service_id)
-        index[environment.service_id] = environment if existing is None else ServiceEnvironment(
-            service_id=environment.service_id,
-            variables={**existing.variables, **environment.variables},
-            opaque_variables=sorted(
-                {*existing.opaque_variables, *environment.opaque_variables}
-            ),
-            has_opaque_sources=existing.has_opaque_sources or environment.has_opaque_sources,
-        )
-    return index
-
-
-def _resolve_endpoint(
-    reference: str,
-    index: IdentityIndex,
-    context: IdentityContext,
-    environments: dict[str, ServiceEnvironment],
-    unresolved: dict[str, UnresolvedEntity],
-) -> str:
-    """Return the node ID an edge endpoint points at.
-
-    References that resolve to exactly one registered service become that
-    service's FQURI, including ``env:`` references whose Kubernetes value
-    names one. Anything else is recorded in ``unresolved`` and its
-    unresolved-entity ID is returned; an ``env:`` reference to a variable
-    the service's workloads provably don't set is ENVIRONMENT_VARIABLE_UNSET.
-    """
-    values = {uri: env.variables for uri, env in environments.items()}
-    identity = resolve_reference(
-        reference, index, context
-    ) or resolve_env_var_reference(reference, values, index, context)
-    if identity is not None:
-        return identity.uri
-    entity = unresolved_entity(reference)
-    if is_unset_env_var_reference(reference, environments, index, context):
-        entity = entity.model_copy(
-            update={"kind": UnresolvedEntityKind.ENVIRONMENT_VARIABLE_UNSET}
-        )
-    unresolved.setdefault(entity.entity_id, entity)
-    return entity.entity_id
-
-
-def _target_context(source_id: str, context: IdentityContext) -> IdentityContext:
-    """Return the context a target's bare name resolves in.
-
-    A registered source's own namespace, as in-cluster DNS resolves short
-    names in the caller's namespace; ``context`` otherwise.
-    """
-    try:
-        source = ServiceIdentity.parse(source_id)
-    except ValueError:
-        return context
-    return context.in_namespace(source.namespace)
-
-
 def _merge_labels(first: str, second: str) -> str:
     """Union two comma-separated label sets, keeping first-seen order."""
     labels: list[str] = []
@@ -572,7 +490,7 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
         list(state.get("discovered_services", [])), context
     )
     index = IdentityIndex(service.identity for service in services)
-    environments = _service_environment_index(
+    environments = service_environment_index(
         list(state.get("service_environments", []))
     )
 
@@ -587,13 +505,13 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
             if position < len(static_edges)
             else None
         )
-        source = entity.entity_id if entity else _resolve_endpoint(
+        source = entity.entity_id if entity else resolve_endpoint(
             edge.source_service_id, index, context, environments, unresolved
         )
-        target = _resolve_endpoint(
+        target = resolve_endpoint(
             edge.target_service_id,
             index,
-            _target_context(source, context),
+            target_context(source, context),
             environments,
             unresolved,
         )
@@ -670,6 +588,11 @@ def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
             "unresolved_entities": reconciled_graph.get("unresolved_entities", []),
             "discovery": reports,
             "scan": scan_context(state),
+            # Only endpoint values, stripped of credentials, are stored.
+            "service_environments": [
+                environment.for_storage()
+                for environment in state.get("service_environments", [])
+            ],
         }
     )
     scope = BaselineScope(
