@@ -122,7 +122,7 @@ class ScanCoverageTests(unittest.TestCase):
         api = by_root["src/api"]
         self.assertEqual(
             (api.files_scanned, api.files_excluded, api.files_not_source, api.complete),
-            (1, 1, 2, True),  # Dockerfile and README are not source
+            (2, 1, 1, True),  # the Dockerfile is read for its ENV; README is not source
         )
         products = by_root["src/products"]
         self.assertFalse(products.complete)

@@ -6,7 +6,12 @@ from enum import Enum
 from typing import Dict, Final, Generic, List, Literal, Optional, Self, TypeVar
 from urllib.parse import urlsplit
 
-from src.core.env_names import is_endpoint_variable, storable_endpoint_value
+from src.core.env_names import (
+    PROFILE_VARIABLES,
+    is_connection_string_variable,
+    is_endpoint_variable,
+    storable_endpoint_value,
+)
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -282,14 +287,16 @@ class ServiceEnvironment(BaseModel):
 
         Only endpoint-like variables (the ones dependency resolution reads)
         keep a value, with credentials stripped (see
-        ``storable_endpoint_value``). Every other readable variable, and an
-        endpoint whose value carries a credential, is kept by name only in
+        ``storable_endpoint_value``; a connection string keeps only its
+        server), and so do the profile selectors in ``PROFILE_VARIABLES``.
+        Every other readable variable, and an endpoint whose value still
+        carries a credential, is kept by name only in
         ``withheld_variables``, so it still counts as set.
         """
         kept: dict[str, str] = {}
         withheld = set(self.withheld_variables)
         for name, value in self.variables.items():
-            cleaned = storable_endpoint_value(value) if is_endpoint_variable(name) else None
+            cleaned = storable_variable_value(name, value)
             if cleaned is None:
                 withheld.add(name)
             else:
@@ -440,10 +447,14 @@ class UnscannedReason(str, Enum):
     UNSUPPORTED_LANGUAGE: source code in a language the scanner can't read
         (Rust, Kotlin, C++...); a dependency it declares is invisible.
     READ_FAILED: the file couldn't be read at the scanned commit.
+    PARSE_FAILED: a framework configuration file (appsettings*.json,
+        application*.yml/.properties) couldn't be parsed, so its keys are
+        unknown.
     """
 
     UNSUPPORTED_LANGUAGE = "UNSUPPORTED_LANGUAGE"
     READ_FAILED = "READ_FAILED"
+    PARSE_FAILED = "PARSE_FAILED"
 
 
 class UnscannedFile(BaseModel):
@@ -554,9 +565,147 @@ class PipelineVariables(BaseModel):
         )
 
 
+def storable_variable_value(name: str, value: str) -> str | None:
+    """Return the value a snapshot may keep for an environment variable, or None.
+
+    Endpoint variables keep their credential-free endpoint; profile
+    selectors (``PROFILE_VARIABLES``) keep their value; anything else None.
+    """
+    if name.upper() in PROFILE_VARIABLES:
+        return value.strip()
+    if not is_endpoint_variable(name):
+        return None
+    return storable_endpoint_value(value, connection_string=is_connection_string_variable(name))
+
+
 def storable_pipeline_value(name: str, value: str) -> str | None:
     """Return the value a snapshot may keep for a pipeline variable, or None."""
-    return storable_endpoint_value(value) if is_endpoint_variable(name) else None
+    return storable_variable_value(name, value)
+
+
+class ConfigFramework(str, Enum):
+    """How a configuration key maps onto environment variables.
+
+    ENV: the key is an environment variable name, matched exactly.
+    DOTNET: Microsoft.Extensions.Configuration: ``A:B`` is overridden by
+        ``A__B``, matched case-insensitively; ``ASPNETCORE_ENVIRONMENT`` or
+        ``DOTNET_ENVIRONMENT`` (default ``Production``) picks
+        ``appsettings.<Environment>.json``.
+    SPRING: Spring Boot: ``a.b-c`` is overridden by ``A_BC`` (relaxed
+        binding); ``${NAME:default}`` placeholders read other properties or
+        variables; ``SPRING_PROFILES_ACTIVE`` picks ``application-<profile>``.
+    """
+
+    ENV = "ENV"
+    DOTNET = "DOTNET"
+    SPRING = "SPRING"
+
+
+class StaticDefaultSource(str, Enum):
+    """Where a default for a configuration key was written.
+
+    CONFIG_FILE: a framework configuration file (appsettings*.json,
+        application*.yml/.properties); ``profile`` names its profile.
+    CODE: the code that reads it (``os.getenv("X", "http://y")``,
+        ``@Value("${x:http://y}")``, ``config["X"] ?? "http://y"``).
+    """
+
+    CONFIG_FILE = "CONFIG_FILE"
+    CODE = "CODE"
+
+
+class StaticDefault(BaseModel):
+    """One default value for a configuration key, as source control holds it.
+
+    ``template`` is credential-free: an endpoint (see ``endpoint_of_value``)
+    or, for Spring, a value whose ``${NAME:default}`` placeholders are
+    filled in at resolution time, with user info and query removed.
+    """
+
+    template: str = Field(min_length=1)
+    source: StaticDefaultSource
+    file_path: str = Field(min_length=1)
+    profile: Optional[str] = None
+
+
+class ConfigBinding(BaseModel):
+    """A configuration key a service reads as a dependency address.
+
+    ``variable`` is the environment variable that overrides the key (the
+    name its ``env:`` reference cites); ``key`` is the key as the framework
+    writes it (``ConnectionStrings:EventBus``, ``spring.datasource.url``).
+    ``defaults`` are the values the service falls back to when nothing in
+    its runtime environment sets the key (see ``config_resolution``).
+    """
+
+    variable: str = Field(min_length=1)
+    key: str = Field(min_length=1)
+    framework: ConfigFramework
+    defaults: List[StaticDefault] = Field(default_factory=list)
+
+    def names(self, variable: str) -> bool:
+        """Whether ``variable`` is this binding's override variable."""
+        if self.framework is ConfigFramework.DOTNET:
+            return variable.lower() == self.variable.lower()
+        return variable == self.variable
+
+
+class ServiceStaticConfig(BaseModel):
+    """Everything source control says a service's configuration defaults to.
+
+    Read at one commit for one service directory. ``bindings`` are the keys
+    it reads as dependency addresses. ``image_variables`` are the container
+    image's ``ENV`` values (from the service's Dockerfile, final stage and
+    the stages it builds on) a snapshot may keep: endpoints without
+    credentials and profile selectors; ``image_withheld_variables`` are
+    other names the image sets, ``image_opaque_variables`` names whose value
+    comes from a build argument or expansion. Base images pulled from a
+    registry are not read.
+    """
+
+    repository: str = Field(min_length=1)
+    root: str
+    service_name: str = Field(min_length=1)
+    commit_sha: str = ""
+    bindings: List[ConfigBinding] = Field(default_factory=list)
+    image_variables: Dict[str, str] = Field(default_factory=dict)
+    image_withheld_variables: List[str] = Field(default_factory=list)
+    image_opaque_variables: List[str] = Field(default_factory=list)
+    image_file: Optional[str] = None
+
+    def binding(self, variable: str) -> Optional[ConfigBinding]:
+        """Return the binding ``variable`` overrides, if any."""
+        return next((b for b in self.bindings if b.names(variable)), None)
+
+
+class StaticDefaultOrigin(str, Enum):
+    """Which static layer supplied the value a dependency was resolved with.
+
+    IMAGE_ENV: the container image's Dockerfile ``ENV``.
+    CONFIG_FILE / CODE: as ``StaticDefaultSource``.
+    """
+
+    IMAGE_ENV = "IMAGE_ENV"
+    CONFIG_FILE = "CONFIG_FILE"
+    CODE = "CODE"
+
+
+class StaticDefaultUse(BaseModel):
+    """A dependency resolved from a static default, not the runtime environment.
+
+    Recorded only when Kubernetes, the build pipelines and every other
+    higher-precedence source provably don't set the variable, so the
+    service really runs with this value. ``endpoint`` is the
+    credential-free value; ``target`` the node it resolved to.
+    """
+
+    service_id: str = Field(min_length=1)
+    variable: str = Field(min_length=1)
+    endpoint: str = Field(min_length=1)
+    origin: StaticDefaultOrigin
+    file_path: str = Field(min_length=1)
+    profile: Optional[str] = None
+    target: str = Field(min_length=1)
 
 
 class ShapeFindingKind(str, Enum):
@@ -757,8 +906,11 @@ class KnowledgeGraph(BaseModel):
     pull request's head references are resolved through them.
     ``static_coverage`` records how completely each service directory was
     scanned, ``pipeline_variables`` what each repository's pipelines
-    define, and ``kubernetes_shape`` the namespace objects outside the
-    supported shape; each is None in snapshots written before it was.
+    define, ``kubernetes_shape`` the namespace objects outside the
+    supported shape, ``static_config`` the configuration defaults each
+    service's source declares, and ``static_defaults_used`` the
+    dependencies resolved from those defaults; each is None in snapshots
+    written before it was.
     """
 
     services: List[ServiceNode]
@@ -770,6 +922,8 @@ class KnowledgeGraph(BaseModel):
     static_coverage: Optional[List[RepositoryCoverage]] = None
     pipeline_variables: Optional[List[PipelineVariables]] = None
     kubernetes_shape: Optional[List[ShapeFinding]] = None
+    static_config: Optional[List[ServiceStaticConfig]] = None
+    static_defaults_used: Optional[List[StaticDefaultUse]] = None
 
     @model_validator(mode="after")
     def _services_match_scan(self) -> Self:

@@ -22,6 +22,7 @@ from src.core.edge_resolution import (
     pipeline_index,
     resolve_endpoint,
     service_environment_index,
+    static_config_index,
     target_context,
 )
 from src.core.models import (
@@ -33,6 +34,8 @@ from src.core.models import (
     EvidenceIssue,
     KnowledgeGraph,
     ReasonCode,
+    ServiceStaticConfig,
+    StaticDefaultUse,
     UnresolvedEntity,
 )
 from src.core.service_ids import IdentityContext, IdentityIndex
@@ -175,12 +178,15 @@ def head_topology(
     ``roots`` maps the changed services' repository roots to their FQURIs;
     ``head_services`` is the head scan of those roots. Head references are
     resolved exactly as discovery resolves them, through the baseline's
-    inventory and recorded container environments. Edges with runtime or
+    inventory and recorded container environments, with the changed
+    services' configuration defaults read at the head. Edges with runtime or
     manifest evidence keep it even when the head no longer declares them.
     """
     index = IdentityIndex(service.identity for service in graph.services)
     environments = service_environment_index(list(graph.service_environments or []))
     pipelines = pipeline_index(graph.services, graph.pipeline_variables)
+    configs = static_config_index(graph.services, _head_configs(graph, head_services))
+    defaults_used: dict[tuple[str, str], StaticDefaultUse] = {}
     unresolved: dict[str, UnresolvedEntity] = {
         entity.entity_id: entity for entity in graph.unresolved_entities
     }
@@ -200,6 +206,8 @@ def head_topology(
                 environments,
                 unresolved,
                 pipelines,
+                configs,
+                defaults_used,
             )
             if target != source:
                 head_edges[source].add(target)
@@ -243,16 +251,45 @@ def head_topology(
             )
         )
     used = {edge.target_service_id for edge in edges} | {edge.source_service_id for edge in edges}
+    defaults = (
+        None
+        if graph.static_defaults_used is None
+        else [
+            *(use for use in graph.static_defaults_used if use.service_id not in sources),
+            *defaults_used.values(),
+        ]
+    )
     return HeadTopology(
         graph=graph.model_copy(
             update={
                 "edges": edges,
                 "unresolved_entities": [e for e in unresolved.values() if e.entity_id in used],
+                "static_config": _head_configs(graph, head_services),
+                "static_defaults_used": defaults,
             }
         ),
         added=[DependencyChange(source_id=s, target_id=t) for s, t in added],
         removed=[DependencyChange(source_id=s, target_id=t) for s, t in removed],
     )
+
+
+def _head_configs(
+    graph: KnowledgeGraph, head_services: list[ServiceScan]
+) -> list[ServiceStaticConfig] | None:
+    """The baseline's static configuration with the changed services' read at head.
+
+    None for a baseline predating static configuration records, so the head
+    resolves exactly as that baseline did.
+    """
+    if graph.static_config is None:
+        return None
+    head = {
+        (scan.config.repository.lower(), scan.config.root): scan.config
+        for scan in head_services
+        if scan.config is not None
+    }
+    kept = [c for c in graph.static_config if (c.repository.lower(), c.root) not in head]
+    return [*kept, *head.values()]
 
 
 def missing_head_services(roots: dict[str, str], head_services: list[ServiceScan]) -> list[str]:

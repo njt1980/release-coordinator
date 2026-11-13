@@ -285,6 +285,7 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
         "pipeline_variables": [],
         "kubernetes_shape": [],
         "manifest_edges": [],
+        "static_config": [],
         "reconciled_graph": {},
         "baseline_snapshot_id": "",
     }

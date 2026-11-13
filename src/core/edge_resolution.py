@@ -7,12 +7,16 @@ against), so both resolve a reference the same way.
 
 from collections.abc import Iterable, Mapping
 
+from src.core.config_resolution import ResolutionOutcome, resolve_variable
 from src.core.models import (
     REPOSITORY_METADATA_KEY,
+    SERVICE_ROOT_METADATA_KEY,
     PipelineVariables,
     ServiceEnvironment,
     ServiceNode,
     ServiceIdentity,
+    ServiceStaticConfig,
+    StaticDefaultUse,
     UnresolvedEntity,
     UnresolvedEntityKind,
 )
@@ -20,6 +24,7 @@ from src.core.service_ids import (
     IdentityContext,
     IdentityIndex,
     is_unset_env_var_reference,
+    parse_env_var_reference,
     resolve_env_var_reference,
     resolve_reference,
     unresolved_entity,
@@ -90,6 +95,84 @@ def pipeline_index(
     return index
 
 
+def static_config_index(
+    services: Iterable[ServiceNode], configs: Iterable[ServiceStaticConfig] | None
+) -> dict[str, ServiceStaticConfig] | None:
+    """Map each repository-scanned service's FQURI to its static configuration.
+
+    Matched by repository and service root. None when ``configs`` is None
+    (a snapshot predating static configuration records), so resolution
+    behaves as it did when that snapshot was written.
+    """
+    if configs is None:
+        return None
+    by_root = {(config.repository.lower(), config.root): config for config in configs}
+    index: dict[str, ServiceStaticConfig] = {}
+    for service in services:
+        repository = str(service.metadata.get(REPOSITORY_METADATA_KEY, "")).lower()
+        root = str(service.metadata.get(SERVICE_ROOT_METADATA_KEY, ""))
+        config = by_root.get((repository, root))
+        if repository and config is not None:
+            index[service.service_id] = config
+    return index
+
+
+def _record(unresolved: dict[str, UnresolvedEntity], entity: UnresolvedEntity) -> str:
+    unresolved.setdefault(entity.entity_id, entity)
+    return entity.entity_id
+
+
+def _resolve_configured(
+    reference: str,
+    index: IdentityIndex,
+    context: IdentityContext,
+    environments: dict[str, ServiceEnvironment],
+    unresolved: dict[str, UnresolvedEntity],
+    pipelines: Mapping[str, PipelineVariables] | None,
+    configs: Mapping[str, ServiceStaticConfig],
+    defaults_used: dict[tuple[str, str], StaticDefaultUse] | None,
+) -> str | None:
+    """Resolve an ``env:`` reference through every configuration layer.
+
+    None when the reference isn't an ``env:`` reference of a registered
+    service (the caller falls back to plain resolution).
+    """
+    parsed = parse_env_var_reference(reference)
+    if parsed is None:
+        return None
+    service_name, variable = parsed
+    owner = resolve_reference(service_name, index, context)
+    if owner is None:
+        return None
+    resolution = resolve_variable(
+        variable,
+        configs.get(owner.uri),
+        environments.get(owner.uri),
+        pipelines.get(owner.uri) if pipelines is not None else None,
+    )
+    owner_context = context.in_namespace(owner.namespace)
+    entity = unresolved_entity(reference)
+    if resolution.outcome is ResolutionOutcome.UNSET:
+        entity = entity.model_copy(update={"kind": UnresolvedEntityKind.ENVIRONMENT_VARIABLE_UNSET})
+    if resolution.endpoint is None:
+        return _record(unresolved, entity)
+    identity = resolve_reference(resolution.endpoint, index, owner_context)
+    if resolution.outcome is ResolutionOutcome.RUNTIME:
+        return identity.uri if identity else _record(unresolved, entity)
+    target = identity.uri if identity else _record(unresolved, unresolved_entity(resolution.endpoint))
+    if defaults_used is not None and resolution.origin is not None:
+        defaults_used[(owner.uri, variable)] = StaticDefaultUse(
+            service_id=owner.uri,
+            variable=variable,
+            endpoint=resolution.endpoint,
+            origin=resolution.origin,
+            file_path=resolution.file_path or "Dockerfile",
+            profile=resolution.profile,
+            target=target,
+        )
+    return target
+
+
 def resolve_endpoint(
     reference: str,
     index: IdentityIndex,
@@ -97,6 +180,8 @@ def resolve_endpoint(
     environments: dict[str, ServiceEnvironment],
     unresolved: dict[str, UnresolvedEntity],
     pipelines: Mapping[str, PipelineVariables] | None = None,
+    configs: Mapping[str, ServiceStaticConfig] | None = None,
+    defaults_used: dict[tuple[str, str], StaticDefaultUse] | None = None,
 ) -> str:
     """Return the node ID an edge endpoint points at.
 
@@ -108,7 +193,19 @@ def resolve_endpoint(
     pipelines don't define (see ``pipeline_index``), is
     ENVIRONMENT_VARIABLE_UNSET. Pipeline values never resolve a reference:
     the cluster's environment already reflects deploy-time substitution.
+
+    With ``configs`` (see ``static_config_index``), an ``env:`` reference
+    is resolved through ``config_resolution``: a connection string's server
+    counts, and when nothing at runtime sets the variable the image's
+    ``ENV`` or a configuration default applies; each such use is added to
+    ``defaults_used``.
     """
+    if configs is not None:
+        target = _resolve_configured(
+            reference, index, context, environments, unresolved, pipelines, configs, defaults_used
+        )
+        if target is not None:
+            return target
     values = {uri: env.variables for uri, env in environments.items()}
     identity = resolve_reference(
         reference, index, context

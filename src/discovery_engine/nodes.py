@@ -19,6 +19,7 @@ from src.core.models import (
     ScannedRevision,
     ServiceIdentity,
     ServiceNode,
+    StaticDefaultUse,
     UnresolvedEntity,
     UnresolvedEntityKind,
     baseline_problems,
@@ -29,6 +30,7 @@ from src.core.edge_resolution import (
     pipeline_index,
     resolve_endpoint,
     service_environment_index,
+    static_config_index,
     target_context,
 )
 from src.core.service_ids import IdentityContext, IdentityIndex
@@ -122,7 +124,8 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     scanned repository's pinned commit is added to ``scanned_revisions``,
     how completely each service directory was scanned to
     ``static_coverage``, and what its build pipelines define (read at the
-    same commit) to ``pipeline_variables``.
+    same commit) to ``pipeline_variables``, and each service's declared
+    configuration defaults to ``static_config``.
     """
     if not state.get("devops_org_url") or not state.get("devops_project"):
         return _skipped(state, DiscoveryMethod.STATIC_CODE)
@@ -139,6 +142,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     scanned_revisions: list[ScannedRevision] = list(state.get("scanned_revisions", []))
     static_coverage = list(state.get("static_coverage", []))
     pipeline_variables = list(state.get("pipeline_variables", []))
+    static_config = list(state.get("static_config", []))
     statuses: list[DiscoveryStatus] = []
     errors: list[str] = []
     edge_count = 0
@@ -151,6 +155,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
         for repository_scan in result.items:
             scanned_revisions.append(repository_scan.revision)
             static_coverage.append(repository_scan.coverage())
+            static_config.extend(repository_scan.static_config())
             pipeline_variables.append(
                 extractor.read_pipeline_variables(repo_name, repository_scan.revision)
             )
@@ -207,6 +212,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
         "scanned_revisions": scanned_revisions,
         "static_coverage": static_coverage,
         "pipeline_variables": pipeline_variables,
+        "static_config": static_config,
         "discovery_reports": _append_report(state, report),
     }
 
@@ -490,7 +496,9 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
     matching exactly one registered service becomes its FQURI, and any other
     endpoint (an IP address, a private or external DNS name, or an unknown
     service) becomes an ``UnresolvedEntity`` node. An ``env:`` reference is
-    resolved through the variable's value in ``service_environments``; if
+    resolved through the variable's value in ``service_environments`` (and,
+    when nothing at runtime sets it, the service's ``static_config``
+    defaults, each use listed in ``static_defaults_used``); if
     it cannot be mapped to exactly one registered service it stays an
     ENVIRONMENT_VARIABLE entity, so release gating still sees it. Duplicate relationships
     are merged and self-referencing edges are dropped, as are uncertain
@@ -510,6 +518,8 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
         list(state.get("service_environments", []))
     )
     pipelines = pipeline_index(services, list(state.get("pipeline_variables", [])))
+    configs = static_config_index(services, state.get("static_config"))
+    defaults_used: dict[tuple[str, str], StaticDefaultUse] = {}
 
     unresolved: dict[str, UnresolvedEntity] = {
         entity.entity_id: entity for entity in ambiguous.values()
@@ -528,7 +538,7 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
             else None
         )
         source = entity.entity_id if entity else resolve_endpoint(
-            edge.source_service_id, index, context, environments, unresolved, pipelines
+            edge.source_service_id, index, context, environments, unresolved, pipelines, configs
         )
         target = resolve_endpoint(
             edge.target_service_id,
@@ -537,6 +547,8 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
             environments,
             unresolved,
             pipelines,
+            configs,
+            defaults_used,
         )
         if source == target:
             continue
@@ -555,6 +567,7 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
             "services": services,
             "edges": drop_reversed_sightings(merged_edges),
             "unresolved_entities": list(unresolved.values()),
+            "static_defaults_used": list(defaults_used.values()),
         }
     }
 
@@ -620,6 +633,8 @@ def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
             "static_coverage": list(state.get("static_coverage", [])),
             "pipeline_variables": list(state.get("pipeline_variables", [])),
             "kubernetes_shape": list(state.get("kubernetes_shape", [])),
+            "static_config": list(state.get("static_config", [])),
+            "static_defaults_used": reconciled_graph.get("static_defaults_used", []),
         }
     )
     scope = BaselineScope(

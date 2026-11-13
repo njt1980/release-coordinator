@@ -6,7 +6,6 @@ import os
 import re
 from enum import Enum
 from typing import Any, Final, Self
-from urllib.parse import urlsplit
 
 import yaml
 
@@ -21,17 +20,41 @@ from msrest.authentication import BasicTokenAuthentication
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.core.models import (
+    ConfigBinding,
+    ConfigFramework,
     DiscoveryResult,
     PipelineVariables,
     RepositoryCoverage,
     ScannedRevision,
     ServiceCoverage,
+    ServiceStaticConfig,
     UnscannedFile,
     UnscannedReason,
     storable_pipeline_value,
 )
-from src.core.env_names import is_endpoint_variable
-from src.core.service_ids import env_var_reference, is_private_dns_host
+from src.core.env_names import (
+    endpoint_in_value,
+    endpoint_of_value,
+    is_endpoint_variable,
+    is_loopback_endpoint,
+)
+from src.core.service_ids import env_var_reference, host_of, is_private_dns_host
+from src.tools.config_readers import (
+    ConfigFileKind,
+    ConfigParseError,
+    ImageEnvironment,
+    config_file,
+    dockerfile_environment,
+    dotnet_code_bindings,
+    dotnet_settings_bindings,
+    env_default_bindings,
+    feign_client_services,
+    fill_placeholder_defaults,
+    merge_bindings,
+    spring_code_bindings,
+    spring_config_bindings,
+    storable_image_environment,
+)
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
     VERIFY_TIMEOUT_SECONDS,
@@ -80,7 +103,11 @@ _UNSUPPORTED_SOURCE_SUFFIXES: Final[frozenset[str]] = frozenset(
         ".swift", ".vb", ".zig",
     }
 )
-_URL_PATTERN = re.compile(r"""https?://[^\s"'<>)}\]`]+""", re.IGNORECASE)
+# Literal URLs with a scheme that addresses another service (see
+# ENDPOINT_SCHEMES); ``_is_noise_endpoint`` drops the other schemes.
+_URL_PATTERN = re.compile(
+    r"""(?:jdbc:)?[a-z][a-z0-9+.-]*://[^\s"'<>)}\]`]+""", re.IGNORECASE
+)
 _EXCLUDED_DIRECTORIES = {
     ".git",
     "bower_components",
@@ -91,6 +118,11 @@ _EXCLUDED_DIRECTORIES = {
     "target",
     "vendor",
 }
+# Local development orchestration (Docker Compose): describes a whole stack
+# on one machine, so its URLs belong to other services, not the owner.
+_COMPOSE_FILE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(?:docker-)?compose(?:[.-][^/]*)?\.ya?ml$", re.IGNORECASE
+)
 _EXCLUDED_FILENAMES = {
     "composer.lock",
     "package-lock.json",
@@ -138,7 +170,8 @@ _ENV_VAR_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
 class ReferenceKind(str, Enum):
     """How a service refers to one of its dependencies.
 
-    URL: a literal http(s) URL; ``endpoint`` is that URL.
+    URL: a literal URL with an endpoint scheme (http, gRPC, AMQP, JDBC...);
+        ``endpoint`` is that URL.
     ENV_VAR: an endpoint-like environment variable read in code;
         ``endpoint`` is the variable name, to be resolved from configuration.
     """
@@ -164,7 +197,8 @@ class EndpointReference(BaseModel):
         """
         if self.kind is ReferenceKind.ENV_VAR:
             return env_var_reference(self.service_name, self.endpoint)
-        return urlsplit(self.endpoint).hostname or None
+        endpoint = endpoint_of_value(self.endpoint)
+        return (host_of(endpoint) or None) if endpoint else None
 
 
 class BoundarySource(str, Enum):
@@ -199,6 +233,7 @@ class ServiceScan(BaseModel):
     service: ServiceBoundary
     references: list[EndpointReference] = Field(default_factory=list)
     coverage: ServiceCoverage | None = None
+    config: ServiceStaticConfig | None = None
 
 
 class RepositoryScan(BaseModel):
@@ -216,6 +251,10 @@ class RepositoryScan(BaseModel):
             services=[scan.coverage for scan in self.services if scan.coverage],
             unowned_source_files=self.unowned_source_files,
         )
+
+    def static_config(self) -> list[ServiceStaticConfig]:
+        """Return each service's static configuration, as a snapshot stores it."""
+        return [scan.config for scan in self.services if scan.config]
 
 
 class CommitComparison(BaseModel):
@@ -366,9 +405,12 @@ def _path_segments(path: str) -> list[str]:
 class FileClass(str, Enum):
     """How the scanner treats one repository file.
 
-    SCANNED: application or configuration source the scanner reads.
+    SCANNED: application or configuration source the scanner reads
+        (a Dockerfile for its image ``ENV``).
     EXCLUDED: skipped by design (documentation, vendored dependencies,
-        build output, lock files), which mostly reference third-party sites.
+        build output, lock files), which mostly reference third-party sites,
+        and Docker Compose files, which describe a local stack of other
+        services.
     UNSUPPORTED: source code in a language the scanner can't read.
     NOT_SOURCE: anything else (images, Markdown, licenses...).
     """
@@ -385,9 +427,13 @@ def classify_path(path: str) -> FileClass:
     if not segments:
         return FileClass.NOT_SOURCE
     filename = segments[-1]
-    if _EXCLUDED_DIRECTORIES.intersection(segments[:-1]) or filename in _EXCLUDED_FILENAMES:
+    if (
+        _EXCLUDED_DIRECTORIES.intersection(segments[:-1])
+        or filename in _EXCLUDED_FILENAMES
+        or _COMPOSE_FILE_PATTERN.match(filename)
+    ):
         return FileClass.EXCLUDED
-    if filename == ".env" or filename.startswith(".env."):
+    if filename == ".env" or filename.startswith(".env.") or filename == "dockerfile":
         return FileClass.SCANNED
     suffix = os.path.splitext(filename)[1]
     if suffix in _TEXT_FILE_SUFFIXES:
@@ -514,19 +560,16 @@ def _is_dependency_host(hostname: str) -> bool:
 def _is_noise_endpoint(endpoint: str) -> bool:
     """Return True for URLs that are not a dependency of the service.
 
-    Templated URLs, non-http(s) schemes, and URLs whose host fails
-    ``_is_dependency_host`` are noise.
+    Templated URLs, schemes that don't address a service (see
+    ``ENDPOINT_SCHEMES``), and URLs whose host fails ``_is_dependency_host``
+    are noise.
     """
     if "${" in endpoint or "{{" in endpoint:
         return True
-    try:
-        parsed = urlsplit(endpoint)
-        hostname = parsed.hostname or ""
-    except ValueError:
+    normalized = endpoint_of_value(endpoint)
+    if normalized is None:
         return True
-    if parsed.scheme.lower() not in {"http", "https"}:
-        return True
-    return not _is_dependency_host(hostname)
+    return not _is_dependency_host(host_of(normalized))
 
 
 def _extract_env_var_names(content: str) -> list[str]:
@@ -558,6 +601,159 @@ def _extract_references(
         )
         for name in _extract_env_var_names(content)
     )
+    return references
+
+
+class FileRead(BaseModel):
+    """What one scanned file contributes to its service.
+
+    ``references`` are literal URLs and environment reads; ``bindings`` the
+    configuration keys it reads or declares (see ``config_readers``);
+    ``image`` the ``ENV`` of a Dockerfile.
+    """
+
+    references: list[EndpointReference] = Field(default_factory=list)
+    bindings: list[ConfigBinding] = Field(default_factory=list)
+    image: ImageEnvironment | None = None
+
+
+def read_source_file(content: str, service_name: str, path: str) -> FileRead:
+    """Read one file a service owns.
+
+    Framework configuration files (appsettings*.json, application*.yml)
+    contribute bindings only: a literal URL in them is a default the
+    runtime environment may override, never a fixed edge. A Dockerfile
+    contributes its image ``ENV``. Code contributes literal URLs and
+    environment reads (a URL that is only a read's default is that
+    default, not a separate edge), C# IConfiguration and Spring reads, and
+    ``@FeignClient`` service names.
+
+    Raises:
+        ConfigParseError: if a framework configuration file can't be parsed.
+    """
+    relative = path.lstrip("/")
+    kind = config_file(path)
+    if kind is not None and kind.kind is ConfigFileKind.DOCKERFILE:
+        return FileRead(image=dockerfile_environment(content))
+    if kind is not None and kind.kind is ConfigFileKind.DOTNET_SETTINGS:
+        return FileRead(bindings=dotnet_settings_bindings(content, relative, kind.profile))
+    if kind is not None and kind.kind is ConfigFileKind.SPRING_CONFIG:
+        return FileRead(bindings=spring_config_bindings(content, relative, kind.profile))
+    bindings = env_default_bindings(content, relative)
+    suffix = os.path.splitext(path)[1].lower()
+    references = _extract_references(content, service_name, path)
+    if suffix == ".cs":
+        bindings.extend(dotnet_code_bindings(content, relative))
+    elif suffix == ".java":
+        bindings.extend(spring_code_bindings(content, relative))
+        references.extend(
+            EndpointReference(service_name=service_name, endpoint=f"lb://{name}", file_path=path)
+            for name in feign_client_services(content)
+        )
+    code_defaults = {default.template for binding in bindings for default in binding.defaults}
+    references = [
+        reference
+        for reference in references
+        if reference.kind is not ReferenceKind.URL
+        or endpoint_of_value(reference.endpoint) not in code_defaults
+    ]
+    return FileRead(references=references, bindings=bindings)
+
+
+def _default_is_dependency(template: str) -> bool:
+    """Whether a default may address a dependency (not a public site).
+
+    Defaults naming no address yet (a bare placeholder) and this host
+    count: the first may be set at runtime, the second is reported.
+    """
+    endpoint = endpoint_in_value(fill_placeholder_defaults(template), connection_string=True)
+    if endpoint is None or is_loopback_endpoint(endpoint):
+        return True
+    return _is_dependency_host(host_of(endpoint))
+
+
+def dependency_bindings(bindings: list[ConfigBinding]) -> list[ConfigBinding]:
+    """Merge a service's bindings, dropping those that only name public sites.
+
+    As literal public URLs are noise to the scanner, a key whose every
+    default is a public address (``"OpenAI:Endpoint": "https://..."``) is
+    not a dependency reference.
+    """
+    kept = [
+        binding
+        for binding in bindings
+        if not binding.defaults
+        or any(_default_is_dependency(default.template) for default in binding.defaults)
+    ]
+    return merge_bindings(kept)
+
+
+def merge_images(images: list[tuple[str, ImageEnvironment]]) -> tuple[str | None, ImageEnvironment]:
+    """Combine the Dockerfiles a service owns into the ENV its image has.
+
+    One Dockerfile is the image. With several, a name every one of them
+    sets to the same literal keeps it; any other name one sets is opaque,
+    since which file builds the deployed image is unknown.
+    """
+    if not images:
+        return None, ImageEnvironment()
+    if len(images) == 1:
+        return images[0]
+    names = {name for _, image in images for name in (*image.variables, *image.opaque)}
+    merged = ImageEnvironment()
+    opaque: set[str] = set()
+    for name in sorted(names):
+        values = {image.variables.get(name) for _, image in images}
+        if len(values) == 1 and None not in values:
+            merged.variables[name] = values.pop() or ""
+        else:
+            opaque.add(name)
+    merged.opaque = sorted(opaque)
+    return ", ".join(path for path, _ in images), merged
+
+
+def build_static_config(
+    repository: str,
+    boundary: ServiceBoundary,
+    commit_sha: str,
+    bindings: list[ConfigBinding],
+    images: list[tuple[str, ImageEnvironment]],
+) -> ServiceStaticConfig:
+    """Assemble one service's static configuration record."""
+    image_file, image = merge_images(images)
+    kept, withheld = storable_image_environment(image)
+    return ServiceStaticConfig(
+        repository=repository,
+        root=boundary.root,
+        service_name=boundary.name,
+        commit_sha=commit_sha,
+        bindings=dependency_bindings(bindings),
+        image_variables=kept,
+        image_withheld_variables=withheld,
+        image_opaque_variables=image.opaque,
+        image_file=image_file,
+    )
+
+
+def binding_references(
+    service_name: str, bindings: list[ConfigBinding], existing: list[EndpointReference]
+) -> list[EndpointReference]:
+    """``env:`` references for bindings not already read as environment variables."""
+    seen = {r.endpoint.lower() for r in existing if r.kind is ReferenceKind.ENV_VAR}
+    references: list[EndpointReference] = []
+    for binding in bindings:
+        if binding.variable.lower() in seen:
+            continue
+        seen.add(binding.variable.lower())
+        source = next((d.file_path for d in binding.defaults), binding.key)
+        references.append(
+            EndpointReference(
+                service_name=service_name,
+                endpoint=binding.variable,
+                file_path=source,
+                kind=ReferenceKind.ENV_VAR,
+            )
+        )
     return references
 
 
@@ -1066,6 +1262,8 @@ class DevOpsExtractor:
             references: dict[str, dict[tuple[ReferenceKind, str], EndpointReference]] = {
                 boundary.root: {} for boundary in boundaries
             }
+            bindings: dict[str, list[ConfigBinding]] = {b.root: [] for b in boundaries}
+            images: dict[str, list[tuple[str, ImageEnvironment]]] = {b.root: [] for b in boundaries}
             coverage = {
                 boundary.root: ServiceCoverage(service_name=boundary.name, root=boundary.root)
                 for boundary in boundaries
@@ -1095,20 +1293,38 @@ class DevOpsExtractor:
                         UnscannedFile(path=path.lstrip("/"), reason=UnscannedReason.READ_FAILED)
                     )
                     continue
+                try:
+                    read = read_source_file(content, owner.name, path)
+                except ConfigParseError as error:
+                    logger.warning("Cannot parse %s in %s: %s", path, repo_name, error)
+                    coverage[owner.root].unscanned.append(
+                        UnscannedFile(path=path.lstrip("/"), reason=UnscannedReason.PARSE_FAILED)
+                    )
+                    continue
                 coverage[owner.root].files_scanned += 1
-                for reference in _extract_references(content, owner.name, path):
+                bindings[owner.root].extend(read.bindings)
+                if read.image is not None:
+                    images[owner.root].append((path.lstrip("/"), read.image))
+                for reference in read.references:
                     references[owner.root].setdefault(
                         (reference.kind, reference.endpoint), reference
                     )
 
-            scans = [
-                ServiceScan(
-                    service=boundary,
-                    references=list(references[boundary.root].values()),
-                    coverage=coverage[boundary.root],
+            scans = []
+            for boundary in boundaries:
+                config = build_static_config(
+                    repo_name, boundary, commit_sha, bindings[boundary.root], images[boundary.root]
                 )
-                for boundary in boundaries
-            ]
+                found = list(references[boundary.root].values())
+                found.extend(binding_references(boundary.name, config.bindings, found))
+                scans.append(
+                    ServiceScan(
+                        service=boundary,
+                        references=found,
+                        coverage=coverage[boundary.root],
+                        config=config,
+                    )
+                )
             return DiscoveryResult[RepositoryScan].from_items(
                 [
                     RepositoryScan(
