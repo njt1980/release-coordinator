@@ -104,9 +104,13 @@ workspace.
    and counted: loopback calls, targets with no host (an HTTP method or a
    span name), and targets on an ephemeral port (32768 and up: a reply or
    a broker delivery reported backwards). The result is **live** evidence
-   only when the query returned rows, its newest row is within
-   `max_telemetry_age_minutes`, and every radius service was observed or
-   is listed in `exemptions.silent_services`. Otherwise it is
+   only when the query returned rows and **each** radius service was seen
+   within `max_telemetry_age_minutes`, judged per service so one busy
+   service can't make a quiet one look fresh. A service that is quiet by
+   nature can be listed in `exemptions.silent_services` with a reason, an
+   `expires_on` date (expired entries are ignored and reported) and
+   optionally `max_quiet_days` (it must still be seen within that many
+   days). Otherwise it is
    `live_empty`, `live_stale` or `live_uncovered`, and a policy requiring
    live evidence blocks with the reason. An observed edge in the radius
    that the baseline lacks means the baseline no longer describes the

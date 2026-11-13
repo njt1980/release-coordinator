@@ -10,6 +10,7 @@ coordinator blocks the release.
 import hashlib
 import ipaddress
 import re
+from datetime import date
 from enum import Enum
 from pathlib import Path
 from typing import Final, Self
@@ -141,14 +142,26 @@ _MIN_PREFIX = {4: 8, 6: 16}
 
 
 class SilentServiceExemption(_StrictModel):
-    """A radius service live telemetry may legitimately not observe.
+    """A radius service allowed to be quiet longer than the live window.
 
-    ``service`` is ``<namespace>/<name>``: for example a batch job that only
-    runs nightly, or a database that is only ever called.
+    ``service`` is ``<namespace>/<name>``: for example a report job that
+    runs weekly, or an admin tool used a few times a week. Every radius
+    service must otherwise have been seen within
+    ``max_telemetry_age_minutes``. With ``max_quiet_days`` it must have
+    been seen within that many days instead; without it, it may go unseen
+    for the whole lookback. ``expires_on`` is the last day (UTC) the entry
+    applies, so every exception is re-reviewed; an expired entry is
+    ignored and reported.
     """
 
     service: str
     reason: str = Field(min_length=1)
+    expires_on: date
+    max_quiet_days: int | None = Field(default=None, ge=1, le=config.MAX_RUNTIME_LOOKBACK_DAYS)
+
+    def is_active(self, today: date) -> bool:
+        """Whether the entry still applies on ``today``."""
+        return today <= self.expires_on
 
     @field_validator("service")
     @classmethod
@@ -335,6 +348,25 @@ class ProjectPolicy(_StrictModel):
                 "required source or runtime_evidence is live"
             )
         return self
+
+    @model_validator(mode="after")
+    def _silent_services_are_checkable(self) -> Self:
+        services = [rule.service for rule in self.exemptions.silent_services]
+        if len(set(services)) != len(services):
+            raise ValueError("exemptions.silent_services must list each service once")
+        for rule in self.exemptions.silent_services:
+            if rule.max_quiet_days and rule.max_quiet_days > self.runtime_lookback_days:
+                raise ValueError(
+                    f"{rule.service}: max_quiet_days {rule.max_quiet_days} exceeds "
+                    f"runtime_lookback_days {self.runtime_lookback_days}, so it can't be checked"
+                )
+        return self
+
+    def silent_service_rule(self, service: str) -> SilentServiceExemption | None:
+        """Return the silent-service entry for ``<namespace>/<name>``, if any."""
+        return next(
+            (rule for rule in self.exemptions.silent_services if rule.service == service), None
+        )
 
 
 class LoadedPolicy(BaseModel):

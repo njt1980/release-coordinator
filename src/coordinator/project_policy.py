@@ -191,27 +191,74 @@ def _namespaced_name(service_id: str) -> str:
     return f"{identity.namespace}/{identity.service_name}"
 
 
+def _live_window(policy: ProjectPolicy | None) -> timedelta:
+    return timedelta(
+        minutes=policy.max_telemetry_age_minutes
+        if policy
+        else config.DEFAULT_MAX_TELEMETRY_AGE_MINUTES
+    )
+
+
 def live_coverage(
     policy: ProjectPolicy | None,
     observed: Collection[ObservedEdge],
     radius: Collection[str],
+    now: datetime,
 ) -> LiveCoverage:
-    """Describe how a live query's resolved edges cover the release radius.
+    """Describe, service by service, how live telemetry covers the radius.
 
-    A radius service is observed when it is the source or target of any
-    resolved live edge. The policy's ``silent_services`` (by
-    ``<namespace>/<name>``) are reported apart from the uncovered ones.
+    A radius service's last sighting is the newest resolved live edge it is
+    the source or target of. It is observed when that is within
+    ``max_telemetry_age_minutes`` of ``now``. Otherwise an active
+    silent-service entry may allow it: always without ``max_quiet_days``,
+    or when it was seen within that many days. Anything else is uncovered,
+    so one busy service can't make a quiet one look fresh.
     """
-    seen = {edge.source_id for edge in observed} | {edge.target_id for edge in observed}
-    silent_names = {rule.service for rule in policy.exemptions.silent_services} if policy else set()
-    unseen = sorted(service for service in radius if service not in seen)
+    last_seen: dict[str, datetime] = {}
+    for edge in observed:
+        edge_seen = _utc(edge.last_observed_at)
+        for node in (edge.source_id, edge.target_id):
+            if node in radius and (node not in last_seen or edge_seen > last_seen[node]):
+                last_seen[node] = edge_seen
+    window = _live_window(policy)
+    today = now.date()
+    observed_services: list[str] = []
+    silent: list[str] = []
+    uncovered: list[str] = []
+    expired: list[str] = []
+    for service in sorted(radius):
+        seen_at = last_seen.get(service)
+        if seen_at is not None and now - seen_at <= window:
+            observed_services.append(service)
+            continue
+        rule = policy.silent_service_rule(_namespaced_name(service)) if policy else None
+        if rule is not None and not rule.is_active(today):
+            expired.append(service)
+            rule = None
+        allowed = rule is not None and (
+            rule.max_quiet_days is None
+            or (seen_at is not None and now - seen_at <= timedelta(days=rule.max_quiet_days))
+        )
+        (silent if allowed else uncovered).append(service)
     return LiveCoverage(
         edge_count=len(observed),
         newest_observed_at=max((_utc(e.last_observed_at) for e in observed), default=None),
-        observed_services=sorted(service for service in radius if service in seen),
-        uncovered_services=[s for s in unseen if _namespaced_name(s) not in silent_names],
-        silent_services=[s for s in unseen if _namespaced_name(s) in silent_names],
+        observed_services=observed_services,
+        uncovered_services=uncovered,
+        silent_services=silent,
+        service_last_seen=last_seen,
+        expired_exemptions=expired,
     )
+
+
+def _ago(now: datetime, moment: datetime | None) -> str:
+    if moment is None:
+        return "not seen in the lookback window"
+    minutes = int((now - moment).total_seconds() // 60)
+    if minutes < 120:
+        return f"last seen {minutes} minutes ago"
+    hours = minutes // 60
+    return f"last seen {hours} hours ago" if hours < 48 else f"last seen {hours // 24} days ago"
 
 
 def live_runtime_state(
@@ -219,30 +266,40 @@ def live_runtime_state(
 ) -> tuple[RuntimeEvidenceState, str]:
     """Classify a completed, real live query and explain a weak result.
 
-    Empty beats stale beats uncovered: each later check needs the earlier
-    one to pass. Without a policy the default telemetry age applies.
+    LIVE_EMPTY: no usable rows. LIVE_STALE: even the newest row is older
+    than the live window, so telemetry isn't arriving at all.
+    LIVE_UNCOVERED: some radius service wasn't seen recently enough (see
+    ``live_coverage``). Each later check needs the earlier one to pass.
     """
     if coverage.edge_count == 0 or coverage.newest_observed_at is None:
         return RuntimeEvidenceState.LIVE_EMPTY, (
             "The live telemetry query returned no usable rows for this cluster."
         )
-    max_age = timedelta(
-        minutes=policy.max_telemetry_age_minutes
-        if policy
-        else config.DEFAULT_MAX_TELEMETRY_AGE_MINUTES
-    )
-    age = now - coverage.newest_observed_at
-    if age > max_age:
-        minutes = int(age.total_seconds() // 60)
+    window = _live_window(policy)
+    minutes_allowed = int(window.total_seconds() // 60)
+    if now - coverage.newest_observed_at > window:
         return RuntimeEvidenceState.LIVE_STALE, (
-            f"The newest live telemetry row is {minutes} minutes old; at most "
-            f"{int(max_age.total_seconds() // 60)} minutes is allowed."
+            f"The newest live telemetry row is "
+            f"{int((now - coverage.newest_observed_at).total_seconds() // 60)} minutes "
+            f"old; at most {minutes_allowed} minutes is allowed, so telemetry is not "
+            "arriving."
         )
     if coverage.uncovered_services:
+        details = "; ".join(
+            f"{service} ({_ago(now, coverage.service_last_seen.get(service))})"
+            for service in coverage.uncovered_services
+        )
+        expired = (
+            " Expired silent-service entries were ignored for: "
+            + ", ".join(coverage.expired_exemptions)
+            + "."
+            if coverage.expired_exemptions
+            else ""
+        )
         return RuntimeEvidenceState.LIVE_UNCOVERED, (
-            "Live telemetry did not observe these radius services: "
-            + ", ".join(coverage.uncovered_services)
-            + ". Allowlist intentionally silent ones under exemptions.silent_services."
+            f"Every radius service must be seen within {minutes_allowed} minutes; not "
+            f"seen recently enough: {details}.{expired} Allow intentionally quiet "
+            "services under exemptions.silent_services."
         )
     return RuntimeEvidenceState.LIVE, ""
 

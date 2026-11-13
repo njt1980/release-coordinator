@@ -41,7 +41,8 @@ runtime_evidence: live
 
 # Days of telemetry every query reads (1..30), at onboarding and assessment.
 runtime_lookback_days: 7
-# Live evidence counts only if its newest row is at most this old (5..1440).
+# Live evidence counts only if every service in the release radius was seen
+# within this many minutes (5..1440), unless listed in silent_services.
 max_telemetry_age_minutes: 60
 
 # External destinations called on purpose. Each rule names exactly one of
@@ -60,9 +61,11 @@ egress:
 #   dependencies:
 #     - entity_id: "unresolved:api.stripe.com"
 #       reason: "External payment API, contract monitored separately"
-#   silent_services:              # radius services live telemetry may not see
+#   silent_services:   # radius services allowed to be quiet for longer
 #     - service: "default/nightly-report"
 #       reason: "Runs once a day"
+#       max_quiet_days: 2          # must still be seen within 2 days
+#       expires_on: 2026-12-31     # re-review by then; ignored afterwards
 exemptions:
   files: []
   dependencies: []

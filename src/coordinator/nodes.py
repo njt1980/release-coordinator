@@ -524,7 +524,8 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         )
         drift_issues, drift = live_drift_issues(state, workspace_id, observed)
         issues.extend(drift_issues)
-    coverage = live_coverage(policy, observed, radius)
+    now = utc_now()
+    coverage = live_coverage(policy, observed, radius, now)
     if is_mock:
         runtime_state, why = RuntimeEvidenceState.MOCK, ""
     elif result.status.is_incomplete:
@@ -535,7 +536,7 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
             "There is no baseline to resolve live telemetry against.",
         )
     else:
-        runtime_state, why = live_runtime_state(policy, coverage, utc_now())
+        runtime_state, why = live_runtime_state(policy, coverage, now)
     status = TelemetryStatus(
         source="mock" if is_mock else "live",
         runtime_evidence=runtime_state,

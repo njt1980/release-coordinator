@@ -77,6 +77,7 @@ exemptions:
   silent_services:
     - service: shop/payments
       reason: called only at checkout
+      expires_on: 2026-12-31
 """
 POLICY = parse_policy(POLICY_YAML, BaselineScope(tenant="acme", project_id="shop"))
 LOADED = LoadedPolicy(policy=POLICY, sha256="0" * 64)
@@ -235,7 +236,17 @@ class PolicyFieldTests(unittest.TestCase):
             {"egress": [{"cidr": "10.20.0.1/16", "reason": "x"}]},
             {"egress": [{"host": "a.com", "cidr": "10.0.0.0/8", "reason": "x"}]},
             {"egress": [{"host": "a.com"}]},
-            {"exemptions": {"silent_services": [{"service": "payments", "reason": "x"}]}},
+            {"exemptions": {"silent_services": [{"service": "payments", "reason": "x", "expires_on": "2026-12-31"}]}},
+            {"exemptions": {"silent_services": [{"service": "shop/payments", "reason": "x"}]}},
+            {"exemptions": {"silent_services": [{"service": "shop/payments", "reason": "x", "expires_on": "2026-12-31", "max_quiet_days": 8}]}},
+            {
+                "exemptions": {
+                    "silent_services": [
+                        {"service": "shop/a", "reason": "x", "expires_on": "2026-12-31"},
+                        {"service": "shop/a", "reason": "y", "expires_on": "2026-12-31"},
+                    ]
+                }
+            },
         ]:
             with self.subTest(changes=changes):
                 with self.assertRaises(ValidationError):
@@ -286,17 +297,77 @@ class LiveStateTests(unittest.TestCase):
         ]
         for observed, expected, why_part in cases:
             with self.subTest(expected=expected):
-                coverage = live_coverage(POLICY, observed, radius)
+                coverage = live_coverage(POLICY, observed, radius, NOW)
                 state, why = live_runtime_state(POLICY, coverage, NOW)
                 self.assertIs(state, expected)
                 self.assertIn(why_part, why)
 
+    def test_freshness_is_judged_per_service(self) -> None:
+        # The order -> front edge is fresh, but rabbitmq was last seen two
+        # days ago: one busy service must not make a quiet one look fresh.
+        two_days = NOW - timedelta(days=2)
+        coverage = live_coverage(
+            POLICY,
+            [_observed(FRONT, ORDER), _observed(ORDER, RABBIT, two_days)],
+            {ORDER, FRONT, RABBIT},
+            NOW,
+        )
+        self.assertEqual(coverage.observed_services, sorted([FRONT, ORDER]))
+        self.assertEqual(coverage.uncovered_services, [RABBIT])
+        self.assertEqual(coverage.service_last_seen[RABBIT], two_days)
+        state, why = live_runtime_state(POLICY, coverage, NOW)
+        self.assertIs(state, RuntimeEvidenceState.LIVE_UNCOVERED)
+        self.assertIn(f"{RABBIT} (last seen 2 days ago)", why)
+
     def test_allowlisted_silent_services_dont_count_as_uncovered(self) -> None:
-        coverage = live_coverage(POLICY, [_observed(FRONT, ORDER)], {FRONT, ORDER, PAYMENTS})
+        coverage = live_coverage(POLICY, [_observed(FRONT, ORDER)], {FRONT, ORDER, PAYMENTS}, NOW)
         self.assertEqual(coverage.uncovered_services, [])
         self.assertEqual(coverage.silent_services, [PAYMENTS])
         self.assertEqual(coverage.observed_services, sorted([FRONT, ORDER]))
         self.assertIs(live_runtime_state(POLICY, coverage, NOW)[0], RuntimeEvidenceState.LIVE)
+
+    def test_max_quiet_days_bounds_the_allowance(self) -> None:
+        policy = POLICY.model_copy(
+            update={
+                "exemptions": POLICY.exemptions.model_copy(
+                    update={
+                        "silent_services": [
+                            POLICY.exemptions.silent_services[0].model_copy(
+                                update={"max_quiet_days": 2}
+                            )
+                        ]
+                    }
+                )
+            }
+        )
+        radius = {FRONT, ORDER, PAYMENTS}
+        for last, expected in [
+            (NOW - timedelta(days=1), "silent"),
+            (NOW - timedelta(days=3), "uncovered"),
+            (None, "uncovered"),
+        ]:
+            with self.subTest(last=last):
+                observed = [_observed(FRONT, ORDER)]
+                if last is not None:
+                    observed.append(_observed(ORDER, PAYMENTS, last))
+                coverage = live_coverage(policy, observed, radius, NOW)
+                self.assertEqual(
+                    PAYMENTS in coverage.silent_services, expected == "silent"
+                )
+                self.assertEqual(
+                    PAYMENTS in coverage.uncovered_services, expected == "uncovered"
+                )
+
+    def test_expired_entries_are_ignored_and_reported(self) -> None:
+        later = NOW.replace(year=2027)
+        coverage = live_coverage(
+            POLICY, [_observed(FRONT, ORDER, later)], {FRONT, ORDER, PAYMENTS}, later
+        )
+        self.assertEqual(coverage.uncovered_services, [PAYMENTS])
+        self.assertEqual(coverage.expired_exemptions, [PAYMENTS])
+        state, why = live_runtime_state(POLICY, coverage, later)
+        self.assertIs(state, RuntimeEvidenceState.LIVE_UNCOVERED)
+        self.assertIn("Expired silent-service entries were ignored", why)
 
 
 class TelemetryNodeTests(unittest.TestCase):

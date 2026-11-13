@@ -714,12 +714,15 @@ class UnresolvedReach(BaseModel):
 class LiveCoverage(BaseModel):
     """How well one live telemetry query covered the release radius.
 
-    ``edge_count`` counts resolved live edges after normalization,
+    ``edge_count`` counts resolved live edges after normalization and
     ``newest_observed_at`` is the latest of them (None when there are
-    none), ``observed_services`` the radius services seen as a source or
-    target, ``uncovered_services`` those that weren't and aren't
-    allowlisted, and ``silent_services`` those the policy allows to be
-    silent.
+    none). Coverage is judged per radius service from
+    ``service_last_seen`` (when it last appeared as a source or target):
+    ``observed_services`` were seen within the live window,
+    ``silent_services`` weren't but are within an active silent-service
+    allowance, and ``uncovered_services`` are neither.
+    ``expired_exemptions`` names radius services whose silent-service entry
+    has expired and was ignored.
     """
 
     edge_count: int = Field(ge=0)
@@ -727,6 +730,8 @@ class LiveCoverage(BaseModel):
     observed_services: List[str] = Field(default_factory=list)
     uncovered_services: List[str] = Field(default_factory=list)
     silent_services: List[str] = Field(default_factory=list)
+    service_last_seen: Dict[str, datetime] = Field(default_factory=dict)
+    expired_exemptions: List[str] = Field(default_factory=list)
 
 
 class TelemetryStatus(BaseModel):

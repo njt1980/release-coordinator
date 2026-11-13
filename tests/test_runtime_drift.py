@@ -252,9 +252,9 @@ class TelemetryNodeDriftTests(unittest.TestCase):
         result = DiscoveryResult.success(
             [
                 _edge("store-front", "order-service", T1),
-                _edge("order-service", "payments"),
-                _edge("order-service", "api.stripe.com"),
-                _edge("order-service", "rabbitmq"),
+                _edge("order-service", "payments", T1),
+                _edge("order-service", "api.stripe.com", T1),
+                _edge("order-service", "rabbitmq", T1),
             ]
         )
 
@@ -271,7 +271,7 @@ class TelemetryNodeDriftTests(unittest.TestCase):
     def test_matching_live_edges_add_no_issue(self) -> None:
         status, codes, _ = self._run(
             DiscoveryResult.success(
-                [_edge("order-service", "rabbitmq", T1), _edge("store-front", "order-service")]
+                [_edge("order-service", "rabbitmq", T1), _edge("store-front", "order-service", T1)]
             )
         )
         self.assertEqual(codes, [])
