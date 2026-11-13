@@ -19,7 +19,7 @@ own); these manifests live here, like the lab's telemetry and traffic.
 | `traffic.yaml` | read-only GET traffic in `lab-traffic` (web app pages, catalog API) |
 | `apply.sh` | deploys all of the above in order, filling in the image registry and tag (`--dry-run`: server-side dry run) |
 | `create-secrets.sh` | the random PostgreSQL password Secret `eshop/eshop-postgres` |
-| `build-images.sh` | builds and pushes the service images with `dotnet publish -t:PublishContainer` |
+| `Dockerfile`, `build-images.sh` | build and push the service images in Azure with ACR Tasks (eShop has no Dockerfiles; no local .NET SDK needed) |
 
 ## How the AppHost maps to the manifests
 
@@ -42,17 +42,19 @@ repositories look.
 ## Deploy
 
 Prerequisites: the lab cluster running (`app-up`), and the images built and
-pushed to a registry the cluster can pull from:
+pushed to a registry the cluster can pull from. The lab uses the Basic Azure
+Container Registry `rclab48a7217e` (attached to RC-Cluster with
+`az aks update --attach-acr`), tagged with the eShop commit:
 
 ```bash
-ESHOP_REGISTRY=<registry> ESHOP_TAG=<tag> ./build-images.sh <eshop checkout>
+ESHOP_ACR=rclab48a7217e ESHOP_TAG=913acea ./build-images.sh <eshop checkout at 913acea>
 ```
 
 Then:
 
 ```bash
-ESHOP_REGISTRY=<registry> ESHOP_TAG=<tag> deploy/lab/eshop/apply.sh --dry-run  # validates, changes nothing
-ESHOP_REGISTRY=<registry> ESHOP_TAG=<tag> deploy/lab/eshop/apply.sh
+ESHOP_REGISTRY=rclab48a7217e.azurecr.io ESHOP_TAG=913acea deploy/lab/eshop/apply.sh --dry-run  # validates, changes nothing
+ESHOP_REGISTRY=rclab48a7217e.azurecr.io ESHOP_TAG=913acea deploy/lab/eshop/apply.sh
 ```
 
 Services restart until PostgreSQL and RabbitMQ are ready, and

@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Build and push the eShop service images with the .NET SDK's container
-# support (eShop has no Dockerfiles). Needs the .NET SDK eShop's global.json
-# pins, a checkout of the eShop repository, and push access to the registry
-# (for Azure Container Registry: az acr login -n <name>). No Docker daemon is
-# needed to push to a remote registry.
+# Build and push the eShop service images in Azure with ACR Tasks, from a
+# checkout of the eShop repository, using deploy/lab/eshop/Dockerfile. No
+# local .NET SDK or Docker daemon is needed; az must be logged in with push
+# rights to the registry.
 #
-#   ESHOP_REGISTRY=<registry host> ESHOP_TAG=<tag> ./build-images.sh <eshop checkout>
+#   ESHOP_ACR=<registry name> ESHOP_TAG=<tag> ./build-images.sh <eshop checkout> [service...]
 #
-# Image names match services.yaml: $ESHOP_REGISTRY/eshop/<service>:$ESHOP_TAG.
+# Image names match services.yaml: <registry>.azurecr.io/eshop/<service>:<tag>.
+# The Dockerfile (and a .dockerignore, when the checkout has none) is copied
+# into the checkout for the upload and removed afterwards.
 set -euo pipefail
 
-SRC="${1:?usage: build-images.sh <eshop checkout>}"
-: "${ESHOP_REGISTRY:?set ESHOP_REGISTRY}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SRC="$(cd "${1:?usage: build-images.sh <eshop checkout> [service...]}" && pwd)"
+shift
+: "${ESHOP_ACR:?set ESHOP_ACR (registry name, without .azurecr.io)}"
 : "${ESHOP_TAG:?set ESHOP_TAG}"
 
 # service name -> project directory under src/
@@ -26,13 +29,21 @@ declare -A PROJECTS=(
   [webhooksclient]=WebhookClient
   [webapp]=WebApp
 )
+services=("$@")
+[[ ${#services[@]} -gt 0 ]] || services=("${!PROJECTS[@]}")
 
-for service in "${!PROJECTS[@]}"; do
-  project="${PROJECTS[$service]}"
+cleanup=("$SRC/.rc-lab.Dockerfile")
+cp "$HERE/Dockerfile" "$SRC/.rc-lab.Dockerfile"
+if [[ ! -e "$SRC/.dockerignore" ]]; then
+  printf '%s\n' .git e2e img tests '**/bin' '**/obj' '**/node_modules' > "$SRC/.dockerignore"
+  cleanup+=("$SRC/.dockerignore")
+fi
+trap 'rm -f "${cleanup[@]}"' EXIT
+
+for service in "${services[@]}"; do
+  project="${PROJECTS[$service]:?unknown service $service}"
   echo "== $service ($project)"
-  dotnet publish "$SRC/src/$project/$project.csproj" -c Release \
-    -t:PublishContainer \
-    -p:ContainerRegistry="$ESHOP_REGISTRY" \
-    -p:ContainerRepository="eshop/$service" \
-    -p:ContainerImageTag="$ESHOP_TAG"
+  az acr build --registry "$ESHOP_ACR" --image "eshop/$service:$ESHOP_TAG" \
+    --build-arg PROJECT="$project" --file "$SRC/.rc-lab.Dockerfile" --no-logs "$SRC" \
+    --query "{status:status, runId:runId}" -o tsv
 done
