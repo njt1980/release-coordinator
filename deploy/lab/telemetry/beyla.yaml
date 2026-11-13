@@ -1,0 +1,105 @@
+# Beyla eBPF auto-instrumentation for the lab: traces the network calls of
+# every workload in namespace `default` without code or image changes, and
+# sends them over OTLP to the in-cluster collector (collector.yaml).
+#
+# Beyla needs elevated privileges on the node (privileged container,
+# hostPID). Acceptable for the single-operator lab; revisit on the security
+# track before any shared deployment.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: beyla
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: beyla
+rules:
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "nodes"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: beyla
+subjects:
+  - kind: ServiceAccount
+    name: beyla
+    namespace: observability
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: beyla
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: beyla-config
+  namespace: observability
+data:
+  beyla-config.yml: |
+    discovery:
+      instrument:
+        - k8s_namespace: default
+      # Leave services that already ship their own OpenTelemetry spans to
+      # their SDK, so a call is not reported twice.
+      exclude_otel_instrumented_services: true
+    attributes:
+      kubernetes:
+        enable: true
+    name_resolver:
+      sources: ["k8s", "rdns"]
+    otel_traces_export:
+      endpoint: http://otel-collector.observability.svc.cluster.local:4318
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: beyla
+  namespace: observability
+  labels:
+    app: beyla
+spec:
+  selector:
+    matchLabels:
+      app: beyla
+  template:
+    metadata:
+      labels:
+        app: beyla
+    spec:
+      serviceAccountName: beyla
+      hostPID: true
+      containers:
+        - name: beyla
+          image: grafana/beyla:3.40.0
+          terminationMessagePolicy: FallbackToLogsOnError
+          env:
+            - name: BEYLA_CONFIG_PATH
+              value: /config/beyla-config.yml
+          resources:
+            requests:
+              cpu: 50m
+              memory: 300Mi
+            limits:
+              # Measured ~450Mi steady state on the lab node (9 workloads).
+              memory: 768Mi
+          securityContext:
+            privileged: true
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: var-run-beyla
+              mountPath: /var/run/beyla
+      volumes:
+        - name: config
+          configMap:
+            name: beyla-config
+        - name: var-run-beyla
+          emptyDir: {}

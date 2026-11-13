@@ -1,0 +1,159 @@
+# OpenTelemetry Collector for the lab: receives OTLP from Beyla and exports
+# dependency (CLIENT/PRODUCER) spans to Application Insights, which stores them
+# in the Log Analytics workspace's AppDependencies table.
+#
+# Requires the Secret observability/appinsights with key connection-string
+# (created by .claude/skills/app-up/lab.sh; never committed).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: observability
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 200
+        spike_limit_mib: 50
+      # Only dependency calls matter to the release coordinator. SERVER and
+      # CONSUMER spans (including kubelet health probes) would become
+      # AppRequests rows and spend the ingestion cap for nothing.
+      filter/dependencies-only:
+        error_mode: ignore
+        traces:
+          span:
+            - kind != SPAN_KIND_CLIENT and kind != SPAN_KIND_PRODUCER
+            # Loopback calls stay inside one pod (e.g. documentdb's gateway
+            # to its own postgres); they are not service dependencies.
+            - attributes["network.peer.address"] == "127.0.0.1"
+            - attributes["network.peer.address"] == "::1"
+            - attributes["server.address"] == "localhost"
+            # A broker delivering messages to a consumer is reported as a
+            # publish from the broker to the consumer's ephemeral port
+            # (e.g. rabbitmq -> makeline-service:56100). Brokers listen on
+            # fixed ports, so a messaging peer port in the Linux ephemeral
+            # range means the direction is reversed.
+            - attributes["messaging.system"] != nil and Int(attributes["server.port"]) >= 32768
+            # Failed TCP connects carry no protocol, so the exporter reports
+            # the span name "CONNECT" as Target. The same edge is reported by
+            # the successful calls that follow.
+            - name == "CONNECT" and attributes["http.request.method"] == nil
+      # Exporter workaround (azuremonitorexporter v0.164.0): for database and
+      # messaging dependencies it builds Target from client.address and falls
+      # back to network.peer.address (a ClusterIP), ignoring server.address,
+      # which Beyla resolves to the Kubernetes service name. Copy the server
+      # endpoint into client.* so Target becomes e.g. documentdb:10260.
+      transform/dependency-target:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            conditions:
+              - attributes["server.address"] != nil and (attributes["db.system.name"] != nil or attributes["messaging.system"] != nil)
+            statements:
+              - set(attributes["client.address"], attributes["server.address"])
+              - set(attributes["client.port"], attributes["server.port"])
+          # Beyla can report url.full as a bare path (e.g. "/npm"). The
+          # exporter takes Target from url.full's host, so a path-only value
+          # leaves Target empty and Application Insights shows the method
+          # ("GET"). Rebuild an absolute URL from the server endpoint.
+          - context: span
+            conditions:
+              - attributes["url.full"] != nil and IsMatch(attributes["url.full"], "^/") and attributes["server.address"] != nil
+            statements:
+              - set(attributes["url.full"], Concat([attributes["url.scheme"], "://", attributes["server.address"], ":", attributes["server.port"], attributes["url.full"]], ""))
+      # The exporter builds AppRoleName as "<service.namespace>.<service.name>".
+      # Drop the namespace so AppRoleName is the bare workload name
+      # (e.g. order-service) that the release coordinator resolves.
+      resource/role-name:
+        attributes:
+          - key: service.namespace
+            action: delete
+      batch: {}
+    exporters:
+      azure_monitor:
+        connection_string: ${env:APPLICATIONINSIGHTS_CONNECTION_STRING}
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors:
+            [memory_limiter, filter/dependencies-only, transform/dependency-target, resource/role-name, batch]
+          exporters: [azure_monitor]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.164.0
+          args: ["--config=/conf/config.yaml"]
+          env:
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: appinsights
+                  key: connection-string
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: observability
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
