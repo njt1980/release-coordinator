@@ -8,6 +8,7 @@ export const ROUTES = {
   runs: "/runs",
   assessments: "/assessments",
   review: "/review",
+  inventory: "/inventory",
 };
 
 const KNOWN = new Set(Object.values(ROUTES));

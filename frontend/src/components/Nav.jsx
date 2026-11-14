@@ -18,6 +18,7 @@ const LINKS = [
   // landing page links to How it works.
   { path: ROUTES.home, label: "Overview", wide: true },
   { path: ROUTES.howItWorks, label: "How it works", wide: true },
+  { path: ROUTES.inventory, label: "Inventory" },
   { path: ROUTES.review, label: "Review" },
   { path: ROUTES.assessments, label: "Assessments" },
   { path: ROUTES.runs, label: "Runs" },
@@ -49,24 +50,27 @@ export default function Nav({ path, tone = "dark" }) {
       >
         <a
           href={href(ROUTES.home)}
-          className={`flex items-center gap-2.5 font-semibold tracking-tight ${
+          className={`flex shrink-0 items-center gap-2.5 font-semibold tracking-tight ${
             dark ? "text-white" : "text-slate-900"
           }`}
         >
           <LogoMark className="h-8 w-8" />
           <span className="hidden sm:inline">Release Coordinator</span>
         </a>
-        <div className="flex items-center gap-1">
-          {LINKS.map((link) => (
-            <a
-              key={link.path}
-              href={href(link.path)}
-              aria-current={path === link.path ? "page" : undefined}
-              className={`${linkClass(path === link.path)} ${link.wide ? "hidden sm:inline-block" : ""}`}
-            >
-              {link.label}
-            </a>
-          ))}
+        <div className="flex min-w-0 items-center gap-1">
+          {/* On narrow screens the links scroll sideways; the Onboard button stays in view. */}
+          <div className="flex min-w-0 items-center gap-1 overflow-x-auto [scrollbar-width:none]">
+            {LINKS.map((link) => (
+              <a
+                key={link.path}
+                href={href(link.path)}
+                aria-current={path === link.path ? "page" : undefined}
+                className={`shrink-0 whitespace-nowrap ${linkClass(path === link.path)} ${link.wide ? "hidden sm:inline-block" : ""}`}
+              >
+                {link.label}
+              </a>
+            ))}
+          </div>
           <a
             href={href(ROUTES.onboard)}
             aria-current={path === ROUTES.onboard ? "page" : undefined}
