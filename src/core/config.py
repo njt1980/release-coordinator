@@ -85,6 +85,14 @@ DEFAULT_RUNTIME_LOOKBACK_DAYS: Final[int] = 7
 
 MAX_RUNTIME_LOOKBACK_DAYS: Final[int] = 30
 
+# Telemetry callee resolution by request join reads at most this many days
+# (joining every dependency row with every request row of a long lookback
+# is the most expensive query we run), and leaves out the last minutes,
+# because request rows are ingested minutes after the dependency rows that
+# caused them. Older edges are still found by their target address.
+REQUEST_JOIN_DAYS: Final[int] = 2
+REQUEST_JOIN_LAG_MINUTES: Final[int] = 10
+
 # Repositories scanned at once during discovery (RC_ADO_SCAN_CONCURRENCY,
 # 1 to 8). Azure DevOps rate-limits per identity, so more is not always faster.
 ADO_SCAN_CONCURRENCY: Final[int] = min(

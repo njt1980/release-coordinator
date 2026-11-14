@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -19,14 +19,18 @@ from azure.monitor.query import (
 )
 from pydantic import BaseModel, Field, ValidationError
 
+from src.core import config
 from src.core.models import (
     MOCK_FIXTURE_PROVENANCE,
     DependencyEdge,
     DiscoveryMethod,
     DiscoveryResult,
+    EdgeResolution,
+    TargetDetail,
+    TargetDetailKind,
     TelemetryScope,
 )
-from src.tools.telemetry_normalization import normalize_edges
+from src.tools.telemetry_normalization import DropReason, normalize_edges, parse_target
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
     VERIFY_TIMEOUT_SECONDS,
@@ -41,6 +45,10 @@ _NAMESPACE_COLUMN = "SourceNamespace"
 _CALLS_COLUMN = "Calls"
 _FAILURES_COLUMN = "Failures"
 _TYPE_COLUMN = "DependencyType"
+_NOISE_COLUMN = "Noise"
+_CALLEE_COLUMN = "Callee"
+_CALLEE_NAMESPACE_COLUMN = "CalleeNamespace"
+_RESOLVED_CALLS_COLUMN = "ResolvedCalls"
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 # OpenTelemetry resource attributes, as Application Insights stores them in
 # Properties: the workload's own name, and the Kubernetes namespace it runs
@@ -86,6 +94,7 @@ class TelemetryExtractor:
 
         self._runtime_metrics: RuntimeMetrics = {}
         self._dropped_records: dict[str, int] = {}
+        self._noise: Counter[str] = Counter()
         self._credential: DefaultAzureCredential | None = None
         self._client: LogsQueryClient | None = None
         if self._source == "azure":
@@ -166,7 +175,10 @@ class TelemetryExtractor:
             result = self._get_active_dependencies_from_mock()
         else:
             result = self._get_active_dependencies_from_azure(days_back, scope)
-        edges, self._dropped_records = normalize_edges(result.items)
+        edges, dropped = normalize_edges(result.items)
+        for reason, count in self._noise.items():
+            dropped[reason] = dropped.get(reason, 0) + count
+        self._dropped_records = dropped
         return result.model_copy(update={"items": edges})
 
     def get_unscoped_sources(
@@ -215,6 +227,7 @@ class TelemetryExtractor:
     def _get_active_dependencies_from_mock(self) -> DiscoveryResult[DependencyEdge]:
         mock_path = Path(__file__).resolve().parents[2] / "mock_telemetry.json"
         self._runtime_metrics = {}
+        self._noise = Counter()
         try:
             with mock_path.open(encoding="utf-8") as mock_file:
                 payload = json.load(mock_file)
@@ -292,6 +305,7 @@ class TelemetryExtractor:
         """Query Azure Monitor for observed dependency edges."""
         query = build_dependency_query(days_back, scope)
         self._runtime_metrics = {}
+        self._noise = Counter()
         try:
             if self._client is None:
                 raise RuntimeError("Azure telemetry client was not initialized")
@@ -305,7 +319,7 @@ class TelemetryExtractor:
             return DiscoveryResult[DependencyEdge].failed(
                 f"Telemetry query failed: {error}"
             )
-        return parse_dependency_response(response, self._runtime_metrics)
+        return parse_dependency_response(response, self._runtime_metrics, self._noise)
 
 
 # How many unscoped source names the diagnostic returns at most.
@@ -385,7 +399,30 @@ def parse_unscoped_response(response: LogsQueryResult | LogsQueryPartialResult) 
     return counts
 
 
-def build_dependency_query(days_back: int, scope: TelemetryScope | None = None) -> str:
+# A dependency to the Kubernetes API (the classic SDK's Kubernetes enricher
+# reading its own pod, ReplicaSet and node): the cluster's control plane,
+# not a service dependency. Matched on the request URL's path, as the API
+# server's address differs per cluster.
+_KUBERNETES_API_PATH = (
+    r"^https?://[^/]+/(api/v1/(nodes|namespaces)|apis/[a-z0-9.-]+/v[0-9][a-z0-9]*/)"
+)
+KUBERNETES_API_NOISE = "kubernetes_api"
+
+
+def _role_columns(prefix: str) -> str:
+    """KQL naming a row's service and namespace ``<prefix>Name``/``<prefix>Namespace``."""
+    return (
+        f'| extend {prefix}Name = coalesce(tostring(Properties["{_SERVICE_NAME_PROPERTY}"]), AppRoleName),\n'
+        f"    {prefix}Namespace = {_namespace_expression()}\n"
+    )
+
+
+def build_dependency_query(
+    days_back: int,
+    scope: TelemetryScope | None = None,
+    join_days: int = config.REQUEST_JOIN_DAYS,
+    join_lag_minutes: int = config.REQUEST_JOIN_LAG_MINUTES,
+) -> str:
     """Return the KQL that summarizes AppDependencies into edges.
 
     The source is the row's ``service.name`` resource attribute, falling
@@ -394,25 +431,56 @@ def build_dependency_query(days_back: int, scope: TelemetryScope | None = None) 
     ``k8s.namespace.name`` or the classic enricher's
     ``Kubernetes.Pod.Namespace``), and rows are kept apart by
     ``DependencyType`` so normalization can tell a messaging delivery from
-    a call (see ``telemetry_normalization``). A scope keeps only rows from
-    its components and/or whose cluster attribute equals its value; both
-    are pattern-restricted so they cannot break out of the quoted strings.
+    a call (see ``telemetry_normalization``). Calls are ``sum(ItemCount)``:
+    each sampled row stands for that many calls.
+
+    Each (source, target, type) row also names the callees its calls
+    reached: a request whose ``ParentId`` is the dependency's ``Id`` in the
+    same operation (an HTTP server span, or a message consumer's processing
+    span whose parent is the send). That join reads the last ``join_days``
+    (at most ``days_back``) up to ``join_lag_minutes`` ago; ``ResolvedCalls``
+    is how many of the row's calls it matched. Rows to the Kubernetes API
+    are marked ``Noise``.
+
+    A scope keeps only rows (dependencies and requests) from its components
+    and/or whose cluster attribute equals its value; both are
+    pattern-restricted so they cannot break out of the quoted strings.
     """
-    if days_back <= 0:
-        raise ValueError("days_back must be a positive integer")
+    if days_back <= 0 or join_days <= 0 or join_lag_minutes < 0:
+        raise ValueError("days_back and join_days must be positive, join_lag_minutes not negative")
+    join_days = min(join_days, days_back)
+    scope_clauses = f"{_component_clause(scope)}{_cluster_clause(scope)}"
     return (
-        "AppDependencies\n"
+        "let deps = AppDependencies\n"
         f"| where TimeGenerated >= ago({days_back}d)\n"
-        f"{_component_clause(scope)}"
-        f"{_cluster_clause(scope)}"
-        f'| extend SourceName = coalesce(tostring(Properties["{_SERVICE_NAME_PROPERTY}"]), AppRoleName),\n'
-        f"    {_NAMESPACE_COLUMN} = {_namespace_expression()}\n"
+        f"{scope_clauses}"
+        f"{_role_columns('Source')}"
         "| where isnotempty(SourceName) and isnotempty(Target)\n"
-        f"| summarize LastObservedAt=max(TimeGenerated), {_CALLS_COLUMN}=count(),\n"
-        f"    {_FAILURES_COLUMN}=countif(Success == false)\n"
-        f"    by Source=SourceName, {_NAMESPACE_COLUMN}, Target, {_TYPE_COLUMN}\n"
-        f"| project Source, {_NAMESPACE_COLUMN}, Target, {_TYPE_COLUMN}, "
-        f"LastObservedAt, {_CALLS_COLUMN}, {_FAILURES_COLUMN}\n"
+        f'| extend {_NOISE_COLUMN} = iff(Data matches regex @"{_KUBERNETES_API_PATH}", '
+        f'"{KUBERNETES_API_NOISE}", "");\n'
+        "let callees = AppRequests\n"
+        f"| where TimeGenerated >= ago({join_days}d)\n"
+        f"{scope_clauses}"
+        f"{_role_columns('Callee')}"
+        "| where isnotempty(CalleeName) and isnotempty(ParentId)\n"
+        "| distinct OperationId, ParentId, CalleeName, CalleeNamespace;\n"
+        "let resolved = deps\n"
+        f"| where isempty({_NOISE_COLUMN}) and TimeGenerated between "
+        f"(ago({join_days}d) .. ago({join_lag_minutes}m))\n"
+        "| project OperationId, Id, SourceName, SourceNamespace, Target, DependencyType, ItemCount\n"
+        "| join kind=inner hint.strategy=shuffle (callees)\n"
+        "    on $left.OperationId == $right.OperationId, $left.Id == $right.ParentId\n"
+        f"| summarize {_RESOLVED_CALLS_COLUMN} = sum(ItemCount)\n"
+        f"    by Source = SourceName, {_NAMESPACE_COLUMN} = SourceNamespace, Target, {_TYPE_COLUMN},\n"
+        f"    {_CALLEE_COLUMN} = CalleeName, {_CALLEE_NAMESPACE_COLUMN} = CalleeNamespace;\n"
+        "deps\n"
+        f"| summarize LastObservedAt = max(TimeGenerated), {_CALLS_COLUMN} = sum(ItemCount),\n"
+        f"    {_FAILURES_COLUMN} = sumif(ItemCount, Success == false)\n"
+        f"    by Source = SourceName, {_NAMESPACE_COLUMN} = SourceNamespace, Target, {_TYPE_COLUMN}, {_NOISE_COLUMN}\n"
+        f"| join kind=leftouter (resolved) on Source, {_NAMESPACE_COLUMN}, Target, {_TYPE_COLUMN}\n"
+        f"| project Source, {_NAMESPACE_COLUMN}, Target, {_TYPE_COLUMN}, {_NOISE_COLUMN}, "
+        f"LastObservedAt, {_CALLS_COLUMN}, {_FAILURES_COLUMN},\n"
+        f"    {_CALLEE_COLUMN}, {_CALLEE_NAMESPACE_COLUMN}, {_RESOLVED_CALLS_COLUMN}\n"
     )
 
 
@@ -431,7 +499,12 @@ def source_reference(name: str, namespace: str | None) -> str:
 
 
 def _runtime_edge(
-    source: str, target: str, observed_at: datetime, dependency_type: str | None = None
+    source: str,
+    target: str,
+    observed_at: datetime,
+    dependency_type: str | None = None,
+    resolution: EdgeResolution = EdgeResolution.TARGET,
+    target_details: list[TargetDetail] | None = None,
 ) -> DependencyEdge:
     """Build an edge from live Azure Monitor telemetry."""
     return DependencyEdge(
@@ -442,7 +515,17 @@ def _runtime_edge(
         confidence_score=1.0,
         last_observed_at=observed_at,
         provenance=AZURE_MONITOR_PROVENANCE,
+        resolution=[resolution],
+        target_details=target_details,
     )
+
+
+def _callee_details(target: str, dependency_type: str | None) -> list[TargetDetail]:
+    """What a joined callee edge keeps of the address: the address and what was behind it."""
+    parsed = parse_target(target, dependency_type)
+    if isinstance(parsed, DropReason):
+        return [TargetDetail(kind=TargetDetailKind.ADDRESS, name=target.strip())]
+    return [*parsed.details, TargetDetail(kind=TargetDetailKind.ADDRESS, name=parsed.host)]
 
 
 def _parse_observed_at(value: object) -> datetime:
@@ -454,13 +537,20 @@ def _parse_observed_at(value: object) -> datetime:
 
 
 def _count(row: Any, index: int | None) -> int:
-    """Read an optional non-negative count column (0 when absent)."""
+    """Read an optional non-negative count column (0 when absent or null)."""
     if index is None or row[index] is None:
         return 0
-    value = int(str(row[index]))
+    value = int(float(str(row[index])))
     if value < 0:
         raise ValueError(f"negative count {value}")
     return value
+
+
+def _text(row: Any, index: int | None) -> str:
+    """Read an optional text column ('' when absent or null)."""
+    if index is None or row[index] is None:
+        return ""
+    return str(row[index]).strip()
 
 
 def _add_metrics(metrics: RuntimeMetrics, calls: dict[str, tuple[int, int]]) -> None:
@@ -473,6 +563,7 @@ def _add_metrics(metrics: RuntimeMetrics, calls: dict[str, tuple[int, int]]) -> 
 def _parse_dependency_table(
     table: LogsTable,
     calls: dict[str, tuple[int, int]] | None = None,
+    noise: Counter[str] | None = None,
 ) -> tuple[list[DependencyEdge], list[str]]:
     """Parse one result table into edges and per-row errors.
 
@@ -482,6 +573,14 @@ def _parse_dependency_table(
     source (see ``source_reference``); the optional ``DependencyType``
     column is carried on the edge. The optional ``Calls`` and
     ``Failures`` columns are summed per source into ``calls``.
+
+    Each (source, target, type) yields an edge to the target address
+    (``EdgeResolution.TARGET``); a row naming a ``Callee`` also yields an
+    edge to that callee (``REQUEST_JOIN``, namespaced when
+    ``CalleeNamespace`` is known) carrying the address it was reached at.
+    A target joined to several callees comes as several rows: its calls
+    count once. Rows marked ``Noise`` yield no edge and are counted in
+    ``noise`` per reason.
 
     Raises:
         ValueError: if the table does not have the expected columns.
@@ -498,11 +597,9 @@ def _parse_dependency_table(
             f"table {table.name!r} is missing columns: {', '.join(sorted(missing))}"
         )
 
-    namespace_index = column_indexes.get(_NAMESPACE_COLUMN)
-    calls_index = column_indexes.get(_CALLS_COLUMN)
-    failures_index = column_indexes.get(_FAILURES_COLUMN)
-    type_index = column_indexes.get(_TYPE_COLUMN)
+    index_of = column_indexes.get
     edges: list[DependencyEdge] = []
+    counted: set[tuple[str, str, str]] = set()
     bad_rows = 0
     for row in table.rows:
         try:
@@ -511,19 +608,34 @@ def _parse_dependency_table(
             observed_at = _parse_observed_at(row[column_indexes["LastObservedAt"]])
             if not source or not target:
                 raise ValueError("empty Source or Target")
-            namespace = row[namespace_index] if namespace_index is not None else None
-            reference = source_reference(str(source), str(namespace or ""))
-            row_calls = _count(row, calls_index)
-            row_failures = _count(row, failures_index)
-            dependency_type = row[type_index] if type_index is not None else None
-            edges.append(
-                _runtime_edge(
-                    reference, str(target), observed_at, str(dependency_type or "") or None
+            reference = source_reference(str(source), _text(row, index_of(_NAMESPACE_COLUMN)))
+            dependency_type = _text(row, index_of(_TYPE_COLUMN)) or None
+            key = (reference, str(target), dependency_type or "")
+            first_sighting = key not in counted
+            counted.add(key)
+            if reason := _text(row, index_of(_NOISE_COLUMN)):
+                if noise is not None and first_sighting:
+                    noise[reason] += 1
+                continue
+            row_calls = _count(row, index_of(_CALLS_COLUMN))
+            row_failures = _count(row, index_of(_FAILURES_COLUMN))
+            if first_sighting:
+                edges.append(_runtime_edge(reference, str(target), observed_at, dependency_type))
+                if calls is not None:
+                    total, failed = calls.get(reference, (0, 0))
+                    calls[reference] = (total + row_calls, failed + row_failures)
+            if callee := _text(row, index_of(_CALLEE_COLUMN)):
+                callee_namespace = _text(row, index_of(_CALLEE_NAMESPACE_COLUMN))
+                edges.append(
+                    _runtime_edge(
+                        reference,
+                        source_reference(callee, callee_namespace),
+                        observed_at,
+                        dependency_type,
+                        EdgeResolution.REQUEST_JOIN,
+                        _callee_details(str(target), dependency_type),
+                    )
                 )
-            )
-            if calls is not None:
-                total, failed = calls.get(reference, (0, 0))
-                calls[reference] = (total + row_calls, failed + row_failures)
         except (IndexError, ValueError, ValidationError) as error:
             logger.warning("Skipping malformed telemetry row: %s", error)
             bad_rows += 1
@@ -538,13 +650,15 @@ def _parse_dependency_table(
 def parse_dependency_response(
     response: LogsQueryResult | LogsQueryPartialResult,
     metrics: RuntimeMetrics | None = None,
+    noise: Counter[str] | None = None,
 ) -> DiscoveryResult[DependencyEdge]:
     """Turn a ``query_workspace`` response into an explicit discovery result.
 
     A ``LogsQueryResult`` exposes ``tables``; a ``LogsQueryPartialResult``
     exposes ``partial_data`` and ``partial_error``. Partial responses keep
     whatever edges were returned but are marked PARTIAL, never SUCCESS.
-    When ``metrics`` is given, per-source call metrics are written into it.
+    When ``metrics`` is given, per-source call metrics are written into it,
+    and when ``noise`` is given, rows marked as noise are counted in it.
     """
     status = getattr(response, "status", None)
     errors: list[str] = []
@@ -573,7 +687,7 @@ def parse_dependency_response(
     parsed_tables = 0
     for table in tables:
         try:
-            table_edges, table_errors = _parse_dependency_table(table, calls)
+            table_edges, table_errors = _parse_dependency_table(table, calls, noise)
         except ValueError as error:
             logger.error("Unusable telemetry result table: %s", error)
             errors.append(str(error))

@@ -1073,10 +1073,27 @@ class TargetDetailKind(str, Enum):
         another instrumented service.
     RESOURCE: a named resource the host serves: a database, a queue, a
         topic, an event hub or a container.
+    ADDRESS: the address (host[:port]) the caller used, kept on an edge whose
+        target was identified by request join rather than by that address.
     """
 
     APP_COMPONENT = "app_component"
     RESOURCE = "resource"
+    ADDRESS = "address"
+
+
+class EdgeResolution(str, Enum):
+    """How a telemetry edge's target was identified.
+
+    TARGET: from the address the caller recorded (host, URL, data source).
+    REQUEST_JOIN: from the callee's own telemetry: the request (or message
+        processing) whose parent span is the caller's dependency span, in
+        the same operation. It names the callee's role even when the address
+        is a gateway, an IP, a broker or another component's ID.
+    """
+
+    TARGET = "target"
+    REQUEST_JOIN = "request_join"
 
 
 class TargetDetail(BaseModel):
@@ -1121,6 +1138,10 @@ class DependencyEdge(BaseModel):
     target host (the database, queue or Application Insights component
     of ``server | db``, ``sb://ns/ | queue`` or ``host | cid-v1:<appId>``),
     sorted and unique. None when no telemetry row named any.
+
+    ``resolution`` says how telemetry identified the target (see
+    ``EdgeResolution``), sorted and unique; None for edges from other
+    sources and snapshots written before it was recorded.
     """
 
     source_service_id: str
@@ -1135,6 +1156,14 @@ class DependencyEdge(BaseModel):
     protocol: str | None = None
     evidence_files: List[str] | None = None
     target_details: List[TargetDetail] | None = None
+    resolution: List[EdgeResolution] | None = None
+
+    @field_validator("resolution")
+    @classmethod
+    def _sorted_unique_resolution(
+        cls, methods: List[EdgeResolution] | None
+    ) -> List[EdgeResolution] | None:
+        return merge_resolution(methods, None)
 
     @field_validator("target_details")
     @classmethod
@@ -1174,6 +1203,14 @@ def merge_target_details(
     if not merged:
         return None
     return sorted(merged, key=lambda detail: (detail.kind.value, detail.name))
+
+
+def merge_resolution(
+    first: List[EdgeResolution] | None, second: List[EdgeResolution] | None
+) -> List[EdgeResolution] | None:
+    """Union two edges' resolution methods, sorted; None when neither recorded any."""
+    merged = {*(first or []), *(second or [])}
+    return sorted(merged, key=lambda method: method.value) if merged else None
 
 
 def merge_evidence_files(

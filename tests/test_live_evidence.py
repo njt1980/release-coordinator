@@ -244,9 +244,13 @@ def _azure_extractor(response: object) -> TelemetryExtractor:
 class ExtractorTests(unittest.TestCase):
     def test_query_counts_calls_and_failures(self) -> None:
         query = build_dependency_query(7)
-        self.assertIn("Calls=count()", query)
-        self.assertIn("Failures=countif(Success == false)", query)
-        self.assertIn("by Source=SourceName, SourceNamespace, Target, DependencyType", query)
+        # Each sampled row stands for ItemCount calls.
+        self.assertIn("Calls = sum(ItemCount)", query)
+        self.assertIn("Failures = sumif(ItemCount, Success == false)", query)
+        self.assertIn(
+            "by Source = SourceName, SourceNamespace = SourceNamespace, Target, DependencyType, Noise",
+            query,
+        )
 
     def test_metrics_and_drops_come_from_the_query(self) -> None:
         extractor = _azure_extractor(

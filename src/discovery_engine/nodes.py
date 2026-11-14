@@ -32,6 +32,7 @@ from src.core.models import (
     combine_statuses,
     merge_deployed_workloads,
     merge_evidence_files,
+    merge_resolution,
     merge_target_details,
     unresolved_entity_id,
 )
@@ -593,6 +594,7 @@ def _merge_edge(existing_edge: DependencyEdge, edge: DependencyEdge) -> Dependen
         target_details=merge_target_details(
             existing_edge.target_details, edge.target_details
         ),
+        resolution=merge_resolution(existing_edge.resolution, edge.resolution),
     )
 
 

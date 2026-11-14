@@ -82,6 +82,20 @@ before falling back to the developer's `az login`.
   `server | database`, `sb://namespace/ | queue`) are understood: the host is
   the dependency and the database, queue or callee component is kept with
   the edge.
+- Callees are also identified from their own telemetry: a dependency row's
+  `Id` is the `ParentId` of the request it caused (same `OperationId`), so
+  a call through a gateway, to an IP or to another component's ID still
+  names the service that answered, and a message send names the consumer
+  that processed it. Each such edge records `resolution: request_join` and
+  the address it was reached at. This needs the callee's `AppRequests` in
+  the queried workspace and within scope. The join reads the last 2 days
+  (ending 10 minutes ago, as request rows arrive later); older or unjoined
+  calls are still found by their address. A messaging consumer is only
+  visible when it traces message processing (Azure Monitor Distro:
+  `AZURE_EXPERIMENTAL_ENABLE_ACTIVITY_SOURCE=true`).
+- Call counts are `sum(ItemCount)`, so sampled rows count for the calls they
+  stand for. Dependencies to the Kubernetes API (the classic SDK's
+  Kubernetes enricher) are dropped as `kubernetes_api` noise.
 - When a radius service is uncovered, assessments count the dropped rows by
   source name and say which uncovered service they look like
   (`LiveCoverage.unscoped_sources`); the rows still never count.

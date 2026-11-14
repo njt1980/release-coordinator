@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from src.core.models import (
     DependencyEdge,
+    EdgeResolution,
     TargetDetail,
     TargetDetailKind,
     merge_target_details,
@@ -206,6 +207,8 @@ def normalize_edges(
 
     A messaging edge to an ephemeral port is dropped as a reversed
     delivery; any other edge to one is kept with ``direction_uncertain``.
+    Edges whose target came from a request join name the callee's role, not
+    an address, and are kept as they are.
 
     Returns the kept edges (targets rewritten, details behind the host in
     ``target_details``) and the number of dropped edges per ``DropReason``
@@ -214,6 +217,10 @@ def normalize_edges(
     kept: list[DependencyEdge] = []
     dropped: Counter[str] = Counter()
     for edge in edges:
+        if edge.resolution == [EdgeResolution.REQUEST_JOIN]:
+            # The target is the callee's own role, not an address.
+            kept.append(edge)
+            continue
         parsed = parse_target(edge.target_service_id, edge.dependency_type)
         if isinstance(parsed, DropReason):
             dropped[parsed.value] += 1
