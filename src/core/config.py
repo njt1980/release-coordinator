@@ -12,6 +12,11 @@ BASELINES_DIR: Final[str] = "baselines"
 # project without one is never approved.
 POLICIES_DIR: Final[str] = "policies"
 
+# Directory (relative to the project root) and file name of the SQLite
+# database holding project dependency review answers (not checked in).
+REVIEWS_DIR: Final[str] = "reviews"
+REVIEWS_DB_NAME: Final[str] = "reviews.sqlite3"
+
 # Upper bound on a policy's ``max_baseline_age_hours``: a project may demand
 # fresher baselines, never older ones.
 MAX_BASELINE_AGE_HOURS: Final[int] = 24

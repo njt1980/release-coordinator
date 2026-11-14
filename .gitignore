@@ -33,6 +33,9 @@ knowledge_graph.json
 # Versioned discovery baselines (baselines/{tenant}/{project_id}/*.json)
 baselines/
 
+# Project dependency review answers (reviews/reviews.sqlite3)
+reviews/
+
 # Local dev server pid files and logs (start-app skill)
 .run/
 
