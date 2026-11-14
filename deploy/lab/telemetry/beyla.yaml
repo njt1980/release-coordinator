@@ -57,6 +57,11 @@ data:
         enable: true
     name_resolver:
       sources: ["k8s", "rdns"]
+    # Context propagation stays off: on the lab's AKS nodes (Ubuntu 24.04,
+    # kernel 6.8.0-1073-azure) Beyla 3.40 refuses header propagation (kernel
+    # FIONREAD/sockhash check, even with /sys/fs/bpf mounted) and IP-option
+    # propagation no longer exists. So Beyla server spans (AppRequests) carry
+    # no cross-service parent and the request join can't name callees here.
     otel_traces_export:
       endpoint: http://otel-collector.observability.svc.cluster.local:4318
 ---

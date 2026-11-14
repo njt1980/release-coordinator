@@ -192,6 +192,32 @@ spec:
               valueFrom: {secretKeyRef: {name: probe, key: servicebus}}
           resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 384Mi}}
 ---
+# Classic SDK 2.x consumer of the same queue (F8), competing with fulfillment.
+# Scale fulfillment to 0 while measuring so billing receives every message.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: billing
+  namespace: appinsights-probe
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: billing}}
+  template:
+    metadata: {labels: {app: billing}}
+    spec:
+      serviceAccountName: probe-enricher
+      containers:
+        - name: billing
+          image: ${PROBE_REGISTRY}/appinsights-probe/billing:${PROBE_TAG}
+          env:
+            - {name: INVENTORY_URL, value: "http://inventory"}
+            - {name: ORDERS_QUEUE, value: orders}
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              valueFrom: {secretKeyRef: {name: probe, key: appinsights-a}}
+            - name: SERVICEBUS_CONNECTION
+              valueFrom: {secretKeyRef: {name: probe, key: servicebus}}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 384Mi}}
+---
 # One order every 2 seconds: enough rows to study, well under the 0.2 GB daily caps.
 apiVersion: apps/v1
 kind: Deployment

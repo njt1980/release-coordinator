@@ -8,14 +8,14 @@ without existing instrumentation would use.
 pods in namespace default --eBPF--> Beyla (DaemonSet)
   --OTLP--> otel-collector (namespace observability)
   --azuremonitor exporter--> Application Insights rc-lab-appinsights
-  --> Log Analytics workspace, table AppDependencies
+  --> Log Analytics workspace, tables AppDependencies and AppRequests
   --> release coordinator (TELEMETRY_SOURCE=azure)
 ```
 
 | File | Contents |
 | --- | --- |
 | `beyla.yaml` | Beyla 3.40.0 DaemonSet, RBAC and config (instruments namespace `default` only) |
-| `collector.yaml` | Collector-contrib 0.164.0: OTLP in, CLIENT/PRODUCER spans only, resource attributes kept (the backend reads `service.name`, `k8s.namespace.name` and `k8s.cluster.name` from `Properties`), Azure Monitor out |
+| `collector.yaml` | Collector-contrib 0.164.0: OTLP in, CLIENT/PRODUCER (dependencies) and SERVER/CONSUMER (requests) spans, internal spans and health probes dropped, resource attributes kept (the backend reads `service.name`, `k8s.namespace.name` and `k8s.cluster.name` from `Properties`), Azure Monitor out |
 
 `.claude/skills/app-up/lab.sh up` applies both files and creates the Secret
 `observability/appinsights` (key `connection-string`) from the Application
@@ -71,9 +71,13 @@ project policy's `telemetry_cluster` must name that value.
   spans whose peer port is 32768 or higher. Failed TCP connects (span name
   `CONNECT`, no protocol) are dropped too: the exporter would use the span
   name as `Target`.
-- Message consumption (CONSUMER spans, e.g. makeline-service reading from
-  rabbitmq) is dropped with the other non-dependency spans, so that edge is
-  not observed; the publishing side (`order-service -> rabbitmq:5672`) is.
+- Server and consumer spans are kept (since 2026-11-14, F6): they become
+  `AppRequests` rows whose `ParentId` is the caller's dependency span, so the
+  request join names the callee. Beyla's cross-node context propagation is
+  off (this kernel fails Beyla's FIONREAD check, see `beyla.yaml`), yet on
+  the lab 121 of 122 in-cluster requests still joined their caller. Requests
+  from uninstrumented callers (the `lab-traffic` browser pods) have no
+  parent. Health-probe paths (`/health`, `/ready`, `/live`, ...) are dropped.
 - Workloads without a Kubernetes Service (`virtual-customer`,
   `virtual-worker`) resolve only when the static-code scan registers them.
 

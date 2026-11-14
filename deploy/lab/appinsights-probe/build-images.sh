@@ -8,9 +8,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 : "${PROBE_ACR:?set PROBE_ACR (registry name, without .azurecr.io)}"
 : "${PROBE_TAG:?set PROBE_TAG}"
-declare -A PROJECTS=([gateway]=Gateway [orders]=Orders [inventory]=Inventory [fulfillment]=Fulfillment)
+declare -A PROJECTS=([gateway]=Gateway [orders]=Orders [inventory]=Inventory [fulfillment]=Fulfillment [billing]=Billing)
 services=("$@")
-[[ ${#services[@]} -gt 0 ]] || services=(gateway orders inventory fulfillment)
+[[ ${#services[@]} -gt 0 ]] || services=(gateway orders inventory fulfillment billing)
 
 for service in "${services[@]}"; do
   project="${PROJECTS[$service]:?unknown service $service}"
