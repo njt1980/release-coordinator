@@ -5,8 +5,9 @@
 //      environment, role assignments.
 //   2. (secrets are put into Key Vault by the operator)
 //   3. deployApp=true: the container app, scaled to zero when idle.
-// Sign-in (Easy Auth) is configured after pass 3 with the az CLI, because it
-// needs an Entra app registration.
+// Sign-in (Easy Auth) needs an Entra app registration (signinClientId) whose
+// client secret is in Key Vault as 'signin-client-secret'; it is part of
+// the template so a redeploy keeps it.
 
 @description('Azure region.')
 param location string = resourceGroup().location
@@ -33,6 +34,9 @@ param deployApp bool = false
 @description('Entra tenant and client ID of the read-only backend service principal.')
 param backendTenantId string
 param backendClientId string
+
+@description('Client ID of the Entra app registration users sign in with (empty: no sign-in).')
+param signinClientId string = ''
 
 @description('Comma-separated Azure DevOps organization URLs the server may read.')
 param adoOrgAllowlist string
@@ -164,6 +168,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (deployApp) {
       secrets: [
         { name: 'anthropic-api-key', keyVaultUrl: '${vault.properties.vaultUri}secrets/anthropic-api-key', identity: identity.id }
         { name: 'backend-client-secret', keyVaultUrl: '${vault.properties.vaultUri}secrets/backend-client-secret', identity: identity.id }
+        { name: 'microsoft-provider-authentication-secret', keyVaultUrl: '${vault.properties.vaultUri}secrets/signin-client-secret', identity: identity.id }
       ]
     }
     template: {
@@ -206,6 +211,28 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (deployApp) {
     }
   }
   dependsOn: [vaultSecretsUser, acrPull]
+}
+
+resource auth 'Microsoft.App/containerApps/authConfigs@2024-03-01' = if (deployApp && !empty(signinClientId)) {
+  parent: app
+  name: 'current'
+  properties: {
+    platform: { enabled: true }
+    globalValidation: {
+      unauthenticatedClientAction: 'RedirectToLoginPage'
+      redirectToProvider: 'azureactivedirectory'
+    }
+    identityProviders: {
+      azureActiveDirectory: {
+        enabled: true
+        registration: {
+          clientId: signinClientId
+          clientSecretSettingName: 'microsoft-provider-authentication-secret'
+          openIdIssuer: '${az.environment().authentication.loginEndpoint}${subscription().tenantId}/v2.0'
+        }
+      }
+    }
+  }
 }
 
 output vaultName string = vault.name
