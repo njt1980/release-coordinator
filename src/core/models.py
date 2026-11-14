@@ -15,7 +15,7 @@ from src.core.env_names import (
 )
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from src.core.proto_contract import ContractFinding
+from src.core.contract_findings import ContractFinding
 from src.core.telemetry_capability import TelemetryStack
 from src.core.telemetry_roles import TelemetryRoleFilter
 
@@ -1858,7 +1858,8 @@ class ReasonCode(str, Enum):
     COMPATIBILITY_UNVERIFIED: the deployment order follows the declared
         change type; no contract compatibility evidence proves it safe (see
         ``ContractCheck`` for when it does).
-    CONTRACT_BREAKING: a changed contract file (``.proto``) breaks
+    CONTRACT_BREAKING: a changed contract (``.proto``, OpenAPI document, or
+        a message channel's payload type) breaks
         compatibility: services built against the old and the new version
         can't talk during a rolling deployment. A fully evidenced risk, so
         the assessment stays actionable; a person decides.
@@ -2176,11 +2177,15 @@ class ContractCheckStatus(str, Enum):
 class ContractCheck(BaseModel):
     """Contract compatibility evidence for one pull request.
 
-    ``contract_files`` are the changed ``.proto`` files, ``other_files`` the
-    rest of the changed files. ``findings`` are every difference between
-    their base and head versions, ``unreadable`` the files that couldn't
-    be read or parsed (with why). ``consumers`` maps each changed contract
-    file to the services whose builds compile it as a client.
+    ``contract_files`` are the changed ``.proto`` files and OpenAPI
+    documents, ``other_files`` the rest of the changed files. ``findings``
+    are every difference between their base and head versions (and between
+    the message payload types changed source files declare), ``unreadable``
+    the files that couldn't be read or parsed (with why). ``consumers`` maps
+    each changed contract file to the services whose builds compile it as a
+    client, ``callers`` to the services calling a service that serves it.
+    ``message_consumers`` maps each compared message type to the services
+    consuming its channel.
     ``uncovered_callers`` are, under INTERFACES, callers of a changed
     service that reach it through no shared contract. ``detail`` is the
     sentence a person reads.
@@ -2193,6 +2198,8 @@ class ContractCheck(BaseModel):
     findings: List[ContractFinding] = Field(default_factory=list)
     unreadable: Dict[str, str] = Field(default_factory=dict)
     consumers: Dict[str, List[str]] = Field(default_factory=dict)
+    callers: Dict[str, List[str]] = Field(default_factory=dict)
+    message_consumers: Dict[str, List[str]] = Field(default_factory=dict)
     uncovered_callers: List[str] = Field(default_factory=list)
     detail: str = Field(min_length=1)
 

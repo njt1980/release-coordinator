@@ -26,7 +26,7 @@ const DECISION_STEPS = [
   ["Review", "Apply the dependency review's answers; an answer counts only while the files it rests on are unchanged.", "REVIEW_UNAVAILABLE"],
   ["Radius", "Walk every upstream caller and downstream dependency, counting hops; a message channel links its consumers to its producers. Check every unresolved node, the baseline's age and scope, required sources, unlinked identities, channels a changed service publishes to with no known consumer, and code coverage across the whole project (an unread file anywhere could be an unseen caller).", "DISCOVERY_GAP · BASELINE_STALE · STATIC_COVERAGE_INCOMPLETE · IDENTITY_UNLINKED · CHANNEL_CONSUMERS_UNKNOWN"],
   ["Live check", "Query telemetry now: every service in the radius must be seen within the policy's window, and a live edge the baseline lacks is drift.", "REQUIRED_SOURCE_MISSING · BASELINE_DRIFT · RUNTIME_UNOBSERVABLE"],
-  ["Contracts", "Compare changed .proto files at base and head. A breaking difference blocks; a compatible one verifies the order when nothing else changed (or every caller shares a contract, if the policy allows).", "CONTRACT_BREAKING · COMPATIBILITY_UNVERIFIED"],
+  ["Contracts", "Compare changed .proto files and OpenAPI documents at base and head (removed or renamed operations, newly required parameters and request fields, removed response fields, type changes, narrowed enums), and the payload class or record of each changed message type a channel carries (removed or retyped properties). A breaking difference blocks; a compatible one verifies the order when nothing else changed (or every caller shares a contract, if the policy allows).", "CONTRACT_BREAKING · COMPATIBILITY_UNVERIFIED"],
   ["Change flags", "Flag database migrations (EF Core, Flyway, Liquibase), added, removed or changed configuration keys (appsettings, application.yml/.properties, .env) and feature-flag sections. Config files are compared key by key at base and head; values are never kept.", "DB_MIGRATION · CONFIG_KEYS_CHANGED · FEATURE_FLAGS_CHANGED"],
   ["Sequence", "Order the deployment deterministically (topological sort): providers first for additive changes, consumers first for breaking ones. A cycle is named.", "DEPENDENCY_CYCLE"],
   ["Risk", "Only with complete evidence and external AI allowed: a model writes an advisory review of the redacted change. It can reject a release, never approve one.", "MODEL_REJECTED · ADVISORY_DISABLED"],
@@ -41,7 +41,7 @@ const SOURCES = [
     reads: [
       "The default branch head, resolved to a commit; every file fetched pinned to it (429/503 retried, blobs cached by git object id).",
       "Service boundaries from release-coord.yaml, else from Dockerfile, package.json or go.mod markers and runnable build projects (.csproj, pom.xml, build.gradle). A file outside every service that Dockerfiles COPY in (a shared .proto, say) belongs to each service that copies it.",
-      "Dependencies: literal URLs to in-cluster or private hosts; reads of address-like environment variables (*_ADDR, *_URL, *_HOST, ConnectionStrings__*) in Python, JS/TS, Go, Java, C#, PHP and Ruby; appsettings and Spring config keys; Dockerfile ENV; nginx and Envoy upstreams; Feign and Eureka names; gRPC <Protobuf> contract links.",
+      "Dependencies: literal URLs to in-cluster or private hosts; reads of address-like environment variables (*_ADDR, *_URL, *_HOST, ConnectionStrings__*) in Python, JS/TS, Go, Java, C#, PHP and Ruby; appsettings and Spring config keys; Dockerfile ENV; nginx and Envoy upstreams; Feign and Eureka names; gRPC <Protobuf> and NSwag <OpenApiReference> contract links; an OpenAPI document (openapi*, swagger*, *.openapi.*) in a service's directory is the API it serves.",
     ],
     flags: "Flagged instead of guessed: dynamic variable names and config keys, client addresses built at runtime, a client library with no address anywhere, external config servers, unsupported languages (C/C++, Kotlin, Rust, Elixir, Scala…).",
   },
@@ -98,9 +98,9 @@ const REASONS = [
   ["IDENTITY_UNLINKED, RUNTIME_UNOBSERVABLE", "Code that matches no running service, or a service the telemetry can't see", true],
   ["CHANNEL_CONSUMERS_UNKNOWN", "A changed service publishes to a queue, topic or event no scanned service consumes (the policy can make this advisory)", true],
   ["DEPENDENCY_CYCLE", "No safe deployment order exists", true],
-  ["COMPATIBILITY_UNVERIFIED", "No contract evidence proves the change compatible (only .proto contracts are read; by default only contract-only pull requests can be verified)", true],
+  ["COMPATIBILITY_UNVERIFIED", "No contract evidence proves the change compatible (.proto contracts, OpenAPI documents and message payload types are read; by default only contract-only pull requests can be verified)", true],
   ["REVIEW_UNAVAILABLE, DEMO_EVIDENCE", "The dependency review couldn't be read, or mock data was used", true],
-  ["CONTRACT_BREAKING", "A changed .proto contract breaks compatibility: a No-go on complete evidence", false],
+  ["CONTRACT_BREAKING", "A changed contract (.proto, OpenAPI or message payload type) breaks compatibility: a No-go on complete evidence", false],
   ["MODEL_REJECTED", "The advisory risk review rejected the release", false],
   ["ADVISORY_DISABLED", "External AI is off for the project; a person decides", false],
   ["DB_MIGRATION, CONFIG_KEYS_CHANGED, FEATURE_FLAGS_CHANGED", "The change includes a migration, configuration keys or feature flags; a person decides", false],
@@ -159,7 +159,7 @@ const INTENDED_USE_LIMITS = [
 
 const LIMITS = [
   "Verdicts are advisory; a named person decides. A pull request that changes code can't be approved automatically under the default strict contract scope.",
-  "Contracts: only .proto files are compared, and client links are recorded for .NET builds only. OpenAPI and message schemas aren't read yet.",
+  "Contracts: .proto files, OpenAPI documents (local $ref only; oneOf/anyOf not compared) and C#/Java message payload types of type-routed channels are compared. Client links are recorded for .NET builds only; JSON Schema, AsyncAPI and payloads of queue/topic channels aren't read.",
   "Telemetry exported through the OpenTelemetry Collector's Azure Monitor exporter can carry span names instead of addresses as targets (gRPC, Redis, DNS). When the request join names the callee of every such call the span name is dropped; calls to services without telemetry of their own (a cache, a database) stay unresolved.",
   "Code from Azure DevOps and telemetry from Azure Monitor only; GitHub, GitLab and other telemetry backends need adapters.",
   "Messaging is modeled as service to broker, not producer to queue or topic to consumer.",

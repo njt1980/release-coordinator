@@ -519,9 +519,22 @@ def _contract_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
     why, how = REASON_EXPLANATIONS[code]
     listed = check.breaking_findings if breaking else check.findings
     consumers = [
-        f"{path} is compiled as a client by: {', '.join(short_name(s) for s in services)}"
-        for path, services in check.consumers.items()
-        if services
+        *(
+            f"{path} is compiled as a client by: {', '.join(short_name(s) for s in services)}"
+            for path, services in check.consumers.items()
+            if services
+        ),
+        *(
+            f"{path} is served to callers: {', '.join(short_name(s) for s in services)}"
+            for path, services in check.callers.items()
+            if services
+        ),
+        *(
+            f"Message type {name} is consumed by: {', '.join(short_name(s) for s in services)}"
+            if services
+            else f"Message type {name} has no scanned consumer."
+            for name, services in check.message_consumers.items()
+        ),
     ]
     return [
         BriefingGroup(

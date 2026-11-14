@@ -17,13 +17,26 @@ head and compared (``core.proto_contract``). The result
    <Protobuf GrpcServices>`` links recorded by the scanner); otherwise
    NO_CONTRACT, naming the callers no contract covers.
 
-Only ``.proto`` files are contract files in v1; HTTP APIs (OpenAPI),
-message schemas and other contract languages are not read yet, so a
-change to a service called over them stays unverified.
+Contract files are ``.proto`` files and OpenAPI documents (named
+``openapi*``/``swagger*``/``*.openapi.*``, YAML or JSON; see
+``core.openapi_contract``). A service whose directory holds an OpenAPI
+document serves it (``ContractLink`` SERVER, recorded by the scanner) unless
+its build references it as a client (``<OpenApiReference>``).
+
+Message payload types (contract v2): a changed C# or Java source file
+declaring the class or record a ``message_type`` channel is named after
+(eShop ``IEventBus``, MassTransit) is compared too (``core.message_contract``);
+a removed or retyped property is breaking for the channel's consumers. These
+files are code, not contract files, so they never make a change COMPATIBLE
+on their own. A file named after a message type that can't be read or
+parsed is unreadable; other candidate files (under an ``*Event*``,
+``*Message*`` or ``*Contract*`` directory) are compared when they parse.
 """
 
 from __future__ import annotations
 
+import posixpath
+import re
 from collections.abc import Callable, Iterable
 from typing import Final
 
@@ -35,19 +48,29 @@ from src.core.models import (
     ContractLink,
     ContractScope,
     DependencyEdge,
+    ChannelKind,
     KnowledgeGraph,
+    MessageChannel,
     RepositoryCoverage,
 )
-from src.core.proto_contract import ContractFinding, ProtoFile, ProtoParseError, diff_protos, parse_proto
+from src.core.message_contract import PayloadType, diff_payload
+from src.core.openapi_contract import OpenApiParseError, diff_openapi, is_openapi_file, parse_openapi
+from src.core.proto_contract import ContractFinding, ProtoParseError, diff_protos, parse_proto
 
 CONTRACT_SUFFIXES: Final[tuple[str, ...]] = (".proto",)
+_PAYLOAD_SUFFIXES: Final[tuple[str, ...]] = (".cs", ".java")
+_PAYLOAD_DIRECTORY: Final[re.Pattern[str]] = re.compile(r"(?:^|/)[^/]*(?:event|message|contract)[^/]*/", re.IGNORECASE)
 
 # Reads a repository file at a commit; None when it doesn't exist there.
 FileReader = Callable[[str, str], str | None]
+# Reads the payload types a source file declares; None when it can't be analysed.
+PayloadReader = Callable[[str, str], dict[str, PayloadType] | None]
 
 
 def is_contract_file(path: str) -> bool:
-    return path.lower().endswith(CONTRACT_SUFFIXES)
+    return path.lower().endswith(CONTRACT_SUFFIXES) or is_openapi_file(path)
+
+
 
 
 def _short(service_id: str) -> str:
@@ -66,21 +89,92 @@ def read_contract_diffs(
     findings: list[ContractFinding] = []
     unreadable: dict[str, str] = {}
     for path in paths:
-        versions: list[ProtoFile | None] = []
+        openapi = is_openapi_file(path)
+        texts: list[str | None] = []
         try:
             for commit in (base, head):
-                text = read(path, commit)
-                versions.append(None if text is None else parse_proto(text))
-        except ProtoParseError as error:
-            unreadable[path] = f"not understood: {error}"
-            continue
+                texts.append(read(path, commit))
         except Exception as error:  # a failed read, as the source client raised it
             unreadable[path] = f"couldn't be read: {error}"
             continue
-        if versions[0] is None and versions[1] is None:
+        if texts[0] is None and texts[1] is None:
             unreadable[path] = "found at neither the base nor the head"
             continue
-        findings.extend(diff_protos(path, versions[0], versions[1]))
+        try:
+            if openapi:
+                documents = [None if text is None else parse_openapi(text, path) for text in texts]
+                findings.extend(diff_openapi(path, documents[0], documents[1]))
+            else:
+                protos = [None if text is None else parse_proto(text) for text in texts]
+                findings.extend(diff_protos(path, protos[0], protos[1]))
+        except (ProtoParseError, OpenApiParseError) as error:
+            unreadable[path] = f"not understood: {error}"
+    return findings, unreadable
+
+
+def message_type_consumers(channels: Iterable[MessageChannel]) -> dict[str, list[str]]:
+    """Each ``message_type`` channel's name (its payload type) and the
+    services consuming it, across brokers."""
+    consumers: dict[str, set[str]] = {}
+    for channel in channels:
+        if channel.kind is ChannelKind.MESSAGE_TYPE:
+            consumers.setdefault(channel.name, set()).update(channel.consumers)
+    return {name: sorted(services) for name, services in sorted(consumers.items())}
+
+
+def payload_candidates(paths: Iterable[str], type_names: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Changed source files that may declare a message payload type:
+    ``(named, nearby)``: files named after a type, and other files under an
+    ``*Event*``/``*Message*``/``*Contract*`` directory."""
+    names = set(type_names)
+    named: list[str] = []
+    nearby: list[str] = []
+    if not names:
+        return named, nearby
+    for path in (p.lstrip("/") for p in paths):
+        if not path.lower().endswith(_PAYLOAD_SUFFIXES):
+            continue
+        stem = posixpath.splitext(posixpath.basename(path))[0]
+        if stem in names:
+            named.append(path)
+        elif _PAYLOAD_DIRECTORY.search(path):
+            nearby.append(path)
+    return named, nearby
+
+
+def read_payload_diffs(
+    read: FileReader,
+    parse_payloads: PayloadReader,
+    named: Iterable[str],
+    nearby: Iterable[str],
+    type_names: Iterable[str],
+    base: str,
+    head: str,
+) -> tuple[list[ContractFinding], dict[str, str]]:
+    """Compare the message payload types the candidate files declare at
+    ``base`` and ``head`` (see the module doc for which are unreadable)."""
+    names = set(type_names)
+    findings: list[ContractFinding] = []
+    unreadable: dict[str, str] = {}
+    strict = set(named)
+    for path in [*named, *nearby]:
+        versions: list[dict[str, PayloadType]] = []
+        try:
+            for commit in (base, head):
+                text = read(path, commit)
+                if text is None:
+                    versions.append({})
+                    continue
+                types = parse_payloads(text, path)
+                if types is None:
+                    raise ValueError("its syntax couldn't be analysed")
+                versions.append(types)
+        except Exception as error:
+            if path in strict:
+                unreadable[path] = f"message type couldn't be compared: {error}"
+            continue
+        for name in sorted(names & (versions[0].keys() | versions[1].keys())):
+            findings.extend(diff_payload(path, name, versions[0].get(name), versions[1].get(name)))
     return findings, unreadable
 
 
@@ -118,6 +212,29 @@ def contract_consumers(
     return {path: sorted(services) for path, services in sorted(consumers.items())}
 
 
+def contract_callers(
+    links: dict[str, list[tuple[str, ContractLink]]],
+    edges: Iterable[DependencyEdge],
+    repository: str,
+    paths: Iterable[str],
+) -> dict[str, list[str]]:
+    """For each contract file, the services calling a service that serves
+    it (dependency edges into the server), whatever contract they compile."""
+    wanted = {path.lstrip("/") for path in paths}
+    servers: dict[str, set[str]] = {}
+    for service, service_links in links.items():
+        for link_repository, link in service_links:
+            if link_repository == repository.lower() and link.path in wanted and link.role.serves:
+                servers.setdefault(link.path, set()).add(service)
+    callers: dict[str, set[str]] = {}
+    edge_list = list(edges)
+    for path, served_by in servers.items():
+        for edge in edge_list:
+            if edge.target_service_id in served_by and edge.source_service_id not in served_by:
+                callers.setdefault(path, set()).add(edge.source_service_id)
+    return {path: sorted(services) for path, services in sorted(callers.items())}
+
+
 def uncovered_callers(
     links: dict[str, list[tuple[str, ContractLink]]],
     targets: Iterable[str],
@@ -145,6 +262,8 @@ def uncovered_callers(
 
 def _describe(check: ContractCheck) -> str:
     files = ", ".join(check.contract_files)
+    if check.status is ContractCheckStatus.BREAKING:
+        files = ", ".join(dict.fromkeys(finding.path for finding in check.breaking_findings))
     if check.status is ContractCheckStatus.UNREADABLE:
         return "Contract files couldn't be checked: " + "; ".join(
             f"{path} {why}" for path, why in check.unreadable.items()
@@ -180,8 +299,14 @@ def evaluate_contracts(
     unreadable: dict[str, str],
     consumers: dict[str, list[str]],
     uncovered: list[str],
+    callers: dict[str, list[str]] | None = None,
+    message_consumers: dict[str, list[str]] | None = None,
 ) -> ContractCheck:
-    """Decide the contract check's status (see the module doc for the order)."""
+    """Decide the contract check's status (see the module doc for the order).
+
+    ``findings`` and ``unreadable`` include message payload types';
+    ``message_consumers`` maps each compared message type to its consumers.
+    """
     files = [path.lstrip("/") for path in changed_files]
     contract_files = [path for path in files if is_contract_file(path)]
     other_files = [path for path in files if not is_contract_file(path)]
@@ -206,6 +331,8 @@ def evaluate_contracts(
         findings=findings,
         unreadable=unreadable,
         consumers=consumers,
+        callers=dict(callers or {}),
+        message_consumers=dict(message_consumers or {}),
         uncovered_callers=uncovered if scope is ContractScope.INTERFACES and other_files else [],
         detail="-",
     )

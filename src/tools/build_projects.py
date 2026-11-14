@@ -13,7 +13,8 @@ Understood build files:
   paths are resolved relative to the file. ``<Protobuf Include=...
   GrpcServices=...>`` items are the project's contract files
   (``ContractLink``): Client, Server or Both (the default); ``None``
-  (messages only) is not recorded.
+  (messages only) is not recorded. ``<OpenApiReference Include=...>``
+  items (NSwag client generation) are OpenAPI contracts it calls (Client).
 - Maven ``pom.xml``: ``packaging`` ``pom`` is an aggregator; a
   ``spring-boot-maven-plugin`` under ``build/plugins`` is runnable, whether
   the module declares it or inherits it from a parent POM in the
@@ -188,6 +189,32 @@ _GRPC_ROLES: Final[dict[str, ContractRole]] = {
 }
 
 
+def _resolve_includes(include_attribute: str, directory: str, file_paths: set[str]) -> list[str]:
+    """Repository paths a project item's ``Include`` names (globs allowed)."""
+    matches: list[str] = []
+    for include in include_attribute.split(";"):
+        include = include.strip().replace("\\", "/")
+        if not include or "$(" in include or "://" in include:
+            continue
+        target = posixpath.normpath(posixpath.join(directory, include))
+        if any(c in target for c in "*?["):
+            matches.extend(sorted(p for p in file_paths if fnmatch.fnmatch(p, target)))
+        elif target in file_paths:
+            matches.append(target)
+    return matches
+
+
+def _openapi_contracts(root: ElementTree.Element, path: str, file_paths: set[str]) -> list[ContractLink]:
+    """The ``<OpenApiReference>`` items of a csproj: OpenAPI documents the
+    project generates a client for."""
+    directory = _directory(path)
+    links: dict[str, ContractLink] = {}
+    for element in root.iter("OpenApiReference"):
+        for match in _resolve_includes(element.get("Include", ""), directory, file_paths):
+            links[match] = ContractLink(path=match, role=ContractRole.CLIENT, project_file=_relative(path))
+    return [links[key] for key in sorted(links)]
+
+
 def _protobuf_contracts(root: ElementTree.Element, path: str, file_paths: set[str]) -> list[ContractLink]:
     """The ``<Protobuf>`` items of a csproj, resolved to repository paths."""
     directory = _directory(path)
@@ -276,7 +303,7 @@ def parse_csproj(content: str, path: str, file_paths: set[str]) -> BuildProject:
         kind=kind,
         references=list(dict.fromkeys(references)),
         unresolved=unresolved,
-        contracts=_protobuf_contracts(root, path, file_paths),
+        contracts=[*_protobuf_contracts(root, path, file_paths), *_openapi_contracts(root, path, file_paths)],
     )
 
 
