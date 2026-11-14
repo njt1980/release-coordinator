@@ -94,6 +94,7 @@ from src.orchestration.review import (
 from src.tools.devops_extractor import CommitComparison, DevOpsExtractor
 from src.tools.review_store import ReviewStoreCorruptError, default_review_store
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
+from src.coordinator.observability import observability_gaps
 from src.tools.telemetry_extractor import TelemetryExtractor
 
 logger = logging.getLogger(__name__)
@@ -910,6 +911,8 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     edges touching the radius are ``runtime_observed_edges``; a workspace
     other than the baseline's is a DISCOVERY_GAP, and radius edges the
     baseline lacks are BASELINE_DRIFT. Metrics are keyed by service FQURI.
+    A role-profile probe adds the radius services' observability gaps
+    (``observability_gaps``; context only, never an issue).
     """
     baseline_edges = [
         f"{edge.source_service_id} -> {edge.target_service_id}"
@@ -987,6 +990,21 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         )
     else:
         runtime_state, why = live_runtime_state(policy, coverage, now)
+    gaps = None
+    if not is_mock and graph is not None:
+        profiles = extractor.get_role_profiles(
+            policy.runtime_lookback_days if policy else config.DEFAULT_RUNTIME_LOOKBACK_DAYS,
+            policy.telemetry_scope if policy else None,
+        )
+        if profiles is not None:
+            gaps = observability_gaps(
+                graph,
+                baseline_identity_context(_scope(state).tenant, graph),
+                profiles,
+                result.items,
+                now,
+                radius,
+            )
     status = TelemetryStatus(
         source="mock" if is_mock else "live",
         runtime_evidence=runtime_state,
@@ -1000,6 +1018,7 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         unbaselined_edges=drift,
         coverage=None if is_mock else coverage,
         dropped_records=extractor.dropped_records,
+        observability_gaps=gaps,
     )
     return _apply_runtime_policy(state, status, issues, why)
 
@@ -1170,6 +1189,7 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         scanned_revisions=list(scan.scanned_revisions) if scan else [],
         unbaselined_edges=list(telemetry.unbaselined_edges) if telemetry else [],
         live_coverage=telemetry.coverage if telemetry else None,
+        observability_gaps=telemetry.observability_gaps if telemetry else None,
         head_scanned=changes is not None,
         dependencies_added=list(changes.added) if changes else [],
         dependencies_removed=list(changes.removed) if changes else [],

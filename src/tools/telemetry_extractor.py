@@ -29,9 +29,11 @@ from src.core.models import (
     EdgeResolution,
     TargetDetail,
     TargetDetailKind,
+    TelemetryRoleProfile,
     TelemetryScope,
     normalize_workspace_ids,
 )
+from src.core.telemetry_capability import telemetry_stack
 from src.tools.telemetry_normalization import DropReason, normalize_edges, parse_target
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
@@ -215,6 +217,24 @@ class TelemetryExtractor:
             )
         except Exception as error:
             logger.warning("Unscoped telemetry diagnostic failed: %s", error)
+            return None
+
+    def get_role_profiles(
+        self, days_back: int, scope: TelemetryScope | None
+    ) -> list[TelemetryRoleProfile] | None:
+        """Describe each telemetry role in scope (see ``build_role_profile_query``).
+
+        A diagnostic: never raises, and returns None for the mock fixture or
+        when the query fails.
+        """
+        if self._source != "azure" or self._client is None:
+            return None
+        try:
+            return parse_role_profile_response(
+                self._query(build_role_profile_query(days_back, scope), days_back)
+            )
+        except Exception as error:
+            logger.warning("Telemetry role profile query failed: %s", error)
             return None
 
     @property
@@ -511,6 +531,92 @@ def build_dependency_query(
         f"LastObservedAt, {_CALLS_COLUMN}, {_FAILURES_COLUMN}, {_MAX_ITEM_COUNT_COLUMN},\n"
         f"    {_CALLEE_COLUMN}, {_CALLEE_NAMESPACE_COLUMN}, {_RESOLVED_CALLS_COLUMN}\n"
     )
+
+
+# How many roles the profile query returns at most (busiest first).
+ROLE_PROFILE_LIMIT = 1000
+_PROFILE_COLUMNS = frozenset(
+    {"Role", "Namespace", "RequestRows", "DependencyRows", "Represented", "MaxItemCount",
+     "RowsWithNamespace", "SdkVersions", "Components", "LastSeen"}
+)
+
+
+def build_role_profile_query(days_back: int, scope: TelemetryScope | None = None) -> str:
+    """Return the KQL describing each telemetry role in scope.
+
+    Per role (``service.name`` or ``AppRoleName``; "" for rows without
+    one): request and dependency rows, the calls they stand for
+    (``sum(ItemCount)``) and the largest ``ItemCount``, how many rows carry
+    a namespace and one such namespace, the ``SDKVersion`` values and the
+    Application Insights components seen, and the newest row.
+    """
+    if days_back <= 0:
+        raise ValueError("days_back must be a positive integer")
+    return (
+        "union AppRequests, AppDependencies\n"
+        f"| where TimeGenerated >= ago({days_back}d)\n"
+        f"{_component_clause(scope)}"
+        f"{_cluster_clause(scope)}"
+        f'| extend Role = coalesce(tostring(Properties["{_SERVICE_NAME_PROPERTY}"]), AppRoleName),\n'
+        f"    RoleNamespace = {_namespace_expression()}\n"
+        '| summarize RequestRows = countif(Type == "AppRequests"),\n'
+        '    DependencyRows = countif(Type == "AppDependencies"),\n'
+        "    Represented = sum(ItemCount), MaxItemCount = max(ItemCount),\n"
+        "    RowsWithNamespace = countif(isnotempty(RoleNamespace)),\n"
+        "    Namespace = take_anyif(RoleNamespace, isnotempty(RoleNamespace)),\n"
+        "    SdkVersions = make_set(SDKVersion, 8), Components = make_set(_ResourceId, 8),\n"
+        "    LastSeen = max(TimeGenerated)\n"
+        "    by Role\n"
+        f"| top {ROLE_PROFILE_LIMIT} by Represented desc\n"
+    )
+
+
+def _string_list(value: object) -> list[str]:
+    """Read a ``make_set`` column (a list, or its JSON text)."""
+    if isinstance(value, str):
+        value = json.loads(value) if value.strip() else []
+    if not isinstance(value, list):
+        raise ValueError(f"expected a list, got {value!r}")
+    return [str(item) for item in value if str(item).strip()]
+
+
+def parse_role_profile_response(
+    response: LogsQueryResult | LogsQueryPartialResult,
+) -> list[TelemetryRoleProfile]:
+    """Read role profiles from a ``build_role_profile_query`` response.
+
+    Raises:
+        ValueError: if the response isn't complete or lacks the columns.
+    """
+    if getattr(response, "status", None) != LogsQueryStatus.SUCCESS:
+        raise ValueError(f"role profile query status {getattr(response, 'status', None)!r}")
+    profiles: list[TelemetryRoleProfile] = []
+    for table in list(getattr(response, "tables", None) or []):
+        columns = {column: index for index, column in enumerate(table.columns)}
+        missing = _PROFILE_COLUMNS.difference(columns)
+        if missing:
+            raise ValueError(f"table {table.name!r} lacks columns {sorted(missing)}")
+        for row in table.rows:
+            versions = _string_list(row[columns["SdkVersions"]])
+            last_seen = row[columns["LastSeen"]]
+            profiles.append(
+                TelemetryRoleProfile(
+                    role=_text(row, columns["Role"]),
+                    namespace=_text(row, columns["Namespace"]),
+                    request_rows=_count(row, columns["RequestRows"]),
+                    dependency_rows=_count(row, columns["DependencyRows"]),
+                    represented_calls=_count(row, columns["Represented"]),
+                    max_item_count=_count(row, columns["MaxItemCount"]),
+                    rows_with_namespace=_count(row, columns["RowsWithNamespace"]),
+                    stacks=sorted({telemetry_stack(v) for v in versions}, key=lambda s: s.value),
+                    sdk_versions=sorted(versions),
+                    components=sorted(
+                        {c.rsplit("/", 1)[-1] for c in _string_list(row[columns["Components"]])}
+                    ),
+                    last_seen=_parse_observed_at(last_seen) if last_seen else None,
+                )
+            )
+    return profiles
 
 
 def source_reference(name: str, namespace: str | None) -> str:
