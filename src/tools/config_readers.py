@@ -149,6 +149,10 @@ _SPRING_VALUE: Final[re.Pattern[str]] = re.compile(r'@Value\(\s*"(?P<expr>\$\{[^
 _SPRING_GET_PROPERTY: Final[re.Pattern[str]] = re.compile(
     rf"\.getProperty\(\s*{_KEY}\s*(?:,\s*{_STRING})?"
 )
+# Spring Cloud DiscoveryClient: discoveryClient.getInstances("vets-service").
+_DISCOVERY_LOOKUP: Final[re.Pattern[str]] = re.compile(
+    r'\.getInstances\(\s*"(?P<name>[A-Za-z0-9-]+)"\s*\)'
+)
 # Spring Cloud OpenFeign: @FeignClient(name = "customers-service").
 _FEIGN_CLIENT: Final[re.Pattern[str]] = re.compile(
     r'@FeignClient\(\s*(?:(?:name|value)\s*=\s*)?"(?P<name>[A-Za-z0-9-]+)"'
@@ -442,8 +446,12 @@ def spring_code_bindings(content: str, file_path: str) -> list[ConfigBinding]:
 
 
 def feign_client_services(content: str) -> list[str]:
-    """Service names Spring Cloud OpenFeign clients call (``@FeignClient``)."""
-    return list(dict.fromkeys(match.group("name") for match in _FEIGN_CLIENT.finditer(content)))
+    """Service names Spring code calls through the service registry:
+    OpenFeign clients (``@FeignClient``) and ``DiscoveryClient``
+    lookups (``getInstances("name")``)."""
+    matches = [*_FEIGN_CLIENT.finditer(content), *_DISCOVERY_LOOKUP.finditer(content)]
+    matches.sort(key=lambda match: match.start())
+    return list(dict.fromkeys(match.group("name") for match in matches))
 
 
 # --- Environment defaults in code ------------------------------------------

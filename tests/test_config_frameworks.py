@@ -232,6 +232,10 @@ class SpringReaderTests(unittest.TestCase):
         self.assertEqual(bindings["VISITS_URL"].defaults[0].template, "http://visits-service")
         self.assertEqual(feign_client_services(code), ["customers-service"])
 
+    def test_discovery_client_lookups_name_registry_services(self) -> None:
+        code = 'List<ServiceInstance> i = discoveryClient.getInstances("vets-service");'
+        self.assertEqual(feign_client_services(code), ["vets-service"])
+
 
 class CodeDefaultTests(unittest.TestCase):
     def test_env_reads_with_literal_defaults(self) -> None:

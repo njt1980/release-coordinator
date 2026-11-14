@@ -28,6 +28,8 @@ def _compare(scope: str, before: Headline, after: Headline) -> list[str]:
         )
     for rate in _RATES:
         old, new = getattr(before, rate), getattr(after, rate)
+        if new is None and rate.endswith("precision"):
+            continue  # no predictions at all: nothing wrong (recall shows any loss)
         if old is not None and (new is None or new < old - TOLERANCE):
             problems.append(f"{scope}: {rate} dropped {old} -> {new}")
     return problems

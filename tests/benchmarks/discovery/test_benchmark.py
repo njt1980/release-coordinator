@@ -177,9 +177,11 @@ class RatchetTests(unittest.TestCase):
         self.assertEqual(len(problems), 2)  # pooled and the app
         self.assertIn("silent misses rose 5 -> 6", problems[0])
 
-    def test_precision_drop_or_loss_fails(self) -> None:
+    def test_precision_drop_fails(self) -> None:
         self.assertTrue(regressions(self.report(), self.report(precision=0.7)))
-        self.assertTrue(regressions(self.report(), self.report(precision=None)))
+
+    def test_no_predictions_is_not_a_precision_drop(self) -> None:
+        self.assertEqual(regressions(self.report(), self.report(precision=None)), [])
 
     def test_missing_app_fails(self) -> None:
         current = BenchReport(apps={}, pooled=_headline())

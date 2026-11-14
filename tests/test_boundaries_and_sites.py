@@ -313,9 +313,10 @@ class EshopScanTests(unittest.TestCase):
             self.assertEqual(opaque.path, "src/EventBus/Bus.cs")
             self.assertEqual([(s.line, s.kind) for s in opaque.sites], [(1, OpaqueReferenceKind.DYNAMIC_CONFIG_KEY)])
 
-    def test_apphost_is_excluded_and_tests_are_unowned(self) -> None:
+    def test_apphost_and_test_code_are_excluded(self) -> None:
         self.assertNotIn("src/eShop.AppHost/Program.cs", self.scan.unowned_source_files)
-        self.assertIn("tests/Basket.UnitTests/BasketTests.cs", self.scan.unowned_source_files)
+        # Test code never runs in production: excluded, not reported as unowned.
+        self.assertNotIn("tests/Basket.UnitTests/BasketTests.cs", self.scan.unowned_source_files)
 
     def test_head_scan_of_one_service_reads_its_libraries_only(self) -> None:
         result = _extractor(dict(ESHOP)).scan_repository("repo-a", only_roots={"src/Basket.API"})
@@ -378,7 +379,13 @@ class OpaqueSiteTests(unittest.TestCase):
         cases = [
             ('var a = configuration["A:B"];\nvar b = configuration[key];', "x.cs", [(2, dynamic)]),
             ('cfg.GetValue<string>($"Services:{name}:Url");', "x.cs", [(1, dynamic)]),
-            ('config.GetSection(nameof(Options));\nconfig.GetSection("Ok");', "x.cs", [(1, dynamic)]),
+            # nameof(Options) is a literal section (bound_sections), a variable is not.
+            ('config.GetSection(nameof(Options));\nconfig.GetSection("Ok");', "x.cs", []),
+            ("x.BindConfiguration(sectionName);", "x.cs", [(1, dynamic)]),
+            # Aspire clients: a non-literal connection name hides the connection;
+            # EF Core's options lambda is not a name.
+            ('b.AddRabbitMQClient(connectionName);\nb.AddRedisClient("redis");', "x.cs", [(1, dynamic)]),
+            ("s.AddDbContext<C>(options => options.UseNpgsql(cs));", "x.cs", []),
             ("Environment.GetEnvironmentVariable(name);", "x.cs", [(1, env)]),
             ('env.getProperty(key);\nenv.getProperty("a.b");', "X.java", [(1, dynamic)]),
             ('System.getenv(name);\nSystem.getenv().get(name);\nSystem.getenv("A");', "X.java", [(1, env), (2, env)]),
@@ -426,6 +433,19 @@ class OpaqueSiteTests(unittest.TestCase):
         self.assertEqual([(s.section, s.line) for s in sections], [("Catalog", 1), ("Basket", 2)])
         keys = {ConfigFramework.DOTNET: {"catalog:Url"}}
         self.assertEqual([s.detail for s in unbound_section_sites(sections, keys)], ["Basket"])
+
+    def test_nameof_binds_the_named_section(self) -> None:
+        # eShop: AddOptions<PaymentOptions>().BindConfiguration(nameof(PaymentOptions)).
+        sections = bound_sections(
+            "b.AddOptions<P>().BindConfiguration(nameof(PaymentOptions));\n"
+            "c.GetSection(nameof(Settings.Catalog));",
+            "x.cs",
+        )
+        self.assertEqual([s.section for s in sections], ["PaymentOptions", "Catalog"])
+        self.assertEqual(
+            [s.detail for s in unbound_section_sites(sections, {ConfigFramework.DOTNET: set()})],
+            ["PaymentOptions", "Catalog"],
+        )
 
     def test_a_section_read_from_a_section_is_relative(self) -> None:
         (scopes,) = bound_sections('identitySection.GetRequiredSection("Scopes").GetChildren();', "x.cs")

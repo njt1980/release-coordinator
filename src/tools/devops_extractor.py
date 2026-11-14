@@ -142,6 +142,25 @@ _EXCLUDED_DIRECTORIES = {
     "target",
     "vendor",
 }
+# Test code (it never runs in production, so its addresses are not runtime
+# dependencies): conventional test directories, ``*-tests``/``*.UnitTests``
+# style directories, and test file names (Go, JS/TS, Python).
+_TEST_DIRECTORY_NAMES: Final[frozenset[str]] = frozenset(
+    {"__tests__", "e2e", "fixtures", "test", "test-data", "test_data", "testdata", "testing", "tests"}
+)
+_TEST_DIRECTORY_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^.+[-_.](?:unit|integration|functional|acceptance|e2e|load|perf|smoke)?[-_]?tests?$"
+    r"|^.+[-_.]e2e$",
+    re.IGNORECASE,
+)
+_TEST_FILE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?:_test\.go|\.(?:test|spec)\.[cm]?[jt]sx?|_test\.py)$|^test_[^/]*\.py$", re.IGNORECASE
+)
+# Directories that hold tooling, never a deployable service, even with a
+# marker file (a Dockerfile for a local Prometheus, CI images...).
+_TOOLING_DIRECTORY_NAMES: Final[frozenset[str]] = frozenset(
+    {".devcontainer", ".github", "docker", "hack", "scripts"}
+)
 # Build output only inside a .NET project directory (Express keeps real
 # source in bin/www).
 _DOTNET_OUTPUT_DIRECTORY: Final[str] = "bin"
@@ -445,8 +464,9 @@ class FileClass(str, Enum):
         (a Dockerfile for its image ``ENV``).
     EXCLUDED: skipped by design (documentation, vendored dependencies,
         build output, lock files), which mostly reference third-party sites,
-        and Docker Compose files, which describe a local stack of other
-        services.
+        Docker Compose files, which describe a local stack of other
+        services, and test code (see ``is_test_directory``), which never
+        runs in production.
     UNSUPPORTED: source code in a language the scanner can't read.
     NOT_SOURCE: anything else (images, Markdown, licenses...).
     """
@@ -457,12 +477,17 @@ class FileClass(str, Enum):
     NOT_SOURCE = "NOT_SOURCE"
 
 
+def is_test_directory(name: str) -> bool:
+    """Whether a directory name marks test code (``tests``, ``Ordering.UnitTests``)."""
+    return name.lower() in _TEST_DIRECTORY_NAMES or bool(_TEST_DIRECTORY_PATTERN.match(name))
+
+
 def _in_excluded_directory(directories: list[str], dotnet_roots: Collection[str]) -> bool:
     """Whether a file under ``directories`` (original case) is excluded by
     directory: an always-excluded name, or ``bin/`` of a .NET project."""
     for position, directory in enumerate(directories):
         name = directory.lower()
-        if name in _EXCLUDED_DIRECTORIES:
+        if name in _EXCLUDED_DIRECTORIES or is_test_directory(name):
             return True
         if name == _DOTNET_OUTPUT_DIRECTORY and "/".join(directories[:position]) in dotnet_roots:
             return True
@@ -484,6 +509,7 @@ def classify_path(path: str, dotnet_roots: Collection[str] = frozenset()) -> Fil
         _in_excluded_directory(original[:-1], dotnet_roots)
         or filename in _EXCLUDED_FILENAMES
         or _COMPOSE_FILE_PATTERN.match(filename)
+        or _TEST_FILE_PATTERN.search(filename)
     ):
         return FileClass.EXCLUDED
     if filename in _BUILD_DEFINITION_FILENAMES:
@@ -537,6 +563,8 @@ def _marker_boundary_root(
     directory = segments[:-1]
     if _in_excluded_directory(directory, dotnet_roots):
         return None
+    if directory and directory[-1].lower() in _TOOLING_DIRECTORY_NAMES:
+        return None
     if len(directory) <= 1:
         return directory
     if len(directory) == 2 and directory[0].lower() in _SERVICE_CONTAINER_DIRECTORIES:
@@ -581,13 +609,19 @@ def _infer_service_boundaries(
     (see ``_marker_boundary_root``) and service build projects at any depth
     (see ``_service_project_roots``). A marker at the repository root names
     the service after the repository; any other boundary is named after its
-    directory. Directories whose name cannot become a DNS label are skipped.
+    directory (a ``src`` directory after its parent, as ``cart/src``).
+    Directories whose name cannot become a DNS label are skipped. A root
+    whose only marker is a package.json is workspace tooling, not a
+    service, when the repository has other boundaries.
     """
     dotnet_roots = dotnet_project_roots(file_paths)
     project_roots = _service_project_roots(file_paths, projects or [], dotnet_roots)
     boundaries: dict[str, ServiceBoundary] = {}
+    root_markers: set[str] = set()
     for path in file_paths:
         directory = _marker_boundary_root(path, dotnet_roots)
+        if directory == []:
+            root_markers.add(_path_segments(path)[-1].lower())
         if directory is None:
             directory = project_roots.get(path.lstrip("/"))
         if directory is None:
@@ -595,14 +629,27 @@ def _infer_service_boundaries(
         root = "/".join(directory)
         if root in boundaries:
             continue
-        name = _dns_label(directory[-1] if directory else repo_name)
+        name = _dns_label(_boundary_directory_name(directory) or repo_name)
         if name is None:
             logger.warning("Skipping service directory %r: not a DNS label", root)
             continue
         boundaries[root] = ServiceBoundary(
             name=name, root=root, source=BoundarySource.MARKER
         )
+    if "" in boundaries and root_markers == {"package.json"} and len(boundaries) > 1:
+        del boundaries[""]
     return list(boundaries.values())
+
+
+def _boundary_directory_name(directory: list[str]) -> str | None:
+    """The name a boundary directory gives its service (None at the root).
+
+    A trailing ``src`` names nothing (``src/cart/src`` is the cart).
+    """
+    meaningful = list(directory)
+    while len(meaningful) > 1 and meaningful[-1].lower() == "src":
+        meaningful.pop()
+    return meaningful[-1] if meaningful else None
 
 
 def _owning_boundary(
@@ -672,10 +719,24 @@ def _extract_env_var_names(content: str) -> list[str]:
     return [name for name in dict.fromkeys(names) if is_endpoint_variable(name)]
 
 
+_COMMENT_LINE: Final[re.Pattern[str]] = re.compile(r"^[ \t]*(?://|#|/\*|\*|<!--).*$", re.MULTILINE)
+
+
+def strip_comment_lines(content: str) -> str:
+    """Blank whole-line comments (``//``, ``#``, ``/*``, `` *``, ``<!--``),
+    keeping line numbers."""
+    return _COMMENT_LINE.sub("", content)
+
+
 def _extract_references(
     content: str, service_name: str, file_path: str
 ) -> list[EndpointReference]:
-    """Return the dependency references in one file, URLs first."""
+    """Return the dependency references in one file, URLs first.
+
+    Whole-line comments are skipped (a commented-out address is not a
+    dependency).
+    """
+    content = strip_comment_lines(content)
     references = [
         EndpointReference(
             service_name=service_name, endpoint=endpoint, file_path=file_path
