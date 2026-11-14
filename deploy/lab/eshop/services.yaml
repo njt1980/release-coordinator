@@ -1,0 +1,705 @@
+# eShop lab: the .NET services, hand-written plain manifests mirroring the
+# AppHost's wiring (src/eShop.AppHost/AppHost.cs). Deploy with apply.sh,
+# which fills in ${ESHOP_REGISTRY} and ${ESHOP_TAG} (see README.md).
+#
+# What Aspire would inject is set explicitly: ConnectionStrings__<name> for
+# each WithReference to a backing service, services__<name>__http__0 for
+# each project reference, Identity__Url / IdentityUrl / CallBackUrl and the
+# identity callback URLs. Connection strings carry no password: Npgsql reads
+# PGPASSWORD from the Secret eshop-postgres. The RabbitMQ connection string
+# is shared through the ConfigMap eshop-eventbus (envFrom).
+#
+# The web app calls catalog-api and ordering-api as https+http://<name>:
+# service discovery tries HTTPS first and, in this deployment, its
+# pass-through fallback always answers with https://<name> (configured
+# http endpoints are not used). As eShop expects in production, those two
+# serve HTTPS in the cluster: Kestrel on 8443 (Service port 443) with a
+# certificate from the lab CA in the Secret eshop-tls (create-secrets.sh),
+# and the web app trusts that CA through SSL_CERT_FILE (a bundle of the
+# image's CAs plus the lab CA, built by an init container).
+#
+# Containers listen on 8080 (the .NET image default); each exposed service
+# maps port 80 to it, so http://<name> resolves through cluster DNS as
+# Aspire service discovery does. order-processor and payment-processor are
+# background workers with no Service. Probes are TCP: the default
+# endpoints map /health only in Development, and basket-api speaks HTTP/2
+# (gRPC) only.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eshop-common
+  namespace: eshop
+data:
+  ASPNETCORE_HTTP_PORTS: "8080"
+  ASPNETCORE_FORWARDEDHEADERS_ENABLED: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eshop-eventbus
+  namespace: eshop
+data:
+  ConnectionStrings__eventbus: amqp://eventbus:5672
+---
+# Identity.API
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity-api
+  namespace: eshop
+  labels:
+    app: identity-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: identity-api
+  template:
+    metadata:
+      labels:
+        app: identity-api
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654  # the .NET images' app user
+      containers:
+        - name: identity-api
+          image: ${ESHOP_REGISTRY}/eshop/identity-api:${ESHOP_TAG}
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: eshop-common
+          env:
+            - name: ConnectionStrings__identitydb
+              value: "Host=postgres;Port=5432;Username=postgres;Database=identitydb"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: eshop-postgres
+                  key: password
+            - name: BasketApiClient
+              value: "http://basket-api"
+            - name: OrderingApiClient
+              value: "http://ordering-api"
+            - name: WebhooksApiClient
+              value: "http://webhooks-api"
+            - name: WebhooksWebClient
+              value: "http://webhooksclient"
+            - name: WebAppClient
+              value: "http://webapp"
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 160Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: identity-api
+  namespace: eshop
+spec:
+  selector:
+    app: identity-api
+  ports:
+    - port: 80
+      targetPort: http
+      name: http
+---
+# Basket.API
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: basket-api
+  namespace: eshop
+  labels:
+    app: basket-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: basket-api
+  template:
+    metadata:
+      labels:
+        app: basket-api
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654  # the .NET images' app user
+      containers:
+        - name: basket-api
+          image: ${ESHOP_REGISTRY}/eshop/basket-api:${ESHOP_TAG}
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: eshop-common
+            - configMapRef:
+                name: eshop-eventbus
+          env:
+            - name: ConnectionStrings__redis
+              value: "redis:6379"
+            - name: Identity__Url
+              value: "http://identity-api"
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 160Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: basket-api
+  namespace: eshop
+spec:
+  selector:
+    app: basket-api
+  ports:
+    - port: 80
+      targetPort: http
+      name: http
+---
+# Catalog.API
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-api
+  namespace: eshop
+  labels:
+    app: catalog-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: catalog-api
+  template:
+    metadata:
+      labels:
+        app: catalog-api
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654  # the .NET images' app user
+      containers:
+        - name: catalog-api
+          image: ${ESHOP_REGISTRY}/eshop/catalog-api:${ESHOP_TAG}
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 8443
+              name: https
+          envFrom:
+            - configMapRef:
+                name: eshop-common
+            - configMapRef:
+                name: eshop-eventbus
+          env:
+            - name: ASPNETCORE_HTTPS_PORTS
+              value: "8443"
+            - name: Kestrel__Certificates__Default__Path
+              value: "/tls/tls.crt"
+            - name: Kestrel__Certificates__Default__KeyPath
+              value: "/tls/tls.key"
+            - name: ConnectionStrings__catalogdb
+              value: "Host=postgres;Port=5432;Username=postgres;Database=catalogdb"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: eshop-postgres
+                  key: password
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 160Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: tls
+          secret:
+            secretName: eshop-tls
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-api
+  namespace: eshop
+spec:
+  selector:
+    app: catalog-api
+  ports:
+    - port: 80
+      targetPort: http
+      name: http
+    - port: 443
+      targetPort: https
+      name: https
+---
+# Ordering.API
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ordering-api
+  namespace: eshop
+  labels:
+    app: ordering-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ordering-api
+  template:
+    metadata:
+      labels:
+        app: ordering-api
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654  # the .NET images' app user
+      containers:
+        - name: ordering-api
+          image: ${ESHOP_REGISTRY}/eshop/ordering-api:${ESHOP_TAG}
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 8443
+              name: https
+          envFrom:
+            - configMapRef:
+                name: eshop-common
+            - configMapRef:
+                name: eshop-eventbus
+          env:
+            - name: ASPNETCORE_HTTPS_PORTS
+              value: "8443"
+            - name: Kestrel__Certificates__Default__Path
+              value: "/tls/tls.crt"
+            - name: Kestrel__Certificates__Default__KeyPath
+              value: "/tls/tls.key"
+            - name: ConnectionStrings__orderingdb
+              value: "Host=postgres;Port=5432;Username=postgres;Database=orderingdb"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: eshop-postgres
+                  key: password
+            - name: Identity__Url
+              value: "http://identity-api"
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 160Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: tls
+          secret:
+            secretName: eshop-tls
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ordering-api
+  namespace: eshop
+spec:
+  selector:
+    app: ordering-api
+  ports:
+    - port: 80
+      targetPort: http
+      name: http
+    - port: 443
+      targetPort: https
+      name: https
+---
+# OrderProcessor
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-processor
+  namespace: eshop
+  labels:
+    app: order-processor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-processor
+  template:
+    metadata:
+      labels:
+        app: order-processor
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654  # the .NET images' app user
+      containers:
+        - name: order-processor
+          image: ${ESHOP_REGISTRY}/eshop/order-processor:${ESHOP_TAG}
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: eshop-common
+            - configMapRef:
+                name: eshop-eventbus
+          env:
+            - name: ConnectionStrings__orderingdb
+              value: "Host=postgres;Port=5432;Username=postgres;Database=orderingdb"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: eshop-postgres
+                  key: password
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 160Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+---
+# PaymentProcessor
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-processor
+  namespace: eshop
+  labels:
+    app: payment-processor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-processor
+  template:
+    metadata:
+      labels:
+        app: payment-processor
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654  # the .NET images' app user
+      containers:
+        - name: payment-processor
+          image: ${ESHOP_REGISTRY}/eshop/payment-processor:${ESHOP_TAG}
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: eshop-common
+            - configMapRef:
+                name: eshop-eventbus
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 160Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+---
+# Webhooks.API
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhooks-api
+  namespace: eshop
+  labels:
+    app: webhooks-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webhooks-api
+  template:
+    metadata:
+      labels:
+        app: webhooks-api
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654  # the .NET images' app user
+      containers:
+        - name: webhooks-api
+          image: ${ESHOP_REGISTRY}/eshop/webhooks-api:${ESHOP_TAG}
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: eshop-common
+            - configMapRef:
+                name: eshop-eventbus
+          env:
+            - name: ConnectionStrings__webhooksdb
+              value: "Host=postgres;Port=5432;Username=postgres;Database=webhooksdb"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: eshop-postgres
+                  key: password
+            - name: Identity__Url
+              value: "http://identity-api"
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 160Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhooks-api
+  namespace: eshop
+spec:
+  selector:
+    app: webhooks-api
+  ports:
+    - port: 80
+      targetPort: http
+      name: http
+---
+# WebhookClient
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhooksclient
+  namespace: eshop
+  labels:
+    app: webhooksclient
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webhooksclient
+  template:
+    metadata:
+      labels:
+        app: webhooksclient
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654  # the .NET images' app user
+      containers:
+        - name: webhooksclient
+          image: ${ESHOP_REGISTRY}/eshop/webhooksclient:${ESHOP_TAG}
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: eshop-common
+          env:
+            - name: services__webhooks-api__http__0
+              value: "http://webhooks-api"
+            - name: IdentityUrl
+              value: "http://identity-api"
+            - name: CallBackUrl
+              value: "http://webhooksclient"
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 160Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhooksclient
+  namespace: eshop
+spec:
+  selector:
+    app: webhooksclient
+  ports:
+    - port: 80
+      targetPort: http
+      name: http
+---
+# WebApp
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp
+  namespace: eshop
+  labels:
+    app: webapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webapp
+  template:
+    metadata:
+      labels:
+        app: webapp
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654  # the .NET images' app user
+      initContainers:
+        # The image's CA bundle plus the lab CA, for SSL_CERT_FILE.
+        - name: ca-bundle
+          image: ${ESHOP_REGISTRY}/eshop/webapp:${ESHOP_TAG}
+          command: ["sh", "-c", "cat /etc/ssl/certs/ca-certificates.crt /lab-ca/ca.crt > /ca-bundle/ca-certificates.crt"]
+          volumeMounts:
+            - name: lab-ca
+              mountPath: /lab-ca
+              readOnly: true
+            - name: ca-bundle
+              mountPath: /ca-bundle
+          securityContext:
+            allowPrivilegeEscalation: false
+      containers:
+        - name: webapp
+          image: ${ESHOP_REGISTRY}/eshop/webapp:${ESHOP_TAG}
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: eshop-common
+            - configMapRef:
+                name: eshop-eventbus
+          env:
+            - name: SSL_CERT_FILE
+              value: "/ca-bundle/ca-certificates.crt"
+            - name: services__basket-api__http__0
+              value: "http://basket-api"
+            - name: services__catalog-api__http__0
+              value: "http://catalog-api"
+            - name: services__ordering-api__http__0
+              value: "http://ordering-api"
+            - name: IdentityUrl
+              value: "http://identity-api"
+            - name: CallBackUrl
+              value: "http://webapp"
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 160Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: ca-bundle
+              mountPath: /ca-bundle
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: lab-ca
+          secret:
+            secretName: eshop-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: ca-bundle
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp
+  namespace: eshop
+spec:
+  selector:
+    app: webapp
+  ports:
+    - port: 80
+      targetPort: http
+      name: http

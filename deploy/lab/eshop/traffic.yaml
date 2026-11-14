@@ -1,0 +1,60 @@
+# Lab-only read traffic for eShop, so live telemetry sees its calls.
+#
+# GET requests only, without signing in: the web app's home and item pages
+# (webapp -> catalog-api) and catalog-api's own API (catalog-api ->
+# postgres). Basket and ordering need an authenticated user, so their calls
+# don't happen here; order-processor still polls orderingdb on its own.
+# Runs in lab-traffic, which Beyla doesn't instrument and onboarding doesn't
+# scan.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lab-traffic
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eshop-traffic
+  namespace: lab-traffic
+  labels:
+    app: eshop-traffic
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eshop-traffic
+  template:
+    metadata:
+      labels:
+        app: eshop-traffic
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+      containers:
+        - name: eshop-traffic
+          image: curlimages/curl:8.10.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              WEB=http://webapp.eshop.svc.cluster.local
+              CATALOG=http://catalog-api.eshop.svc.cluster.local
+              while true; do
+                for url in \
+                  "$WEB/" "$WEB/item/1" "$WEB/?page=1" \
+                  "$CATALOG/api/catalog/items?api-version=1.0" \
+                  "$CATALOG/api/catalog/catalogbrands?api-version=1.0"; do
+                  curl -s -o /dev/null -m 5 -w "%{http_code} $url\n" "$url" || echo "failed $url"
+                done
+                sleep 15
+              done
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true

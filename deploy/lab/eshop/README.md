@@ -1,0 +1,87 @@
+# eShop lab (.NET, plain manifests)
+
+The second lab application: [dotnet/eShop](https://github.com/dotnet/eShop)
+(imported into the Azure DevOps project as `eShop`), deployed with
+hand-written Kubernetes manifests: no Helm, no Kustomize, no Aspire publisher.
+It exercises what the AKS Store lab can't: C# configuration (`appsettings`,
+`ConnectionStrings`, `Identity__Url`), shared libraries, gRPC, RabbitMQ
+messaging, and service names that differ from their directories.
+
+The eShop repository itself is left as imported (upstream code we don't
+own); these manifests live here, like the lab's telemetry and traffic.
+
+## Files
+
+| File | What it deploys |
+|---|---|
+| `infrastructure.yaml` | namespace `eshop`; `postgres` (pgvector, the AppHost's four databases), `eventbus` (RabbitMQ), `redis` |
+| `services.yaml` | the nine .NET services, wired as `src/eShop.AppHost/AppHost.cs` wires them |
+| `traffic.yaml` | read-only GET traffic in `lab-traffic` (web app pages, catalog API) |
+| `apply.sh` | deploys all of the above in order, filling in the image registry and tag (`--dry-run`: server-side dry run) |
+| `create-secrets.sh` | the Secrets `eshop-postgres` (random password) and `eshop-tls` (lab CA and service certificate) |
+| `Dockerfile`, `build-images.sh` | build and push the service images in Azure with ACR Tasks (eShop has no Dockerfiles; no local .NET SDK needed) |
+
+## How the AppHost maps to the manifests
+
+| AppHost | Manifests |
+|---|---|
+| `WithReference(postgres database)` | `ConnectionStrings__<db>=Host=postgres;...;Database=<db>` (no password) + `PGPASSWORD` from the Secret |
+| `WithReference(rabbitMq)` | `ConnectionStrings__eventbus=amqp://eventbus:5672` via ConfigMap `eshop-eventbus` (`envFrom`) |
+| `WithReference(redis)` | `ConnectionStrings__redis=redis:6379` |
+| `WithReference(<project>)` | `services__<project>__http__0=http://<project>` and a Service on port 80 |
+| projects called as `https+http://` (catalog-api, ordering-api) | HTTPS in the cluster: Kestrel on 8443 (Service port 443) with a lab-CA certificate; the web app trusts the CA (see `services.yaml`) |
+| `WithEnvironment("Identity__Url", ...)` and the callback URLs | the same variables, with in-cluster URLs |
+| `AddForwardedHeaders()` | `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true` (ConfigMap `eshop-common`) |
+
+Deployment names are the AppHost's resource names (`order-processor`,
+`payment-processor`, `webhooksclient`). The static scanner names services
+after their directories (`orderprocessor`, `paymentprocessor`,
+`webhookclient`), so reconciliation has to cope with the difference, or the
+repository needs a `release-coord.yaml`. That is deliberate: it is how real
+repositories look.
+
+## Deploy
+
+Prerequisites: the lab cluster running (`app-up`), and the images built and
+pushed to a registry the cluster can pull from. The lab uses the Basic Azure
+Container Registry `rclab48a7217e` (attached to RC-Cluster with
+`az aks update --attach-acr`), tagged with the eShop commit:
+
+```bash
+ESHOP_ACR=rclab48a7217e ESHOP_TAG=913acea ./build-images.sh <eshop checkout at 913acea>
+```
+
+Then:
+
+```bash
+ESHOP_REGISTRY=rclab48a7217e.azurecr.io ESHOP_TAG=913acea deploy/lab/eshop/apply.sh --dry-run  # validates, changes nothing
+ESHOP_REGISTRY=rclab48a7217e.azurecr.io ESHOP_TAG=913acea deploy/lab/eshop/apply.sh
+```
+
+On a fresh cluster the dry run reports the `eshop` namespace as missing
+(a server-side dry run creates nothing); that is expected.
+
+Services restart until PostgreSQL and RabbitMQ are ready, and
+`order-processor` until `ordering-api` has run the ordering migrations.
+Beyla instruments namespace `eshop` (see `../telemetry/beyla.yaml`); its
+ConfigMap is read at startup, so restart the Beyla DaemonSet after changing it.
+
+Onboard with namespace `eshop` and repository `eShop` (branch `main`).
+
+## Sizing
+
+Requests total about 0.7 CPU and 2 GiB of memory (limits up to about
+5.5 GiB), on top of the AKS Store lab. The single-node lab cluster may need
+a larger node or a second one.
+
+## Limitations
+
+- Nothing signs in: Identity.API's redirects need a browser-reachable URL,
+  so basket and ordering calls (which need a user) don't happen in the lab.
+- `mobile-bff` (a YARP proxy for the MAUI app) isn't deployed; neither are
+  the MAUI apps, which run on devices.
+- AI features are off (the AppHost's `UseFoundry` default).
+- The lab CA is generated per cluster and lives only in the Secret
+  `eshop-tls`; it is trusted only by the web app.
+- Credentials are lab-grade: RabbitMQ uses its public `guest` default and
+  Redis has no password; both are reachable only inside the cluster.

@@ -1,0 +1,86 @@
+# Release policy for the eShop lab (default/eshop): the lab default's strict
+# settings, for the .NET eShop app in namespace eshop (deploy/lab/eshop).
+#
+# Policies live at policies/{tenant}/{project_id}.yaml. A project without a
+# policy is never approved (POLICY_MISSING). Unknown keys are rejected.
+#
+# This default is the strictest setting: every discovery source must have
+# succeeded in a baseline under 24h old that scanned the environment and
+# cluster below, runtime evidence must come from a live telemetry query,
+# and nothing is exempt.
+policy_version: 6
+tenant: default
+project_id: eshop
+
+# The one deployment target this project releases to. The baseline must
+# have been onboarded with exactly these values (never "unknown").
+environment: local
+cluster: local
+
+# What proves the cluster label above. The baseline's manifest scan must
+# have read this API server (kubectl config view --minify shows it), and
+# telemetry is only counted from rows whose resource attribute equals the
+# value below. Beyla on AKS reports k8s.cluster.name as the node resource
+# group. These are the lab cluster RC-Cluster's values.
+kubernetes_api_server: https://rc-cluster-releasecoordinat-48a721-ao9498jv.hcp.eastus.azmk8s.io:443
+telemetry_cluster:
+  attribute: k8s.cluster.name
+  value: MC_ReleaseCoordinatorLab_RC-Cluster_eastus
+
+# Where the project's code lives. Pull request revisions are verified here
+# (the base is an ancestor of the head, the changed files are what the
+# commits change) and the changed services are scanned at the head. Never
+# taken from the caller. Without it every assessment is REVISION_UNVERIFIED.
+source_control:
+  organization_url: https://dev.azure.com/thomasnimel
+  project: Release_Coordinator
+
+# Hours; 1..24. A project may require fresher baselines, never older ones.
+max_baseline_age_hours: 24
+
+# Discovery stages that must have SUCCEEDED (SKIPPED does not count).
+required_sources: [STATIC_CODE, K8S_MANIFEST, RUNTIME_TELEMETRY]
+
+# live: a completed live telemetry query for this assessment whose newest
+#   row is fresh and which observed every service in the release radius.
+# baseline: live, or runtime edges from the baseline snapshot.
+# Only live evidence can detect dependencies the baseline is missing
+# (BASELINE_DRIFT); with "baseline" that check never runs.
+runtime_evidence: live
+
+# Days of telemetry every query reads (1..30), at onboarding and assessment.
+runtime_lookback_days: 7
+# Live evidence counts only if every service in the release radius was seen
+# within this many minutes (5..1440), unless listed in silent_services.
+max_telemetry_age_minutes: 60
+
+# External destinations called on purpose. Each rule names exactly one of
+# host, host_suffix (".example.com") or cidr, with a reason. Host rules
+# never match a bare IP, so an IP-only sighting of npm still blocks.
+egress:
+  - host: registry.npmjs.org
+    reason: "npm's update check when a Node.js container starts"
+
+# Explicit, justified allowlist. Example entries:
+#   files:
+#     - pattern: "docs/**"       # '*' and '?' stay within one path segment;
+#       reason: "Documentation"  # a '**' segment spans directories
+#     - pattern: "*.md"          # top-level Markdown files only
+#       reason: "Documentation"
+#   dependencies:
+#     - entity_id: "unresolved:api.stripe.com"
+#       reason: "External payment API, contract monitored separately"
+#   silent_services:   # radius services allowed to be quiet for longer
+#     - service: "default/nightly-report"
+#       reason: "Runs once a day"
+#       max_quiet_days: 2          # must still be seen within 2 days
+#       expires_on: 2026-12-31     # re-review by then; ignored afterwards
+#   unscanned_files:   # source the scanner can't read (e.g. Rust) or whose
+#                      # references it can't follow, reviewed
+#     - pattern: "src/product-service/**/*.rs"
+#       reason: "Reviewed: calls ai-service via AI_SERVICE_URL only"
+exemptions:
+  files: []
+  dependencies: []
+  silent_services: []
+  unscanned_files: []

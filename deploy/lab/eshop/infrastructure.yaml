@@ -1,0 +1,219 @@
+# eShop lab: namespace and backing services (PostgreSQL with pgvector,
+# RabbitMQ, Redis), hand-written plain manifests mirroring what the eShop
+# AppHost (src/eShop.AppHost/AppHost.cs) runs locally with .NET Aspire.
+# Names match the AppHost's resource names: postgres, eventbus, redis.
+#
+# Credentials: the PostgreSQL password lives only in the Secret
+# eshop-postgres, created by create-secrets.sh (never committed). RabbitMQ
+# keeps its public guest/guest default, allowed from other pods by
+# loopback_users = none; Redis has no password. Both are reachable only
+# inside the cluster. Lab use only.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eshop
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: eshop
+data:
+  # The four databases the AppHost declares; EF migrations create the schema.
+  01-databases.sql: |
+    CREATE DATABASE catalogdb;
+    CREATE DATABASE identitydb;
+    CREATE DATABASE orderingdb;
+    CREATE DATABASE webhooksdb;
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: eshop
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:0.8.0-pg16
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: eshop-postgres
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: init
+          configMap:
+            name: postgres-init
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: eshop
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: postgres
+      name: postgres
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eventbus-config
+  namespace: eshop
+data:
+  rabbitmq.conf: |
+    loopback_users = none
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eventbus
+  namespace: eshop
+  labels:
+    app: eventbus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eventbus
+  template:
+    metadata:
+      labels:
+        app: eventbus
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:4.0-management
+          ports:
+            - containerPort: 5672
+              name: amqp
+            - containerPort: 15672
+              name: management
+          volumeMounts:
+            - name: config
+              mountPath: /etc/rabbitmq/conf.d/90-lab.conf
+              subPath: rabbitmq.conf
+          readinessProbe:
+            tcpSocket:
+              port: amqp
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: eventbus-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eventbus
+  namespace: eshop
+spec:
+  selector:
+    app: eventbus
+  ports:
+    - port: 5672
+      targetPort: amqp
+      name: amqp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: eshop
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          ports:
+            - containerPort: 6379
+              name: redis
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: eshop
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: redis
+      name: redis
