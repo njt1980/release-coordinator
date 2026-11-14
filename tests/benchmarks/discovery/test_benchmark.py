@@ -24,9 +24,10 @@ from src.tools.devops_extractor import (
 
 from .env_sources import WorkloadEnv, compose_envs, k8s_envs, substitute
 from .models import NOISE, OPTIONAL, AppTruth, BenchReport, EdgeMode, Headline
+from .acceptance import acceptance_failures
 from .ratchet import regressions
 from .run_bench import APPS_DIR, BASELINE, all_apps, load_truth
-from .scoring import normalize_host, score, score_app
+from .scoring import headline, normalize_host, score, score_app
 
 SHA = "a" * 40
 
@@ -159,6 +160,37 @@ def _headline(silent: int = 5, precision: float | None = 0.8) -> Headline:
         missed_silent=silent,
         missed_flagged=3,
     )
+
+
+class FlagPrecisionTests(unittest.TestCase):
+    def test_flags_are_useful_only_where_something_was_missed(self) -> None:
+        # api and worker are flagged (incomplete); only worker -> api is missed.
+        scan = _scan(_service("api", [], incomplete=True), _service("worker", [], incomplete=True))
+        result = score_app(_truth(), [("demo", scan)], {})
+        misses = result.misses
+        self.assertEqual(misses.services_incomplete_any, 2)
+        # api misses api->db, worker misses worker->api: both flags useful.
+        self.assertEqual(misses.services_flagged_with_miss, 2)
+        # Different unread files, so two causes; both point at a miss.
+        self.assertEqual((misses.causes_flagged, misses.causes_flagged_with_miss), (2, 2))
+
+    def test_false_alarm(self) -> None:
+        scan = _scan(_service("front", ["http://api", "http://worker"], incomplete=True))
+        misses = score_app(_truth(), [("demo", scan)], {}).misses
+        self.assertEqual((misses.services_incomplete_any, misses.services_flagged_with_miss), (1, 0))
+        self.assertEqual(headline([score_app(_truth(), [("demo", scan)], {})]).flag_precision, 0.0)
+
+
+class AcceptanceTests(unittest.TestCase):
+    def test_criteria(self) -> None:
+        good = _headline(silent=0).model_copy(update={"cause_precision": 0.6})
+        bad = _headline(silent=2).model_copy(update={"cause_precision": 0.3})
+        report = BenchReport(apps={"a": good, "b": bad}, pooled=good)
+        self.assertEqual(acceptance_failures(report, {"a"}), [])
+        failures = acceptance_failures(report, {"a", "b"})
+        self.assertEqual(len(failures), 2)
+        self.assertIn("2 silent miss(es)", failures[0])
+        self.assertEqual(acceptance_failures(report, set()), ["no held-out app: acceptance can't be judged"])
 
 
 class RatchetTests(unittest.TestCase):

@@ -89,7 +89,8 @@ def match_services(truth: AppTruth, scans: Iterable[tuple[str, RepositoryScan]])
             name = service.service.name
             key = f"{repo}:{name}"
             default = name if name in truth.services else None
-            target = boundaries.get(key, boundaries.get(name, default))
+            by_root = boundaries.get(f"root:{repo}:{service.service.root}", default)
+            target = boundaries.get(key, boundaries.get(name, by_root))
             if target == OPTIONAL:
                 continue
             if target is None:
@@ -220,6 +221,17 @@ def score_edges(
     )
 
 
+def _causes(match: ServiceMatch) -> dict[str, set[str]]:
+    """Cause key (the exact set of unread files) -> services sharing it."""
+    causes: dict[str, set[str]] = {}
+    for service in match.services:
+        coverage = service.scan.coverage
+        if service.truth_name and coverage and coverage.unscanned:
+            key = "\n".join(sorted(u.path for u in coverage.unscanned))
+            causes.setdefault(key, set()).add(service.truth_name)
+    return causes
+
+
 def miss_accounting(match: ServiceMatch, missed: list[dict[str, object]]) -> MissAccounting:
     reasons: dict[str, set[str]] = {}
     for service in match.services:
@@ -229,6 +241,8 @@ def miss_accounting(match: ServiceMatch, missed: list[dict[str, object]]) -> Mis
             reasons.setdefault(service.truth_name, set()).update(found)
     incomplete = {name for name, r in reasons.items() if r}
     callers = [str(edge["from"]) for edge in missed]
+    missing_callers = set(callers)
+    causes = _causes(match)
     return MissAccounting(
         services_scored=len(reasons),
         services_not_understood=sum("REFERENCES_NOT_UNDERSTOOD" in r for r in reasons.values()),
@@ -238,6 +252,9 @@ def miss_accounting(match: ServiceMatch, missed: list[dict[str, object]]) -> Mis
         missed_flagged=sum(c in incomplete for c in callers),
         missed_silent=sum(c in reasons and c not in incomplete for c in callers),
         missed_caller_has_no_boundary=sum(c not in reasons for c in callers),
+        services_flagged_with_miss=len(incomplete & missing_callers),
+        causes_flagged=len(causes),
+        causes_flagged_with_miss=sum(1 for members in causes.values() if members & missing_callers),
     )
 
 
@@ -266,6 +283,10 @@ def headline(results: list[AppResult]) -> Headline:
     def pooled(scores: list[Score]) -> Score:
         return score(sum(s.tp for s in scores), sum(s.fp for s in scores), sum(s.fn for s in scores))
 
+    flagged = sum(r.misses.services_incomplete_any for r in results)
+    useful = sum(r.misses.services_flagged_with_miss for r in results)
+    causes = sum(r.misses.causes_flagged for r in results)
+    useful_causes = sum(r.misses.causes_flagged_with_miss for r in results)
     inventory = pooled([r.inventory for r in results])
     static = pooled([r.edges[EdgeMode.STATIC].all for r in results])
     manifest = pooled([r.edges[EdgeMode.MANIFEST].all for r in results])
@@ -278,4 +299,7 @@ def headline(results: list[AppResult]) -> Headline:
         manifest_recall=manifest.recall,
         missed_silent=sum(r.misses.missed_silent for r in results),
         missed_flagged=sum(r.misses.missed_flagged for r in results),
+        services_flagged=flagged,
+        flag_precision=round(useful / flagged, 3) if flagged else None,
+        cause_precision=round(useful_causes / causes, 3) if causes else None,
     )

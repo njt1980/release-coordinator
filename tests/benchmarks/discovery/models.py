@@ -81,7 +81,8 @@ class TruthEdge(_Strict):
 class NameMapping(_Strict):
     """Hand-made links from scanner names to ground-truth names.
 
-    ``boundaries`` maps a scanner service (``name`` or ``repo:name``) to a
+    ``boundaries`` maps a scanner service (``name``, ``repo:name``, or
+    ``root:repo:<root>`` when two services share a name) to a
     ground-truth service, to ``None`` (a bogus boundary) or to ``OPTIONAL``
     (not scored). ``hosts`` maps a reference host to a node or to ``NOISE``.
     ``workloads`` maps a deployment-file workload name to a node.
@@ -92,8 +93,19 @@ class NameMapping(_Strict):
     workloads: dict[str, str] = Field(default_factory=dict)
 
 
+class Split(str, Enum):
+    """TUNED: the scanner was changed while looking at this app's misses, so
+    its numbers flatter the scanner. HELD_OUT: never used to tune; its
+    ground truth was built without seeing scanner output. Acceptance is
+    judged on held-out apps."""
+
+    TUNED = "tuned"
+    HELD_OUT = "held_out"
+
+
 class AppTruth(_Strict):
     app: str
+    split: Split = Split.TUNED
     upstream: str
     gt_source: str
     repos: list[RepoPin] = Field(min_length=1)
@@ -128,7 +140,16 @@ class EdgeScores(BaseModel):
 
 
 class MissAccounting(BaseModel):
-    """How the missed edges (manifest mode) present to a coordinator."""
+    """How the missed edges (manifest mode) present to a coordinator, and
+    how many flags point at a real miss.
+
+    A service is flagged when its coverage is incomplete. A flag is useful
+    when the service has a missed edge (manifest mode); otherwise it is a
+    false alarm (the code wasn't fully understood, but nothing was missed).
+    A cause is a set of services sharing the same unread files (what a
+    briefing shows as one question); it is useful when any of them has a
+    missed edge.
+    """
 
     services_scored: int
     services_not_understood: int
@@ -138,6 +159,9 @@ class MissAccounting(BaseModel):
     missed_flagged: int
     missed_silent: int
     missed_caller_has_no_boundary: int
+    services_flagged_with_miss: int = 0
+    causes_flagged: int = 0
+    causes_flagged_with_miss: int = 0
 
 
 class InventoryScore(Score):
@@ -164,8 +188,12 @@ class Headline(BaseModel):
     manifest_recall: float | None
     missed_silent: int
     missed_flagged: int
+    services_flagged: int = 0
+    flag_precision: float | None = None
+    cause_precision: float | None = None
 
 
 class BenchReport(BaseModel):
     apps: dict[str, Headline]
     pooled: Headline
+    pooled_held_out: Headline | None = None

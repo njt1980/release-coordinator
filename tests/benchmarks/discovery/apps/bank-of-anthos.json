@@ -1,0 +1,196 @@
+{
+ "app": "bank-of-anthos",
+ "split": "held_out",
+ "upstream": "https://github.com/GoogleCloudPlatform/bank-of-anthos",
+ "gt_source": "kubernetes-manifests/*.yaml (service-api-config, *-db-config ConfigMaps) cross-checked against call sites in src/frontend/frontend.py, ledgerwriter LedgerWriterController.java and the README architecture diagram (docs/img/architecture.png).",
+ "repos": [
+  {
+   "name": "bank-of-anthos",
+   "url": "https://github.com/GoogleCloudPlatform/bank-of-anthos.git",
+   "sha": "db35fea9fd090150e2398106aadb475576f80d94"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "k8s",
+   "paths": [
+    "bank-of-anthos/kubernetes-manifests/accounts-db.yaml",
+    "bank-of-anthos/kubernetes-manifests/balance-reader.yaml",
+    "bank-of-anthos/kubernetes-manifests/config.yaml",
+    "bank-of-anthos/kubernetes-manifests/contacts.yaml",
+    "bank-of-anthos/kubernetes-manifests/frontend.yaml",
+    "bank-of-anthos/kubernetes-manifests/ledger-db.yaml",
+    "bank-of-anthos/kubernetes-manifests/ledger-writer.yaml",
+    "bank-of-anthos/kubernetes-manifests/loadgenerator.yaml",
+    "bank-of-anthos/kubernetes-manifests/transaction-history.yaml",
+    "bank-of-anthos/kubernetes-manifests/userservice.yaml"
+   ]
+  }
+ ],
+ "observability": [
+  "cloud-trace",
+  "cloud-monitoring"
+ ],
+ "services": {
+  "frontend": {
+   "kind": "service",
+   "lang": "python",
+   "source": true
+  },
+  "userservice": {
+   "kind": "service",
+   "lang": "python",
+   "source": true
+  },
+  "contacts": {
+   "kind": "service",
+   "lang": "python",
+   "source": true
+  },
+  "ledgerwriter": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "balancereader": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "transactionhistory": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "loadgenerator": {
+   "kind": "service",
+   "lang": "python",
+   "source": true
+  },
+  "accounts-db": {
+   "kind": "infra",
+   "what": "postgresql"
+  },
+  "ledger-db": {
+   "kind": "infra",
+   "what": "postgresql"
+  }
+ },
+ "edges": [
+  {
+   "from": "frontend",
+   "to": "ledgerwriter",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "python: requests to 'http://{}/transactions'.format(os.environ['TRANSACTIONS_API_ADDR'])",
+   "source": "src/frontend/frontend.py:662-673; kubernetes-manifests/config.yaml:28"
+  },
+  {
+   "from": "frontend",
+   "to": "balancereader",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "python: requests to 'http://{}/balances'.format(os.environ['BALANCES_API_ADDR'])",
+   "source": "src/frontend/frontend.py:662-673; kubernetes-manifests/config.yaml:29"
+  },
+  {
+   "from": "frontend",
+   "to": "transactionhistory",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "python: requests to 'http://{}/transactions'.format(os.environ['HISTORY_API_ADDR'])",
+   "source": "src/frontend/frontend.py:662-673; kubernetes-manifests/config.yaml:30"
+  },
+  {
+   "from": "frontend",
+   "to": "contacts",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "python: requests to 'http://{}/contacts'.format(os.environ['CONTACTS_API_ADDR'])",
+   "source": "src/frontend/frontend.py:662-673; kubernetes-manifests/config.yaml:31"
+  },
+  {
+   "from": "frontend",
+   "to": "userservice",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "python: requests to 'http://{}/users' and '/login' from os.environ['USERSERVICE_API_ADDR']",
+   "source": "src/frontend/frontend.py:662-673; kubernetes-manifests/config.yaml:32"
+  },
+  {
+   "from": "ledgerwriter",
+   "to": "balancereader",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: RestTemplate to @Value(\"http://${BALANCES_API_ADDR}/balances\")",
+   "source": "src/ledger/ledgerwriter/src/main/java/anthos/samples/bankofanthos/ledgerwriter/LedgerWriterController.java:86; kubernetes-manifests/config.yaml:29"
+  },
+  {
+   "from": "loadgenerator",
+   "to": "frontend",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "locust --host=\"http://${FRONTEND_ADDR}\" (Dockerfile ENTRYPOINT)",
+   "source": "src/loadgenerator/Dockerfile:49; kubernetes-manifests/loadgenerator.yaml:43-44"
+  },
+  {
+   "from": "userservice",
+   "to": "accounts-db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "python: SQLAlchemy UserDb(os.environ['ACCOUNTS_DB_URI'])",
+   "source": "src/accounts/userservice/userservice.py:245; kubernetes-manifests/accounts-db.yaml:17"
+  },
+  {
+   "from": "contacts",
+   "to": "accounts-db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "python: SQLAlchemy ContactsDb(os.environ['ACCOUNTS_DB_URI'])",
+   "source": "src/accounts/contacts/contacts.py:220; kubernetes-manifests/accounts-db.yaml:17"
+  },
+  {
+   "from": "ledgerwriter",
+   "to": "ledger-db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "java: Spring JPA datasource from env SPRING_DATASOURCE_URL",
+   "source": "kubernetes-manifests/ledger-db.yaml:21; src/ledger/ledgerwriter/src/main/java/anthos/samples/bankofanthos/ledgerwriter/LedgerWriterApplication.java:51"
+  },
+  {
+   "from": "balancereader",
+   "to": "ledger-db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "java: Spring JPA datasource from env SPRING_DATASOURCE_URL (polls ledger)",
+   "source": "kubernetes-manifests/ledger-db.yaml:21; src/ledger/balancereader/src/main/java/anthos/samples/bankofanthos/balancereader/BalanceReaderApplication.java:49"
+  },
+  {
+   "from": "transactionhistory",
+   "to": "ledger-db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "java: Spring JPA datasource from env SPRING_DATASOURCE_URL (polls ledger)",
+   "source": "kubernetes-manifests/ledger-db.yaml:21; src/ledger/transactionhistory/src/main/java/anthos/samples/bankofanthos/transactionhistory/TransactionHistoryApplication.java:49"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "ledgermonolith": "__optional__"
+  },
+  "hosts": {},
+  "workloads": {}
+ }
+}

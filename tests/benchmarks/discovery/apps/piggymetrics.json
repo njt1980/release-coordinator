@@ -1,0 +1,408 @@
+{
+ "app": "piggymetrics",
+ "split": "held_out",
+ "upstream": "https://github.com/sqshq/piggymetrics",
+ "gt_source": "docker-compose.yml + .env, Spring Cloud Config shared/*.yml (config/src/main/resources/shared), each service's bootstrap.yml, @FeignClient interfaces and pom.xml dependencies, cross-checked against the README architecture sections.",
+ "repos": [
+  {
+   "name": "piggymetrics",
+   "url": "https://github.com/sqshq/piggymetrics.git",
+   "sha": "6bb2cf9ddbca980b664d3edbb6ff775d75369278"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "compose",
+   "paths": [
+    "piggymetrics/docker-compose.yml"
+   ],
+   "dotenv": "piggymetrics/.env"
+  }
+ ],
+ "observability": [
+  "monitoring",
+  "turbine-stream-service"
+ ],
+ "services": {
+  "config": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "registry": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "gateway": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "auth-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "account-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "statistics-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "notification-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "rabbitmq": {
+   "kind": "infra",
+   "what": "rabbitmq"
+  },
+  "auth-mongodb": {
+   "kind": "infra",
+   "what": "mongodb"
+  },
+  "account-mongodb": {
+   "kind": "infra",
+   "what": "mongodb"
+  },
+  "statistics-mongodb": {
+   "kind": "infra",
+   "what": "mongodb"
+  },
+  "notification-mongodb": {
+   "kind": "infra",
+   "what": "mongodb"
+  },
+  "api.exchangeratesapi.io": {
+   "kind": "service",
+   "source": false
+  },
+  "smtp.gmail.com": {
+   "kind": "service",
+   "source": false
+  }
+ },
+ "edges": [
+  {
+   "from": "registry",
+   "to": "config",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-config client: spring.cloud.config.uri http://config:8888 (fail-fast)",
+   "source": "registry/src/main/resources/bootstrap.yml:6"
+  },
+  {
+   "from": "gateway",
+   "to": "config",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-config client: spring.cloud.config.uri http://config:8888 (fail-fast)",
+   "source": "gateway/src/main/resources/bootstrap.yml:6"
+  },
+  {
+   "from": "auth-service",
+   "to": "config",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-config client: spring.cloud.config.uri http://config:8888 (fail-fast)",
+   "source": "auth-service/src/main/resources/bootstrap.yml:6"
+  },
+  {
+   "from": "account-service",
+   "to": "config",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-config client: spring.cloud.config.uri http://config:8888 (fail-fast)",
+   "source": "account-service/src/main/resources/bootstrap.yml:6"
+  },
+  {
+   "from": "statistics-service",
+   "to": "config",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-config client: spring.cloud.config.uri http://config:8888 (fail-fast)",
+   "source": "statistics-service/src/main/resources/bootstrap.yml:6"
+  },
+  {
+   "from": "notification-service",
+   "to": "config",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-config client: spring.cloud.config.uri http://config:8888 (fail-fast)",
+   "source": "notification-service/src/main/resources/bootstrap.yml:6"
+  },
+  {
+   "from": "monitoring",
+   "to": "config",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-config client: spring.cloud.config.uri http://config:8888 (fail-fast)",
+   "source": "monitoring/src/main/resources/bootstrap.yml:6"
+  },
+  {
+   "from": "turbine-stream-service",
+   "to": "config",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-config client: spring.cloud.config.uri http://config:8888 (fail-fast)",
+   "source": "turbine-stream-service/src/main/resources/bootstrap.yml:6"
+  },
+  {
+   "from": "gateway",
+   "to": "registry",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "eureka client (@EnableDiscoveryClient / starter-netflix-eureka-client): eureka.client.serviceUrl.defaultZone http://registry:8761/eureka/",
+   "source": "config/src/main/resources/shared/application.yml:18"
+  },
+  {
+   "from": "auth-service",
+   "to": "registry",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "eureka client (@EnableDiscoveryClient / starter-netflix-eureka-client): eureka.client.serviceUrl.defaultZone http://registry:8761/eureka/",
+   "source": "config/src/main/resources/shared/application.yml:18"
+  },
+  {
+   "from": "account-service",
+   "to": "registry",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "eureka client (@EnableDiscoveryClient / starter-netflix-eureka-client): eureka.client.serviceUrl.defaultZone http://registry:8761/eureka/",
+   "source": "config/src/main/resources/shared/application.yml:18"
+  },
+  {
+   "from": "statistics-service",
+   "to": "registry",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "eureka client (@EnableDiscoveryClient / starter-netflix-eureka-client): eureka.client.serviceUrl.defaultZone http://registry:8761/eureka/",
+   "source": "config/src/main/resources/shared/application.yml:18"
+  },
+  {
+   "from": "notification-service",
+   "to": "registry",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "eureka client (@EnableDiscoveryClient / starter-netflix-eureka-client): eureka.client.serviceUrl.defaultZone http://registry:8761/eureka/",
+   "source": "config/src/main/resources/shared/application.yml:18"
+  },
+  {
+   "from": "turbine-stream-service",
+   "to": "registry",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "eureka client (@EnableDiscoveryClient / starter-netflix-eureka-client): eureka.client.serviceUrl.defaultZone http://registry:8761/eureka/",
+   "source": "config/src/main/resources/shared/application.yml:18"
+  },
+  {
+   "from": "gateway",
+   "to": "auth-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "zuul route /uaa/** url: http://auth-service:5000",
+   "source": "config/src/main/resources/shared/gateway.yml:20-22"
+  },
+  {
+   "from": "gateway",
+   "to": "account-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "zuul route /accounts/** serviceId: account-service (Eureka/Ribbon)",
+   "source": "config/src/main/resources/shared/gateway.yml:26-28"
+  },
+  {
+   "from": "gateway",
+   "to": "statistics-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "zuul route /statistics/** serviceId: statistics-service (Eureka/Ribbon)",
+   "source": "config/src/main/resources/shared/gateway.yml:32-34"
+  },
+  {
+   "from": "gateway",
+   "to": "notification-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "zuul route /notifications/** serviceId: notification-service (Eureka/Ribbon)",
+   "source": "config/src/main/resources/shared/gateway.yml:38-40"
+  },
+  {
+   "from": "account-service",
+   "to": "statistics-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: @FeignClient(name = \"statistics-service\") via Eureka",
+   "source": "account-service/src/main/java/com/piggymetrics/account/client/StatisticsServiceClient.java:10"
+  },
+  {
+   "from": "account-service",
+   "to": "auth-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: @FeignClient(name = \"auth-service\") POST /uaa/users; plus OAuth2 accessTokenUri http://auth-service:5000/uaa/oauth/token and user-info-uri",
+   "source": "account-service/src/main/java/com/piggymetrics/account/client/AuthServiceClient.java:9; config/src/main/resources/shared/account-service.yml:6"
+  },
+  {
+   "from": "notification-service",
+   "to": "account-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: @FeignClient(name = \"account-service\") GET /accounts/{accountName} via Eureka",
+   "source": "notification-service/src/main/java/com/piggymetrics/notification/client/AccountServiceClient.java:24"
+  },
+  {
+   "from": "notification-service",
+   "to": "auth-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "OAuth2 client_credentials accessTokenUri http://auth-service:5000/uaa/oauth/token; resource-server user-info-uri",
+   "source": "config/src/main/resources/shared/notification-service.yml:6; config/src/main/resources/shared/application.yml:23"
+  },
+  {
+   "from": "statistics-service",
+   "to": "auth-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "OAuth2 resource-server user-info-uri http://auth-service:5000/uaa/users/current (+ client accessTokenUri)",
+   "source": "config/src/main/resources/shared/application.yml:23; config/src/main/resources/shared/statistics-service.yml:6"
+  },
+  {
+   "from": "statistics-service",
+   "to": "api.exchangeratesapi.io",
+   "proto": "https",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: @FeignClient(url = \"${rates.url}\") with fallback; rates.url https://api.exchangeratesapi.io",
+   "source": "statistics-service/src/main/java/com/piggymetrics/statistics/client/ExchangeRatesClient.java:10; config/src/main/resources/shared/statistics-service.yml:25"
+  },
+  {
+   "from": "notification-service",
+   "to": "smtp.gmail.com",
+   "proto": "smtp",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-boot-starter-mail JavaMailSender; spring.mail.host smtp.gmail.com:465",
+   "source": "config/src/main/resources/shared/notification-service.yml:37; notification-service/src/main/java/com/piggymetrics/notification/service/EmailServiceImpl.java:28"
+  },
+  {
+   "from": "auth-service",
+   "to": "auth-mongodb",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring-data-mongodb spring.data.mongodb.host auth-mongodb",
+   "source": "config/src/main/resources/shared/auth-service.yml:4"
+  },
+  {
+   "from": "account-service",
+   "to": "account-mongodb",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring-data-mongodb spring.data.mongodb.host account-mongodb",
+   "source": "config/src/main/resources/shared/account-service.yml:13"
+  },
+  {
+   "from": "statistics-service",
+   "to": "statistics-mongodb",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring-data-mongodb spring.data.mongodb.host statistics-mongodb",
+   "source": "config/src/main/resources/shared/statistics-service.yml:13"
+  },
+  {
+   "from": "notification-service",
+   "to": "notification-mongodb",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring-data-mongodb spring.data.mongodb.host notification-mongodb",
+   "source": "config/src/main/resources/shared/notification-service.yml:31"
+  },
+  {
+   "from": "account-service",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring-cloud-starter-bus-amqp + netflix-hystrix-stream (pom); spring.rabbitmq.host rabbitmq; Hystrix metrics to Turbine via AMQP",
+   "source": "config/src/main/resources/shared/application.yml:27; account-service/pom.xml"
+  },
+  {
+   "from": "statistics-service",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring-cloud-starter-bus-amqp + netflix-hystrix-stream (pom); spring.rabbitmq.host rabbitmq; Hystrix metrics to Turbine via AMQP",
+   "source": "config/src/main/resources/shared/application.yml:27; statistics-service/pom.xml"
+  },
+  {
+   "from": "notification-service",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring-cloud-starter-bus-amqp + netflix-hystrix-stream (pom); spring.rabbitmq.host rabbitmq; Hystrix metrics to Turbine via AMQP",
+   "source": "config/src/main/resources/shared/application.yml:27; notification-service/pom.xml"
+  },
+  {
+   "from": "turbine-stream-service",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring-cloud-starter-netflix-turbine-stream + stream-rabbit consumes Hystrix metrics; spring.rabbitmq.host rabbitmq",
+   "source": "config/src/main/resources/shared/application.yml:27; turbine-stream-service/pom.xml"
+  },
+  {
+   "from": "monitoring",
+   "to": "turbine-stream-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "Hystrix dashboard reads turbine stream http://turbine-stream-service:8080/turbine/turbine.stream; URL entered in browser UI, not configured in code",
+   "source": "README.md:249"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "mongodb": "__optional__",
+   "monitoring": "__optional__",
+   "turbine-stream-service": "__optional__"
+  },
+  "hosts": {},
+  "workloads": {}
+ }
+}

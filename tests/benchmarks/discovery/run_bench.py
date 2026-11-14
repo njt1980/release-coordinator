@@ -19,7 +19,8 @@ from pathlib import Path
 
 from .checkouts import DEFAULT_CACHE, CheckoutError, ensure_checkout
 from .env_sources import load_envs
-from .models import AppResult, AppTruth, BenchReport, EdgeMode
+from .acceptance import acceptance_failures
+from .models import AppResult, AppTruth, BenchReport, EdgeMode, Split
 from .offline_scan import scan_checkout
 from .ratchet import regressions
 from .scoring import headline, score_app
@@ -64,7 +65,9 @@ def summary_line(result: AppResult) -> str:
         f"static P={static.precision} R={static.recall} | "
         f"manifest P={manifest.precision} R={manifest.recall} | "
         f"missed flagged={misses.missed_flagged} silent={misses.missed_silent} "
-        f"no-boundary={misses.missed_caller_has_no_boundary}"
+        f"no-boundary={misses.missed_caller_has_no_boundary} | "
+        f"flags useful {misses.services_flagged_with_miss}/{misses.services_incomplete_any} services, "
+        f"{misses.causes_flagged_with_miss}/{misses.causes_flagged} causes"
     )
 
 
@@ -75,6 +78,9 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--offline", action="store_true", help="never fetch; use the cache only")
     parser.add_argument("--out", type=Path, help="write per-app result JSON here")
     parser.add_argument("--update-baseline", action="store_true")
+    parser.add_argument(
+        "--acceptance", action="store_true", help="judge held-out apps against acceptance.py"
+    )
     return parser.parse_args(argv)
 
 
@@ -94,8 +100,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.out:
             args.out.mkdir(parents=True, exist_ok=True)
             (args.out / f"{app}.json").write_text(result.model_dump_json(indent=1), encoding="utf-8")
-    report = BenchReport(apps={r.app: headline([r]) for r in results}, pooled=headline(results))
+    held_out = {app for app in apps if load_truth(app).split is Split.HELD_OUT}
+    held_results = [r for r in results if r.app in held_out]
+    report = BenchReport(
+        apps={r.app: headline([r]) for r in results},
+        pooled=headline(results),
+        pooled_held_out=headline(held_results) if held_results else None,
+    )
     print("pooled:", report.pooled.model_dump_json())
+    if report.pooled_held_out:
+        print("pooled held-out:", report.pooled_held_out.model_dump_json())
+    if args.acceptance:
+        failures = acceptance_failures(report, held_out)
+        for failure in failures:
+            print("NOT ACCEPTED:", failure, file=sys.stderr)
+        print("acceptance:", "FAILED" if failures else "PASSED")
+        return 1 if failures else 0
     if args.update_baseline:
         if args.apps:
             print("--update-baseline needs a full run (no app filter)", file=sys.stderr)
