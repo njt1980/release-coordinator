@@ -43,6 +43,23 @@ Stop: `kubectl delete namespace appinsights-probe`, then `app-down`. The
 Application Insights resource and the Service Bus namespace (Basic) cost
 nothing while idle and are kept for reruns.
 
+## What a run records
+
+fulfillment runs with the Distro's defaults, which do **not** trace the
+Service Bus consumer: its calls start new operations, so the queue edge
+orders → fulfillment is invisible. That is a realistic gap. To record the
+traced case as well, switch on Azure SDK tracing part-way through a run:
+
+```bash
+kubectl -n appinsights-probe set env deploy/fulfillment AZURE_EXPERIMENTAL_ENABLE_ACTIVITY_SOURCE=true
+```
+
+Scaling `traffic` to ~20 replicas for a few minutes (~10 orders/s) makes the
+classic SDK's adaptive sampling kick in. Results of the first run (2026-11-14)
+are kept outside the repository with the T2 research notes.
+
+Pause between runs with `kubectl -n appinsights-probe scale deploy --all --replicas=0`.
+
 ## Not covered
 
 Application Insights SDK 3.x (same exporter as the Distro), Java/Node
