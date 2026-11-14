@@ -26,10 +26,77 @@ the targets, but the pull request does not change them.
 
 import heapq
 from collections.abc import Iterable
+from typing import Protocol
 
 from pydantic import BaseModel, Field
 
 from src.core.models import ContractChange, DependencyEdge
+
+
+class CallPair(Protocol):
+    """What ordering reads from an edge: who calls whom.
+
+    ``DependencyEdge`` and ``DependencyPair`` both satisfy it.
+    """
+
+    @property
+    def source_service_id(self) -> str: ...
+
+    @property
+    def target_service_id(self) -> str: ...
+
+
+class DependencyPair(BaseModel):
+    """A caller -> callee pair, without the edge's evidence."""
+
+    source_service_id: str = Field(min_length=1)
+    target_service_id: str = Field(min_length=1)
+
+
+class ReleaseOrderFacts(BaseModel):
+    """What one assessment's deployment order was computed from.
+
+    Kept with the assessment job (not in ``ReleaseAssessment``, so recorded
+    decisions' digests are unchanged) so several assessments can be ordered
+    together as one release train. ``targets``, ``upstream`` and
+    ``downstream`` are the release subgraph; ``edges`` the dependency pairs
+    between its services that the order honoured.
+    """
+
+    change_type: ContractChange
+    targets: list[str] = Field(min_length=1)
+    upstream: list[str] = Field(default_factory=list)
+    downstream: list[str] = Field(default_factory=list)
+    edges: list[DependencyPair] = Field(default_factory=list)
+
+
+def order_facts(
+    change_type: ContractChange,
+    targets: list[str],
+    upstream: list[str],
+    downstream: list[str],
+    edges: Iterable[DependencyEdge],
+) -> ReleaseOrderFacts:
+    """Keep the inputs of ``sequence_deployment`` that a train needs.
+
+    Only pairs between services of the subgraph are kept (the others carry
+    no ordering constraint); duplicates are dropped, order is sorted.
+    """
+    nodes = {*targets, *upstream, *downstream}
+    pairs = sorted(
+        {
+            (edge.source_service_id, edge.target_service_id)
+            for edge in edges
+            if edge.source_service_id in nodes and edge.target_service_id in nodes
+        }
+    )
+    return ReleaseOrderFacts(
+        change_type=change_type,
+        targets=list(targets),
+        upstream=list(upstream),
+        downstream=list(downstream),
+        edges=[DependencyPair(source_service_id=a, target_service_id=b) for a, b in pairs],
+    )
 
 
 class DeploymentPlan(BaseModel):
@@ -105,7 +172,7 @@ def _phase_ranks(
 
 
 def _precedence(
-    edges: Iterable[DependencyEdge], nodes: set[str], change_type: ContractChange
+    edges: Iterable[CallPair], nodes: set[str], change_type: ContractChange
 ) -> set[tuple[str, str]]:
     """Return ``(before, after)`` pairs implied by edges inside ``nodes``.
 
@@ -146,7 +213,7 @@ def sequence_deployment(
     targets: list[str],
     upstream: list[str],
     downstream: list[str],
-    edges: Iterable[DependencyEdge],
+    edges: Iterable[CallPair],
     change_type: ContractChange,
 ) -> DeploymentPlan:
     """Topologically sort the release subgraph for ``change_type``.
