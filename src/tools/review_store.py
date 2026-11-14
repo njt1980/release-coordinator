@@ -7,7 +7,9 @@ to the columns it is queried by; rows are validated again when read, and a
 row that no longer validates is reported, never skipped.
 
 The database uses SQLite's default rollback journal, not WAL: WAL needs
-shared memory, which network file shares (Azure Files) do not provide.
+shared memory, which network file shares (Azure Files) do not provide. On
+such a share SQLite's byte-range locks fail too; ``RC_SQLITE_VFS=unix-dotfile``
+locks with a lock file instead.
 One connection is opened per operation, so the store holds no state
 between calls and is safe to use from several threads.
 """
@@ -52,13 +54,18 @@ class ReviewStoreCorruptError(RuntimeError):
 class ReviewStore:
     """Review answers for every project, in one SQLite file."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, vfs: str | None = None) -> None:
         self.path = path
+        self.vfs = config.SQLITE_VFS if vfs is None else vfs
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.path, timeout=_BUSY_TIMEOUT_SECONDS)
+        if self.vfs:
+            target = f"{self.path.resolve().as_uri()}?vfs={self.vfs}"
+            connection = sqlite3.connect(target, timeout=_BUSY_TIMEOUT_SECONDS, uri=True)
+        else:
+            connection = sqlite3.connect(self.path, timeout=_BUSY_TIMEOUT_SECONDS)
         try:
             with connection:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -146,7 +153,7 @@ class ReviewStore:
 
 
 DEFAULT_REVIEW_DB: Final[Path] = (
-    Path(__file__).resolve().parents[2] / config.REVIEWS_DIR / config.REVIEWS_DB_NAME
+    config.DATA_ROOT / config.REVIEWS_DIR / config.REVIEWS_DB_NAME
 )
 
 

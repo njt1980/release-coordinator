@@ -1,6 +1,52 @@
-"""Shared configuration constants for the release coordinator."""
+"""Shared configuration constants for the release coordinator.
 
+Deployment settings come from environment variables (read once, at import):
+
+- ``RC_DATA_DIR``: root of the data the server keeps (baselines, policies,
+  review answers, assessment archive). Unset: the repository root, and no
+  assessment archive (assessments live only in memory, as in the pilot).
+- ``RC_TRUST_PRINCIPAL_HEADER=1``: the server runs behind Azure Container
+  Apps / App Service authentication, which sets the signed-in user's name in
+  ``X-MS-CLIENT-PRINCIPAL-NAME`` and strips client-supplied copies. Never
+  set it where clients reach the server directly.
+- ``RC_ADO_ORG_ALLOWLIST``: comma-separated Azure DevOps organization URLs
+  the server may read; unset allows any (local pilot).
+- ``RC_DISABLE_RAW_WEBHOOK=1``: refuse ``POST /api/v1/webhooks/pr-assessment``
+  (caller-supplied changed files and diff); PR intake reads them from ADO.
+- ``RC_FRONTEND_DIST``: directory of the built frontend to serve at ``/``.
+- ``RC_SQLITE_VFS``: SQLite VFS for the review database; ``unix-dotfile``
+  where the data directory is an SMB share (Azure Files), whose byte-range
+  locks SQLite can't take. Unset: SQLite's default locking.
+"""
+
+import os
+from pathlib import Path
 from typing import Final
+
+REPOSITORY_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
+
+
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+DATA_DIR_SET: Final[bool] = bool(os.environ.get("RC_DATA_DIR", "").strip())
+DATA_ROOT: Final[Path] = (
+    Path(os.environ["RC_DATA_DIR"].strip()) if DATA_DIR_SET else REPOSITORY_ROOT
+)
+TRUST_PRINCIPAL_HEADER: Final[bool] = _flag("RC_TRUST_PRINCIPAL_HEADER")
+ADO_ORG_ALLOWLIST: Final[frozenset[str]] = frozenset(
+    url.strip().rstrip("/").lower()
+    for url in os.environ.get("RC_ADO_ORG_ALLOWLIST", "").split(",")
+    if url.strip()
+)
+DISABLE_RAW_WEBHOOK: Final[bool] = _flag("RC_DISABLE_RAW_WEBHOOK")
+FRONTEND_DIST: Final[str] = os.environ.get("RC_FRONTEND_DIST", "").strip()
+SQLITE_VFS: Final[str] = os.environ.get("RC_SQLITE_VFS", "").strip()
+
+# Directory (relative to the data root) holding finished PR assessments as
+# ``{job_id}.json``; used only when RC_DATA_DIR is set.
+ASSESSMENTS_DIR: Final[str] = "assessments"
 
 # Directory (relative to the project root) holding versioned discovery
 # baselines as ``{tenant}/{project_id}/{snapshot_id}.json``. Replaces the

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from src import api
 from src.coordinator import nodes as coordinator_nodes
+from src.core import config
 from src.core.models import (
     DependencyEdge,
     DiscoveryMethod,
@@ -100,13 +101,14 @@ class ReviewApiTests(unittest.TestCase):
         self.assertEqual(stored.snapshot_id, self.snapshot)
         self.assertIn("file:src/store-front/api.js", stored.evidence_seen)
 
-    def test_signed_in_user_is_the_reviewer(self) -> None:
-        self._post(
-            {"subject": {"kind": "dependency", "key": self.edge}, "verdict": "agree", "reviewer": "anyone"},
-            **{"X-MS-CLIENT-PRINCIPAL-NAME": "dana@contoso.com"},
-        )
-        (stored,) = self.reviews.answers(BaselineScope(tenant="acme", project_id="shop"))
-        self.assertEqual(stored.reviewer, "dana@contoso.com")
+    def test_signed_in_user_is_the_reviewer_behind_platform_auth(self) -> None:
+        body = {"subject": {"kind": "dependency", "key": self.edge}, "verdict": "agree", "reviewer": "anyone"}
+        header = {"X-MS-CLIENT-PRINCIPAL-NAME": "dana@contoso.com"}
+        self._post(body, **header)  # Not behind platform auth: a forgeable header is ignored.
+        with patch.object(config, "TRUST_PRINCIPAL_HEADER", True):
+            self._post(body, **header)
+        reviewers = [a.reviewer for a in self.reviews.answers(BaselineScope(tenant="acme", project_id="shop"))]
+        self.assertEqual(sorted(reviewers), ["anyone", "dana@contoso.com"])
 
     def test_invalid_answers_are_rejected(self) -> None:
         cases = {

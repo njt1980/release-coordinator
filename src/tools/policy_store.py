@@ -504,7 +504,7 @@ class PolicyStore:
 
 
 DEFAULT_POLICIES_ROOT: Final[Path] = (
-    Path(__file__).resolve().parents[2] / config.POLICIES_DIR
+    config.DATA_ROOT / config.POLICIES_DIR
 )
 
 
