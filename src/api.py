@@ -37,6 +37,7 @@ from src.tools.baseline_store import (
 )
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
+from src.tools.devops_catalog import DevOpsCatalog, DevOpsProjectInfo, DevOpsRepositoryInfo
 from src.tools.telemetry_extractor import TelemetryExtractor
 from src.assistant_api import router as assistant_router
 from src.decision_api import router as decision_router
@@ -484,6 +485,44 @@ def get_baseline_run_log(tenant: str, project_id: str, snapshot_id: str) -> list
 def verify_devops_endpoint(payload: DevOpsVerificationRequest) -> SystemVerification:
     """Run the pre-flight read-only access check for Azure DevOps."""
     return verify_devops(payload)
+
+
+class DevOpsProjectsRequest(BaseModel):
+    """The Azure DevOps organization whose projects to list."""
+
+    devops_org_url: str = Field(min_length=1)
+
+
+class DevOpsRepositoriesRequest(DevOpsProjectsRequest):
+    """The Azure DevOps project whose repositories to list."""
+
+    devops_project: str = Field(min_length=1)
+
+
+def _catalog_failure(error: Exception) -> HTTPException:
+    if isinstance(error, ValueError):
+        return HTTPException(status_code=422, detail=str(error))
+    if isinstance(error, TimeoutError):
+        return HTTPException(status_code=504, detail="Azure DevOps did not answer in time.")
+    return HTTPException(status_code=502, detail=f"Azure DevOps could not be read: {error}")
+
+
+@app.post("/api/discover/devops/projects", response_model=list[DevOpsProjectInfo])
+def list_devops_projects(payload: DevOpsProjectsRequest) -> list[DevOpsProjectInfo]:
+    """The projects the server's identity can read in the organization (read-only)."""
+    try:
+        return DevOpsCatalog(payload.devops_org_url).projects()
+    except Exception as error:
+        raise _catalog_failure(error) from error
+
+
+@app.post("/api/discover/devops/repositories", response_model=list[DevOpsRepositoryInfo])
+def list_devops_repositories(payload: DevOpsRepositoriesRequest) -> list[DevOpsRepositoryInfo]:
+    """The repositories of one project, so onboarding can pick them (read-only)."""
+    try:
+        return DevOpsCatalog(payload.devops_org_url).repositories(payload.devops_project)
+    except Exception as error:
+        raise _catalog_failure(error) from error
 
 
 @app.post("/api/verify/kubernetes", response_model=SystemVerification)
