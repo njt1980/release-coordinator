@@ -52,7 +52,8 @@ class ReleaseGraphState(TypedDict, total=False):
     ``deployment_plan`` is the deterministic topological order computed
     before the LLM runs; ``deployment_sequence`` is its sequence, which the
     LLM cannot change. ``advisory_assessment`` is the model's opinion (None
-    when it was not consulted) and ``verdict`` the deterministic policy
+    when it was not consulted), ``advisory_redactions`` what was redacted
+    from what it was sent, and ``verdict`` the deterministic policy
     decision (see ``decide_release``). ``assessed_graph`` is the baseline
     with the changed services' code dependencies read at the pull
     request's head (None when the head couldn't be verified and scanned);
@@ -98,6 +99,7 @@ class ReleaseGraphState(TypedDict, total=False):
     deployment_plan: DeploymentPlan
     deployment_sequence: list[str]
     advisory_assessment: RiskAssessment | None
+    advisory_redactions: dict[str, int]
     verdict: ReleaseVerdict
     evidence_report: str
     release_assessment: ReleaseAssessment

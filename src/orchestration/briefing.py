@@ -79,6 +79,7 @@ _TITLES: Final[dict[ReasonCode, str]] = {
     ReasonCode.STATIC_COVERAGE_INCOMPLETE: "Source not fully read or understood",
     ReasonCode.UNMAPPED_FILES: "Changed files belong to no service",
     ReasonCode.REVIEW_UNAVAILABLE: "The dependency review couldn't be read",
+    ReasonCode.ADVISORY_DISABLED: "No advisory risk review: external AI is off for this project",
 }
 
 
@@ -378,6 +379,11 @@ def headline(assessment: ReleaseAssessment, decisions: int, fixes: int) -> str:
             else ""
         )
         return f"Go (advisory): every check passed and the risk review approved.{regulated}"
+    if assessment.actionable and assessment.reason_codes == [ReasonCode.ADVISORY_DISABLED]:
+        return (
+            "Your call: the evidence is complete; no advisory risk review was made "
+            "(external AI is off for this project)."
+        )
     if assessment.actionable:
         codes = ", ".join(code.value for code in assessment.reason_codes) or "risk review"
         return f"No-go: risk found ({codes})."

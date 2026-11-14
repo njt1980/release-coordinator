@@ -363,7 +363,11 @@ class ProjectPolicy(_StrictModel):
     project calls on purpose. ``source_control`` is where pull request
     revisions are verified; without it they can't be (REVISION_UNVERIFIED).
     ``regulated_services`` are services whose changes are flagged for a
-    regulatory-review decision (see ``RegulatedService``).
+    regulatory-review decision (see ``RegulatedService``). ``external_ai``
+    false keeps the project's data from the external model (Anthropic's
+    Claude API): no advisory risk review (ADVISORY_DISABLED) and no
+    assistant answers about the project. When true, what is sent is
+    redacted first (``core.redaction``).
     """
 
     policy_version: int = Field(ge=1)
@@ -394,6 +398,7 @@ class ProjectPolicy(_StrictModel):
     egress: list[EgressRule] = Field(default_factory=list)
     source_control: SourceControl | None = None
     regulated_services: list[RegulatedService] = Field(default_factory=list)
+    external_ai: bool = True
 
     @field_validator("kubernetes_api_server")
     @classmethod

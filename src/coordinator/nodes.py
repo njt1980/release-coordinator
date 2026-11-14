@@ -1138,7 +1138,10 @@ def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]
     plan: DeploymentPlan = state["deployment_plan"]
     issues = list(state.get("discovery_issues", []))
     advisory = None
-    if needs_model(issues, plan):
+    loaded = state.get("project_policy")
+    disabled = loaded is not None and not loaded.policy.external_ai
+    redactions: dict[str, int] = {}
+    if needs_model(issues, plan) and not disabled:
         request = RiskAssessmentRequest(
             pull_request=state["pull_request"],
             change_type=plan.change_type,
@@ -1152,10 +1155,13 @@ def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]
             telemetry=state.get("telemetry_status")
             or TelemetryStatus(source="knowledge_graph"),
         )
-        advisory = RiskReasoner().assess(request)
+        reasoner = RiskReasoner()
+        advisory = reasoner.assess(request)
+        redactions = reasoner.last_redactions
     return {
         "advisory_assessment": advisory,
-        "verdict": decide_release(issues, plan, advisory),
+        "advisory_redactions": redactions,
+        "verdict": decide_release(issues, plan, advisory, advisory_disabled=disabled),
     }
 
 
@@ -1197,6 +1203,7 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         exempted_unscanned_files=list(state.get("exempted_unscanned_files", [])),
         shape_findings=list(state.get("shape_findings", [])),
         review=state.get("assessment_review"),
+        advisory_redactions=dict(state.get("advisory_redactions") or {}),
         regulated_impact=regulated_impact(
             loaded.policy if loaded else None,
             state.get("target_services", []),

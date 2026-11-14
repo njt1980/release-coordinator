@@ -103,4 +103,11 @@ REASON_EXPLANATIONS: Final[dict[ReasonCode, tuple[str, str]]] = {
         "coordinator declared may be missing from the deployment order.",
         "Check the review database (reviews/reviews.sqlite3) and re-run the assessment.",
     ),
+    ReasonCode.ADVISORY_DISABLED: (
+        "The evidence is complete, but the project policy keeps its data from the external "
+        "model (external_ai: false), so no advisory risk review was made and nothing is "
+        "approved automatically.",
+        "Decide yourself from the evidence; or set external_ai: true in the policy if sending "
+        "redacted PR content to the model is allowed.",
+    ),
 }
