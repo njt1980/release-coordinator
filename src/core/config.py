@@ -14,6 +14,9 @@ Deployment settings come from environment variables (read once, at import):
 - ``RC_DISABLE_RAW_WEBHOOK=1``: refuse ``POST /api/v1/webhooks/pr-assessment``
   (caller-supplied changed files and diff); PR intake reads them from ADO.
 - ``RC_FRONTEND_DIST``: directory of the built frontend to serve at ``/``.
+- ``RC_SQLITE_VFS``: SQLite VFS for the review database; ``unix-dotfile``
+  where the data directory is an SMB share (Azure Files), whose byte-range
+  locks SQLite can't take. Unset: SQLite's default locking.
 """
 
 import os
@@ -39,6 +42,7 @@ ADO_ORG_ALLOWLIST: Final[frozenset[str]] = frozenset(
 )
 DISABLE_RAW_WEBHOOK: Final[bool] = _flag("RC_DISABLE_RAW_WEBHOOK")
 FRONTEND_DIST: Final[str] = os.environ.get("RC_FRONTEND_DIST", "").strip()
+SQLITE_VFS: Final[str] = os.environ.get("RC_SQLITE_VFS", "").strip()
 
 # Directory (relative to the data root) holding finished PR assessments as
 # ``{job_id}.json``; used only when RC_DATA_DIR is set.

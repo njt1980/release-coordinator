@@ -174,6 +174,8 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (deployApp) {
           resources: { cpu: json('0.5'), memory: '1Gi' }
           env: [
             { name: 'RC_DATA_DIR', value: '/data' }
+            // SMB refuses SQLite's byte-range locks; lock with a lock file.
+            { name: 'RC_SQLITE_VFS', value: 'unix-dotfile' }
             { name: 'RC_TRUST_PRINCIPAL_HEADER', value: '1' }
             { name: 'RC_DISABLE_RAW_WEBHOOK', value: '1' }
             { name: 'RC_ADO_ORG_ALLOWLIST', value: adoOrgAllowlist }
@@ -195,7 +197,11 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (deployApp) {
       // One replica at most: SQLite on the file share takes no concurrent writers.
       scale: { minReplicas: 0, maxReplicas: 1 }
       volumes: [
-        { name: 'data', storageType: 'AzureFile', storageName: environmentStorage.name }
+        {
+          name: 'data'
+          storageType: 'AzureFile'
+          storageName: environmentStorage.name
+        }
       ]
     }
   }

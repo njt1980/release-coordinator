@@ -283,6 +283,11 @@ class ReviewStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewStoreCorruptError, "schema version"):
             self.store.answers(self.scope)
 
+    def test_lock_file_vfs(self) -> None:
+        store = ReviewStore(self.path, vfs="unix-dotfile")
+        store.append(self.scope, _answer())
+        self.assertEqual(len(store.answers(self.scope)), 1)
+
     def test_uses_rollback_journal(self) -> None:
         self.store.append(self.scope, _answer())
         with sqlite3.connect(self.path) as connection:
