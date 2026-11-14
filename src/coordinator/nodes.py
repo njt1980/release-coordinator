@@ -1306,6 +1306,7 @@ def build_release_assessment(state: ReleaseGraphState) -> ReleaseAssessment:
         deployment_sequence=plan.sequence,
         services_to_deploy=plan.services_to_deploy,
         stale_consumers=plan.stale_consumers,
+        cyclic_services=plan.cyclic_services,
         justification=verdict.justification,
         advisory_assessment=state.get("advisory_assessment"),
         evidence=assessment_evidence(state),

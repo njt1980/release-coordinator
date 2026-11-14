@@ -505,10 +505,35 @@ def _contract_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
     ]
 
 
+def _cycle_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
+    """The dependency cycle, a plan finding that no evidence issue carries."""
+    if ReasonCode.DEPENDENCY_CYCLE not in assessment.reason_codes:
+        return []
+    why, how = REASON_EXPLANATIONS[ReasonCode.DEPENDENCY_CYCLE]
+    cyclic = assessment.cyclic_services
+    return [
+        BriefingGroup(
+            root_key="decision:cycle",
+            rank=BriefingRank.DECISION,
+            title=_TITLES[ReasonCode.DEPENDENCY_CYCLE],
+            why_it_matters=f"{why} The deployment order shown breaks the cycle arbitrarily.",
+            what_to_check=(
+                [f"Services in or behind the cycle: {_listed([short_name(s) for s in cyclic])}"]
+                if cyclic
+                else ["The assessment predates recording which services form the cycle."]
+            ),
+            how_to_close=[how, "If one of these calls isn't real, disagree with it on the Review page."],
+            services=list(cyclic),
+            reason_codes=[ReasonCode.DEPENDENCY_CYCLE],
+        )
+    ]
+
+
 def build_briefing(assessment: ReleaseAssessment) -> ReleaseBriefing:
     """Arrange ``assessment`` for the person deciding (see module doc)."""
     groups = [
         *_regulatory_group(assessment),
+        *_cycle_group(assessment),
         *_contract_group(assessment),
         *_groups(list(assessment.issues)),
     ]

@@ -1,0 +1,55 @@
+# Release policy for the OpenTelemetry Demo lab (default/otel-demo): the demo
+# 3.1.0 in namespace otel-demo of RC-Cluster (deploy/lab/otel-demo), its code
+# in the Azure DevOps repository opentelemetry-demo (branch release-3.1.0).
+#
+# Strict like the other lab policies: every discovery source must have
+# succeeded in a baseline under 24h old, runtime evidence must be live, and
+# nothing is exempt until a reviewed entry says so.
+policy_version: 1
+tenant: default
+project_id: otel-demo
+
+environment: lab
+cluster: rc-cluster
+
+kubernetes_api_server: https://rc-cluster-releasecoordinat-48a721-ao9498jv.hcp.eastus.azmk8s.io:443
+
+# The demo's services are instrumented with OpenTelemetry SDKs; the lab's
+# collector exports their spans to this Application Insights component only,
+# so telemetry is scoped to it (rows of other components never count).
+telemetry_components:
+  - /subscriptions/48a7217e-eeb0-4625-96f1-8eb3a574481e/resourceGroups/ReleaseCoordinatorLab/providers/microsoft.insights/components/rc-lab-appinsights-b
+
+source_control:
+  organization_url: https://dev.azure.com/thomasnimel
+  project: Release_Coordinator
+
+max_baseline_age_hours: 24
+required_sources: [STATIC_CODE, K8S_MANIFEST, RUNTIME_TELEMETRY]
+runtime_evidence: live
+runtime_lookback_days: 1
+max_telemetry_age_minutes: 60
+
+# Contract evidence (.proto) verifies only pull requests that change nothing
+# but contract files.
+contract_scope: strict
+
+# Lab examples: who answers for some services, and one service treated as
+# regulated so a change to it asks for a regulatory-review decision.
+service_owners:
+  - service: otel-demo/checkout
+    owner: team-checkout
+  - service: otel-demo/cart
+    owner: team-cart
+  - service: otel-demo/payment
+    owner: team-payments
+regulated_services:
+  - service: otel-demo/payment
+    classification: "lab example: payment handling"
+
+egress: []
+exemptions:
+  files: []
+  dependencies: []
+  silent_services: []
+  unscanned_files: []

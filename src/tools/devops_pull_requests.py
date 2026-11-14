@@ -87,9 +87,17 @@ class PullRequestDetails(BaseModel):
 
 
 def _get(value: Any, *names: str) -> Any:
-    """An attribute of an SDK object or a key of a dict, by any of ``names``."""
+    """An attribute of an SDK object or a key of a dict, by any of ``names``.
+
+    The SDK keeps fields its model doesn't declare in
+    ``additional_properties`` (for example a pull request change's
+    ``changeType`` and ``item``), so those are looked up too.
+    """
+    extra = None if isinstance(value, dict) else getattr(value, "additional_properties", None)
     for name in names:
         found = value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+        if found is None and isinstance(extra, dict):
+            found = extra.get(name)
         if found is not None:
             return found
     return None

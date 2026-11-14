@@ -155,6 +155,20 @@ class BriefingTests(unittest.TestCase):
         rejected = approved.model_copy(update={"approved": False, "reason_codes": [ReasonCode.MODEL_REJECTED]})
         self.assertEqual(build_briefing(rejected).headline, "No-go: risk found (MODEL_REJECTED).")
 
+    def test_a_dependency_cycle_is_a_decision_naming_its_services(self) -> None:
+        # Seen in the OTel Demo run: the code was there, but no group showed it.
+        cyclic = self.assessment.model_copy(
+            update={
+                "reason_codes": [*self.assessment.reason_codes, ReasonCode.DEPENDENCY_CYCLE],
+                "cyclic_services": [f"{URN}:webapp", f"{URN}:basket-api"],
+            }
+        )
+        briefing = build_briefing(cyclic)
+        (group,) = [g for g in briefing.groups if g.root_key == "decision:cycle"]
+        self.assertIs(group.rank, BriefingRank.DECISION)
+        self.assertEqual(group.what_to_check, ["Services in or behind the cycle: webapp, basket-api"])
+        self.assertEqual(briefing.decisions_needed, self.briefing.decisions_needed + 1)
+
     def test_markdown(self) -> None:
         text = render_markdown(self.briefing)
         self.assertIn("### Decisions needed", text)

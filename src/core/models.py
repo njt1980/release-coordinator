@@ -2025,6 +2025,8 @@ class ReleaseAssessment(BaseModel):
     ``services_to_deploy`` is the part of it the pull request changes, in the
     same order. ``stale_consumers`` lists unchanged upstream consumers that a
     BREAKING change needs running a compatible version before it deploys.
+    ``cyclic_services`` are the services in, or blocked behind, a dependency
+    cycle (DEPENDENCY_CYCLE); the order shown for them breaks it arbitrarily.
     """
 
     approved: bool
@@ -2035,6 +2037,7 @@ class ReleaseAssessment(BaseModel):
     deployment_sequence: List[str] = Field(min_length=1)
     services_to_deploy: List[str] = Field(default_factory=list)
     stale_consumers: List[str] = Field(default_factory=list)
+    cyclic_services: List[str] = Field(default_factory=list)
     justification: str = Field(min_length=1)
     advisory_assessment: Optional[RiskAssessment] = None
     evidence: AssessmentEvidence

@@ -1,0 +1,126 @@
+# OpenTelemetry Collector for the OpenTelemetry Demo lab (namespace otel-demo).
+# Replaces the demo's own collector under the same Service name, so the demo's
+# SDK-instrumented services export unchanged. Traces go to Application
+# Insights rc-lab-appinsights-b (kept apart from the AKS Store lab's component);
+# metrics and logs are received and dropped.
+#
+# Requires the Secret otel-demo/appinsights (key connection-string), created
+# by deploy/lab/otel-demo/apply.sh from Azure; never committed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: otel-demo
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 300
+        spike_limit_mib: 60
+      # In-process spans are not calls between services. SERVER and CONSUMER
+      # spans are kept: they become AppRequests rows, which the release
+      # coordinator joins to name the callee of a call (request join).
+      filter/no-internal:
+        error_mode: ignore
+        traces:
+          span:
+            - kind == SPAN_KIND_INTERNAL or kind == SPAN_KIND_UNSPECIFIED
+      # The SDKs don't know where they run; every span this collector receives
+      # comes from namespace otel-demo of RC-Cluster (as Beyla reports it for
+      # the AKS Store lab).
+      resource/kubernetes:
+        attributes:
+          - key: k8s.namespace.name
+            value: otel-demo
+            action: upsert
+          - key: k8s.cluster.name
+            value: MC_ReleaseCoordinatorLab_RC-Cluster_eastus
+            action: upsert
+      batch: {}
+    exporters:
+      azure_monitor:
+        connection_string: ${env:APPLICATIONINSIGHTS_CONNECTION_STRING}
+      nop: {}
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, filter/no-internal, resource/kubernetes, batch]
+          exporters: [azure_monitor]
+        metrics:
+          receivers: [otlp]
+          exporters: [nop]
+        logs:
+          receivers: [otlp]
+          exporters: [nop]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: otel-demo
+  labels:
+    app.kubernetes.io/name: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.164.0
+          args: ["--config=/conf/config.yaml"]
+          env:
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: appinsights
+                  key: connection-string
+          ports:
+            - containerPort: 4317
+            - containerPort: 4318
+          resources:
+            requests:
+              cpu: 25m
+              memory: 128Mi
+            limits:
+              memory: 400Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: otel-demo
+spec:
+  selector:
+    app.kubernetes.io/name: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
