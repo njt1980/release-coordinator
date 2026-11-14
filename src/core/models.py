@@ -280,13 +280,14 @@ class ServiceNode(BaseModel):
     ``service_id`` is the service's FQURI (see ``ServiceIdentity``).
     ``deployed_workloads`` is what the cluster runs for it (images, and the
     pipeline run that deployed it); None when discovery didn't read the
-    cluster for this service, or the snapshot predates it.
+    cluster for this service, or the snapshot predates it. Criticality is
+    derived, not stored (see ``orchestration.inventory``); snapshots that
+    still carry the old ``criticality_tier`` load with it ignored.
     """
 
     service_id: str
     name: str
     repository_url: Optional[str] = None
-    criticality_tier: int = 3
     metadata: Dict[str, str] = Field(default_factory=dict)
     deployed_workloads: List[DeployedWorkload] | None = None
 

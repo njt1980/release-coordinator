@@ -40,6 +40,7 @@ from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.telemetry_extractor import TelemetryExtractor
 from src.assistant_api import router as assistant_router
 from src.decision_api import router as decision_router
+from src.inventory_api import router as inventory_router
 from src.observability_api import router as observability_router
 from src.review_api import router as review_router
 from src.runs import router as runs_router
@@ -53,6 +54,7 @@ app.include_router(assistant_router)
 app.include_router(review_router)
 app.include_router(observability_router)
 app.include_router(decision_router)
+app.include_router(inventory_router)
 
 BASELINE_STORE = default_store()
 RUN_LOGS = DEFAULT_RUN_LOGS
