@@ -115,12 +115,15 @@ The policy's `cluster` is a label. Two fields prove it:
 
 - `kubernetes_api_server`: the API server the manifest scan must have read
   (required when `K8S_MANIFEST` is a required source).
-- `telemetry_cluster`: an attribute and value (by default
-  `k8s.cluster.name`) that every telemetry query filters on, at onboarding
-  and at assessment (required when `RUNTIME_TELEMETRY` is required or
-  runtime evidence must be live).
+- `telemetry_cluster` and/or `telemetry_components`: an attribute and value
+  (by default `k8s.cluster.name`), or the Application Insights components
+  (resource IDs), that every telemetry query filters on, at onboarding and
+  at assessment. One of them is required when `RUNTIME_TELEMETRY` is
+  required or runtime evidence must be live; classic Application Insights
+  and Azure Monitor Distro rows carry no cluster attribute, so they are
+  scoped by component.
 
-A baseline that read another API server, or telemetry with another filter
+A baseline that read another API server, or telemetry with another scope
 or none, is `BASELINE_SCOPE_MISMATCH`.
 
 `source_control` (organization URL and project) is where pull request

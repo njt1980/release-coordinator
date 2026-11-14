@@ -28,6 +28,7 @@ from src.core.models import (
     ScanContext,
     ServiceNode,
     TelemetryClusterFilter,
+    TelemetryScope,
     UnresolvedEntityKind,
 )
 from src.core.service_ids import IdentityContext
@@ -232,7 +233,7 @@ class TelemetryQueryTests(unittest.TestCase):
         self.assertIn('coalesce(tostring(Properties["service.name"]), AppRoleName)', query)
 
     def test_query_with_filter_keeps_only_that_cluster(self) -> None:
-        query = build_dependency_query(30, CLUSTER)
+        query = build_dependency_query(30, TelemetryScope(cluster=CLUSTER))
         self.assertIn(
             '| where tostring(Properties["k8s.cluster.name"]) == "MC_rg_aks-1_eastus"',
             query,
@@ -279,7 +280,7 @@ class TelemetryQueryTests(unittest.TestCase):
         client.query_workspace.return_value = LogsQueryResult(tables=[_columns_table([])])
         extractor._client = client
 
-        extractor.get_active_dependencies(days_back=7, cluster_filter=CLUSTER)
+        extractor.get_active_dependencies(days_back=7, scope=TelemetryScope(cluster=CLUSTER))
 
         query = client.query_workspace.call_args.args[1]
         self.assertIn('"MC_rg_aks-1_eastus"', query)
@@ -338,15 +339,15 @@ class DiscoveryScopeTests(unittest.TestCase):
 
         store.load.assert_called_once_with(BaselineScope(tenant="acme", project_id="shop"))
         telemetry_cls.return_value.get_active_dependencies.assert_called_once_with(
-            days_back=POLICY.runtime_lookback_days, cluster_filter=POLICY.telemetry_cluster
+            days_back=POLICY.runtime_lookback_days, scope=POLICY.telemetry_scope
         )
-        self.assertEqual(result["telemetry_cluster"], POLICY.telemetry_cluster)
+        self.assertEqual(result["telemetry_scope"], POLICY.telemetry_scope)
 
     def test_scan_context_records_both_proofs(self) -> None:
         scan = discovery_nodes.scan_context(
             self._state(
                 kubernetes_api_server="https://aks-1.example.io:443",
-                telemetry_cluster=POLICY.telemetry_cluster,
+                telemetry_scope=POLICY.telemetry_scope,
             )
         )
         self.assertEqual(scan.kubernetes_api_server, "https://aks-1.example.io:443")
@@ -368,7 +369,7 @@ class AssessmentScopeTests(unittest.TestCase):
             coordinator_nodes.validate_runtime_telemetry_node(state)
 
         extractor.get_active_dependencies.assert_called_once_with(
-            days_back=7, cluster_filter=POLICY.telemetry_cluster
+            days_back=7, scope=POLICY.telemetry_scope
         )
 
 

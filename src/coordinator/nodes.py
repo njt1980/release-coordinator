@@ -936,7 +936,7 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         days_back=(
             policy.runtime_lookback_days if policy else config.DEFAULT_RUNTIME_LOOKBACK_DAYS
         ),
-        cluster_filter=policy.telemetry_cluster if policy else None,
+        scope=policy.telemetry_scope if policy else None,
     )
     issues = list(state.get("discovery_issues", []))
     if result.status.is_incomplete:
@@ -968,7 +968,7 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         coverage = with_unscoped_sources(
             coverage,
             extractor.get_unscoped_sources(
-                policy.runtime_lookback_days, policy.telemetry_cluster
+                policy.runtime_lookback_days, policy.telemetry_scope
             ),
         )
     if is_mock:

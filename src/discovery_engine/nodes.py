@@ -320,9 +320,9 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
     This Day-Zero batch stage will establish a runtime dependency baseline and
     place its evidence-backed relationships in ``runtime_edges``. The stage is
     skipped when no telemetry workspace ID is configured. With a valid
-    project policy, the query is restricted to its ``telemetry_cluster``
-    and reads ``runtime_lookback_days`` back; the filter applied is
-    recorded (``telemetry_cluster``) and checked against the policy at
+    project policy, the query is restricted to its ``telemetry_scope``
+    and reads ``runtime_lookback_days`` back; the scope applied is
+    recorded (``telemetry_scope``) and checked against the policy at
     assessment. Without one, it is unfiltered and reads
     ``NO_POLICY_LOOKBACK_DAYS`` back. Rows dropped as noise are counted in
     the stage report.
@@ -332,11 +332,11 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
         return _skipped(state, DiscoveryMethod.RUNTIME_TELEMETRY)
 
     policy = _project_policy(state)
-    cluster_filter = policy.telemetry_cluster if policy else None
+    scope = policy.telemetry_scope if policy else None
     extractor = TelemetryExtractor(workspace_id=workspace_id)
     result = extractor.get_active_dependencies(
         days_back=policy.runtime_lookback_days if policy else NO_POLICY_LOOKBACK_DAYS,
-        cluster_filter=cluster_filter,
+        scope=scope,
     )
     report = DiscoveryStageReport(
         source=DiscoveryMethod.RUNTIME_TELEMETRY,
@@ -347,7 +347,7 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
     )
     return {
         "runtime_edges": list(result.items),
-        "telemetry_cluster": cluster_filter,
+        "telemetry_scope": scope,
         "discovery_reports": _append_report(state, report),
     }
 
@@ -737,7 +737,8 @@ def scan_context(state: DiscoveryGraphState) -> ScanContext:
         telemetry_workspace_id=(state.get("workspace_id") or "").strip(),
         scanned_revisions=list(state.get("scanned_revisions", [])),
         kubernetes_api_server=state.get("kubernetes_api_server") or "",
-        telemetry_cluster=state.get("telemetry_cluster"),
+        telemetry_cluster=scope.cluster if (scope := state.get("telemetry_scope")) else None,
+        telemetry_components=list(scope.components) if scope else [],
     )
 
 

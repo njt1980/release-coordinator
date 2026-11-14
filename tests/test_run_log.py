@@ -31,6 +31,7 @@ from src.core.models import (
     ScannedRevision,
     ServiceNode,
     TelemetryClusterFilter,
+    TelemetryScope,
     TelemetryStatus,
     UnresolvedEntity,
     UnresolvedEntityKind,
@@ -167,11 +168,11 @@ class DiscoveryNarrationTests(unittest.TestCase):
                 "discovery_reports": [
                     _report(DiscoveryMethod.RUNTIME_TELEMETRY, DiscoveryStatus.SUCCESS, item_count=5, dropped_records={"no_host": 1})
                 ],
-                "telemetry_cluster": TelemetryClusterFilter(value="aks-1"),
+                "telemetry_scope": TelemetryScope(cluster=TelemetryClusterFilter(value="aks-1")),
             },
         )
         self.assertEqual(len(telemetry), 1)
-        self.assertIn("5 observed dependencies from cluster k8s.cluster.name = aks-1", telemetry[0].message)
+        self.assertIn("5 observed dependencies scoped to k8s.cluster.name == 'aks-1'", telemetry[0].message)
         self.assertEqual(telemetry[0].details, ["Dropped as noise: 1 × no_host"])
 
     def test_demo_telemetry_is_called_out(self) -> None:
@@ -190,7 +191,7 @@ class DiscoveryNarrationTests(unittest.TestCase):
             {
                 "discovery_reports": [_report(DiscoveryMethod.RUNTIME_TELEMETRY, DiscoveryStatus.SUCCESS, item_count=1)],
                 "runtime_edges": [mock_edge],
-                "telemetry_cluster": None,
+                "telemetry_scope": None,
             },
         )
         self.assertEqual([e.status for e in events], [S.PASSED, S.WARNING, S.WARNING])

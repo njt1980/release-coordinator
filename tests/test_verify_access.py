@@ -487,7 +487,7 @@ class DiscoveryNodeSkipTests(unittest.TestCase):
             result,
             {
                 "runtime_edges": [],
-                "telemetry_cluster": None,
+                "telemetry_scope": None,
                 "discovery_reports": [
                     DiscoveryStageReport(
                         source=DiscoveryMethod.RUNTIME_TELEMETRY,

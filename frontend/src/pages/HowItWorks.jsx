@@ -66,6 +66,9 @@ kubernetes_api_server: https://aks-prod-1.hcp.eastus.azmk8s.io:443
 telemetry_cluster:
   attribute: k8s.cluster.name
   value: aks-prod-1
+# or, for Application Insights SDKs that write no cluster attribute:
+# telemetry_components:
+#   - /subscriptions/<id>/resourceGroups/<rg>/providers/microsoft.insights/components/<name>
 exemptions:
   files:
     - pattern: "docs/**"

@@ -487,7 +487,7 @@ class TelemetryNodeTests(unittest.TestCase):
         self.assertIs(issue.code, ReasonCode.REQUIRED_SOURCE_MISSING)
         self.assertIn("no usable rows", issue.detail)
         extractor.get_active_dependencies.assert_called_once_with(
-            days_back=3, cluster_filter=POLICY.telemetry_cluster
+            days_back=3, scope=POLICY.telemetry_scope
         )
 
     def test_covered_fresh_query_is_live_and_reports_live_edges(self) -> None:
@@ -739,7 +739,7 @@ class DiscoveryLookbackTests(unittest.TestCase):
                 {"tenant": "acme", "project_id": "shop", "workspace_id": WORKSPACE, "discovery_reports": []}  # type: ignore[typeddict-item]
             )
         telemetry_cls.return_value.get_active_dependencies.assert_called_once_with(
-            days_back=3, cluster_filter=POLICY.telemetry_cluster
+            days_back=3, scope=POLICY.telemetry_scope
         )
         (report,) = result["discovery_reports"]  # type: ignore[misc]
         self.assertEqual(report.dropped_records, {"no_host": 3})

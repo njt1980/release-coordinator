@@ -26,7 +26,6 @@ from src.core.models import (
     RuntimeEvidenceState,
     ScanContext,
     ServiceIdentity,
-    TelemetryClusterFilter,
     UnresolvedEntityKind,
 )
 from src.core.service_ids import classify_unresolved, host_of
@@ -76,24 +75,20 @@ def baseline_scope_issue(
             f"project policy's cluster {policy.cluster} is "
             f"{policy.kubernetes_api_server}. Re-run discovery against that cluster."
         )
-    elif policy.telemetry_cluster and scan.telemetry_cluster != policy.telemetry_cluster:
+    elif policy.telemetry_scope and scan.telemetry_scope != policy.telemetry_scope:
         recorded = (
-            _describe_filter(scan.telemetry_cluster)
-            if scan.telemetry_cluster
-            else "no cluster filter (or none recorded)"
+            scan.telemetry_scope.describe()
+            if scan.telemetry_scope
+            else "no telemetry scope (or none recorded)"
         )
         detail = (
-            f"Baseline snapshot {snapshot_id} read telemetry with {recorded}, but "
-            f"the project policy requires "
-            f"{_describe_filter(policy.telemetry_cluster)}. Re-run discovery."
+            f"Baseline snapshot {snapshot_id} read telemetry scoped to {recorded}, "
+            f"but the project policy requires {policy.telemetry_scope.describe()}. "
+            "Re-run discovery."
         )
     else:
         return None
     return EvidenceIssue(code=ReasonCode.BASELINE_SCOPE_MISMATCH, detail=detail)
-
-
-def _describe_filter(cluster_filter: TelemetryClusterFilter) -> str:
-    return f"{cluster_filter.attribute} == {cluster_filter.value!r}"
 
 
 def baseline_freshness_issue(

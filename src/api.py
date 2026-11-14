@@ -284,7 +284,7 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
         "discovery_reports": [],
         "scanned_revisions": [],
         "kubernetes_api_server": "",
-        "telemetry_cluster": None,
+        "telemetry_scope": None,
         "static_coverage": [],
         "pipeline_variables": [],
         "kubernetes_shape": [],

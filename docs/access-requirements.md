@@ -41,15 +41,25 @@ before falling back to the developer's `az login`.
   `AppDependencies` (the Application Insights resource must be
   workspace-based). The workspace ID (`customerId`) is passed per
   onboarding request and PR webhook.
-- Telemetry rows must carry a cluster attribute (by default
-  `k8s.cluster.name` in `Properties`; Beyla and the OpenTelemetry Kubernetes
-  attributes processor set it). The project policy's `telemetry_cluster`
-  names the attribute and value, and only matching rows are counted, so a
-  workspace shared by several clusters is safe.
-- Required resource attributes on every dependency row:
-  - the cluster attribute above (`k8s.cluster.name` by default): rows
-    without it are never counted as this cluster's;
-  - `k8s.namespace.name`: without it a source is matched by bare name,
+- Telemetry is scoped to the policy's cluster in one of two ways (or both):
+  - `telemetry_cluster`: rows must carry a cluster attribute (by default
+    `k8s.cluster.name` in `Properties`; Beyla and the OpenTelemetry
+    Kubernetes attributes processor set it) equal to the value;
+  - `telemetry_components`: rows must be written by one of these
+    Application Insights components (their Azure resource IDs, matched
+    against `_ResourceId`). This needs nothing in the row, so it is the
+    scope for the classic SDK and the Azure Monitor Distro. It proves the
+    cluster only if those components receive telemetry from that cluster
+    alone (one component per environment).
+
+  Only matching rows are counted, so a workspace shared by several clusters
+  or applications is safe.
+- Resource attributes read from every dependency row:
+  - with `telemetry_cluster`, the cluster attribute above
+    (`k8s.cluster.name` by default): rows without it are never counted as
+    this cluster's;
+  - `k8s.namespace.name` (or the classic Kubernetes enricher's
+    `Kubernetes.Pod.Namespace`): without it a source is matched by bare name,
     which is ambiguous when the name exists in several namespaces;
   - `service.name` (or the role name Application Insights derives from it):
     the workload's name as Kubernetes knows it.
@@ -64,11 +74,10 @@ before falling back to the developer's `az login`.
   | Azure Monitor OpenTelemetry Distro, `Microsoft.OpenTelemetry`, Application Insights SDK 3.x (.NET) | **No.** The exporter keeps resource attributes (`OTEL_RESOURCE_ATTRIBUTES`, Kubernetes detectors) out of Properties; only span attributes get there | Add the cluster and namespace as *span* attributes (a span processor in the application), route through a Collector, or use Beyla |
   | Classic Application Insights SDK 2.x (with or without the Kubernetes enricher) | **No.** The enricher writes `Kubernetes.*` keys and has no cluster key | Add the properties with a telemetry initializer, or use Beyla |
 
-  Both workarounds other than Beyla change the application, which the
-  platform otherwise never needs. Scoping by Application Insights resource
-  or by role name against the Kubernetes inventory (no attribute needed) is
-  planned (step T2c); until then, use Beyla where changing the application
-  isn't possible.
+  For those stacks, scope by `telemetry_components` instead of a cluster
+  attribute: no application change is needed. The classic SDK with the
+  Kubernetes enricher still gives each source its namespace; Distro rows
+  carry none, so their sources are matched by bare name.
 - Application Insights target formats (`host | cid-v1:<appId>`,
   `server | database`, `sb://namespace/ | queue`) are understood: the host is
   the dependency and the database, queue or callee component is kept with

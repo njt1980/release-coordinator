@@ -1,5 +1,6 @@
 """Core domain models for the enterprise service dependency graph."""
 
+import re
 from collections.abc import Iterable
 from datetime import datetime
 from enum import Enum
@@ -932,6 +933,81 @@ class TelemetryClusterFilter(BaseModel):
     value: str = Field(pattern=TELEMETRY_VALUE_PATTERN)
 
 
+# An Application Insights component's Azure resource ID as Log Analytics
+# writes it in ``_ResourceId`` (lower-cased). IDs are interpolated into
+# telemetry queries, so only characters that cannot end a quoted string.
+APP_COMPONENT_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^/subscriptions/[0-9a-f-]{36}/resourcegroups/[a-z0-9._()-]{1,90}"
+    r"/providers/microsoft\.insights/components/[a-z0-9._()-]{1,260}$"
+)
+
+
+def normalize_component_ids(ids: Iterable[str]) -> List[str]:
+    """Return Application Insights component resource IDs lower-cased, sorted, unique.
+
+    Raises:
+        ValueError: if an ID is not a component resource ID.
+    """
+    normalized = set()
+    for raw in ids:
+        component_id = raw.strip().rstrip("/").lower()
+        if not APP_COMPONENT_ID_PATTERN.match(component_id):
+            raise ValueError(
+                "not an Application Insights component resource ID "
+                f"(/subscriptions/<id>/resourceGroups/<rg>/providers/"
+                f"microsoft.insights/components/<name>): {raw!r}"
+            )
+        normalized.add(component_id)
+    return sorted(normalized)
+
+
+class TelemetryScope(BaseModel):
+    """Which telemetry rows count as evidence for the policy's cluster.
+
+    ``cluster`` keeps rows whose resource attribute equals a value (OpenTelemetry
+    with Kubernetes attributes, Beyla); ``components`` keeps rows written by
+    one of these Application Insights components (``_ResourceId``), the only
+    scope classic SDK and Azure Monitor Distro rows can prove, as they carry
+    no cluster attribute. With both, a row must satisfy both. At least one is set.
+    """
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    cluster: TelemetryClusterFilter | None = None
+    components: List[str] = Field(default_factory=list)
+
+    @field_validator("components")
+    @classmethod
+    def _normalize_components(cls, components: List[str]) -> List[str]:
+        return normalize_component_ids(components)
+
+    @model_validator(mode="after")
+    def _scopes_something(self) -> Self:
+        if self.cluster is None and not self.components:
+            raise ValueError("a telemetry scope needs a cluster filter or components")
+        return self
+
+    def describe(self) -> str:
+        """Human-readable form, e.g. ``k8s.cluster.name == 'prod' and component rc-ai``."""
+        parts = []
+        if self.cluster is not None:
+            parts.append(f"{self.cluster.attribute} == {self.cluster.value!r}")
+        if self.components:
+            names = ", ".join(component.rsplit("/", 1)[-1] for component in self.components)
+            noun = "component" if len(self.components) == 1 else "components"
+            parts.append(f"Application Insights {noun} {names}")
+        return " and ".join(parts)
+
+
+def telemetry_scope_of(
+    cluster: TelemetryClusterFilter | None, components: List[str]
+) -> TelemetryScope | None:
+    """The scope a cluster filter and component list make up; None when neither is set."""
+    if cluster is None and not components:
+        return None
+    return TelemetryScope(cluster=cluster, components=components)
+
+
 class ScanContext(BaseModel):
     """What one discovery run scanned, recorded in its baseline snapshot.
 
@@ -943,8 +1019,10 @@ class ScanContext(BaseModel):
     ``kubernetes_api_server`` is the API server the manifest scan actually
     read (normalized, blank when no namespace was scanned) and
     ``telemetry_cluster`` the cluster filter the telemetry query applied
-    (None when unfiltered). Both are checked against the project policy, so
-    the ``cluster`` label is backed by what was really read.
+    (None when unfiltered), ``telemetry_components`` the Application
+    Insights components it was restricted to (see ``TelemetryScope``). Both
+    are checked against the project policy, so the ``cluster`` label is
+    backed by what was really read.
     """
 
     environment: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
@@ -954,11 +1032,22 @@ class ScanContext(BaseModel):
     scanned_revisions: List[ScannedRevision] = Field(default_factory=list)
     kubernetes_api_server: str = ""
     telemetry_cluster: Optional[TelemetryClusterFilter] = None
+    telemetry_components: List[str] = Field(default_factory=list)
 
     @field_validator("kubernetes_api_server")
     @classmethod
     def _normalize_api_server(cls, value: str) -> str:
         return normalize_api_server(value) if value else ""
+
+    @field_validator("telemetry_components")
+    @classmethod
+    def _normalize_components(cls, components: List[str]) -> List[str]:
+        return normalize_component_ids(components)
+
+    @property
+    def telemetry_scope(self) -> TelemetryScope | None:
+        """The telemetry scope the query applied, None when unscoped."""
+        return telemetry_scope_of(self.telemetry_cluster, self.telemetry_components)
 
     @model_validator(mode="after")
     def _check_scope(self) -> Self:

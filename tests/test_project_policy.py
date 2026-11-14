@@ -207,7 +207,7 @@ class BaselineScopeTests(unittest.TestCase):
 
     def test_telemetry_cluster_filter_must_match_the_policy(self) -> None:
         for recorded, shown in [
-            (None, "no cluster filter"),
+            (None, "no telemetry scope"),
             (TelemetryClusterFilter(value="aks-2"), "'aks-2'"),
             (
                 TelemetryClusterFilter(attribute="cluster", value="aks-1"),

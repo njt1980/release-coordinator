@@ -319,7 +319,7 @@ def _telemetry(before: State, update: State) -> list[EventDraft]:
         return [_event(stage, RunEventStatus.INFO, "Skipped: no telemetry workspace configured.")]
     if report.status is not DiscoveryStatus.SUCCESS:
         return [_stage_problem(stage, report)]
-    cluster_filter = update.get("telemetry_cluster")
+    scope = update.get("telemetry_scope")
     dropped = [f"Dropped as noise: {count} × {reason}" for reason, count in sorted(report.dropped_records.items())]
     events = [
         _event(
@@ -327,8 +327,8 @@ def _telemetry(before: State, update: State) -> list[EventDraft]:
             RunEventStatus.PASSED if report.item_count else RunEventStatus.WARNING,
             f"Found {_plural(report.item_count, 'observed dependency', 'observed dependencies')}"
             + (
-                f" from cluster {cluster_filter.attribute} = {cluster_filter.value}."
-                if cluster_filter
+                f" scoped to {scope.describe()}."
+                if scope
                 else "."
             ),
             dropped,
@@ -343,13 +343,14 @@ def _telemetry(before: State, update: State) -> list[EventDraft]:
                 "nothing assessed against them can be approved.",
             )
         )
-    if cluster_filter is None:
+    if scope is None:
         events.append(
             _event(
                 stage,
                 RunEventStatus.WARNING,
-                "Not filtered to a cluster (no valid project policy names one), so a policy "
-                "requiring live evidence will reject this baseline.",
+                "Not scoped to a cluster (no valid project policy names a cluster filter or "
+                "Application Insights components), so a policy requiring live evidence will "
+                "reject this baseline.",
             )
         )
     return events
