@@ -6,6 +6,7 @@ export const ROUTES = {
   howItWorks: "/how-it-works",
   onboard: "/onboard",
   runs: "/runs",
+  assessments: "/assessments",
 };
 
 const KNOWN = new Set(Object.values(ROUTES));

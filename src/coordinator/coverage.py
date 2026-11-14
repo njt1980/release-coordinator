@@ -170,8 +170,11 @@ def static_coverage_issues(
             EvidenceIssue(
                 code=ReasonCode.STATIC_COVERAGE_INCOMPLETE,
                 subjects=[
-                    IssueSubject(kind=IssueSubjectKind.FILE, id=f"{record.repository}:{path}")
-                    for path in paths
+                    IssueSubject(kind=IssueSubjectKind.SERVICE, id=service.service_name),
+                    *(
+                        IssueSubject(kind=IssueSubjectKind.FILE, id=f"{record.repository}:{path}")
+                        for path in paths
+                    ),
                 ],
                 root_key=files_key(record.repository, paths),
                 detail=(
