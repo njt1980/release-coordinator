@@ -88,6 +88,7 @@ from src.tools.config_readers import (
     config_file,
     dockerfile_environment,
     dotnet_code_bindings,
+    dotnet_key_binding,
     dotnet_settings_bindings,
     env_binding,
     env_default_bindings,
@@ -98,6 +99,7 @@ from src.tools.config_readers import (
     spring_code_bindings,
     spring_config_bindings,
     spring_documents,
+    spring_key_binding,
     storable_image_environment,
 )
 from src.tools.reference_sites import (
@@ -107,6 +109,12 @@ from src.tools.reference_sites import (
     followed_env_reads,
     opaque_reference_sites,
     unbound_section_sites,
+)
+from src.tools.syntax_wrappers import (
+    SyntaxLanguage,
+    WrapperAnalysis,
+    WrapperSinkKind,
+    follow_wrappers,
 )
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
@@ -878,6 +886,32 @@ def read_source_file(content: str, service_name: str, path: str) -> FileRead:
     return read.model_copy(update={"channels": uses}) if uses else read
 
 
+_WRAPPER_SITE_KINDS: Final[dict[WrapperSinkKind, OpaqueReferenceKind]] = {
+    WrapperSinkKind.ENV_NAME: OpaqueReferenceKind.DYNAMIC_ENV_NAME,
+    WrapperSinkKind.CONFIG_KEY: OpaqueReferenceKind.DYNAMIC_CONFIG_KEY,
+    WrapperSinkKind.CLIENT_ADDRESS: OpaqueReferenceKind.CLIENT_ADDRESS_EXPRESSION,
+}
+
+
+def _wrapper_config_bindings(wrappers: WrapperAnalysis, file_path: str) -> list[ConfigBinding]:
+    """Bindings for configuration keys read through a followed helper."""
+    found: list[ConfigBinding | None] = []
+    for read in wrappers.reads:
+        if read.kind is not WrapperSinkKind.CONFIG_KEY:
+            continue
+        if read.language is SyntaxLanguage.CSHARP:
+            found.append(dotnet_key_binding(read.name, read.default, file_path))
+        elif read.language is SyntaxLanguage.JAVA:
+            found.append(spring_key_binding(read.name, read.default, file_path))
+    return [binding for binding in found if binding is not None]
+
+
+def _unfollowed_sites(sites: list[OpaqueReferenceSite], wrappers: WrapperAnalysis) -> list[OpaqueReferenceSite]:
+    """Opaque sites, less the ones a followed helper explains (see ``syntax_wrappers``)."""
+    followed = {(_WRAPPER_SITE_KINDS[sink.kind], sink.line) for sink in wrappers.followed_sinks}
+    return [site for site in sites if (site.kind, site.line) not in followed]
+
+
 def _read_file(content: str, service_name: str, path: str) -> FileRead:
     """Read one file a service owns.
 
@@ -888,7 +922,10 @@ def _read_file(content: str, service_name: str, path: str) -> FileRead:
     environment reads (a URL that is only a read's default is that
     default, not a separate edge), C# IConfiguration and Spring reads,
     ``@FeignClient`` service names, environment reads through names the
-    file fixes to literals (``followed_env_reads``) and, for an nginx or
+    file fixes to literals (``followed_env_reads``), environment and
+    configuration reads through file-local helpers every call of which
+    passes literals (``syntax_wrappers``, which also clears those helpers'
+    opaque sites) and, for an nginx or
     Envoy configuration, its upstreams (see ``proxy_configs``).
 
     Raises:
@@ -908,15 +945,21 @@ def _read_file(content: str, service_name: str, path: str) -> FileRead:
     bindings = env_default_bindings(content, relative)
     suffix = os.path.splitext(path)[1].lower()
     references = _extract_references(content, service_name, path)
-    for read in followed_env_reads(content, path):
-        binding = env_binding(read.name, read.default, relative)
+    wrappers = follow_wrappers(content, path)
+    env_reads = {(read.name, read.default) for read in followed_env_reads(content, path)}
+    env_reads.update(
+        (read.name, read.default) for read in wrappers.reads if read.kind is WrapperSinkKind.ENV_NAME
+    )
+    for name, default in sorted(env_reads, key=lambda read: (read[0], read[1] or "")):
+        binding = env_binding(name, default, relative)
         if binding is not None:
             bindings.append(binding)
             references.append(
                 EndpointReference(
-                    service_name=service_name, endpoint=read.name, file_path=path, kind=ReferenceKind.ENV_VAR
+                    service_name=service_name, endpoint=name, file_path=path, kind=ReferenceKind.ENV_VAR
                 )
             )
+    bindings.extend(_wrapper_config_bindings(wrappers, relative))
     if suffix == ".cs":
         bindings.extend(dotnet_code_bindings(content, relative))
     elif suffix == ".java":
@@ -938,7 +981,7 @@ def _read_file(content: str, service_name: str, path: str) -> FileRead:
     return FileRead(
         references=_unique_references(references),
         bindings=bindings,
-        sites=opaque_reference_sites(content, path)
+        sites=_unfollowed_sites(opaque_reference_sites(content, path), wrappers)
         + (proxy.sites if proxy is not None else [])
         + (_unfollowed_proxy_variables(proxy, content) if proxy is not None else []),
         sections=bound_sections(content, path),

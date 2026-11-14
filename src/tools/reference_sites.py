@@ -34,6 +34,8 @@ Recognized, per language the scanner reads:
   service's configuration files (see ``unbound_section_sites``).
 
 Only the line and the kind of each site are recorded, never the code.
+The scanner also follows file-local helpers through syntax trees (see
+``syntax_wrappers``) and drops the sites those helpers explain.
 """
 
 import os
