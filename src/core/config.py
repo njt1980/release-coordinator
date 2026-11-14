@@ -17,6 +17,10 @@ Deployment settings come from environment variables (read once, at import):
 - ``RC_SQLITE_VFS``: SQLite VFS for the review database; ``unix-dotfile``
   where the data directory is an SMB share (Azure Files), whose byte-range
   locks SQLite can't take. Unset: SQLite's default locking.
+- ``RC_ADO_SCAN_CONCURRENCY``: repositories scanned at once during
+  discovery (1 to 8, default 4). With ``RC_DATA_DIR`` set, scanned files
+  are also kept in a content-addressed cache there (``cache/ado-blobs``),
+  so a rescan reads only files that changed.
 """
 
 import os
@@ -78,7 +82,19 @@ DEFAULT_RISK_REASONER_MODEL: Final[str] = "claude-opus-5-5"
 # Telemetry lookback when the project policy doesn't set
 # runtime_lookback_days (or there is no policy), and its upper bound.
 DEFAULT_RUNTIME_LOOKBACK_DAYS: Final[int] = 7
+
 MAX_RUNTIME_LOOKBACK_DAYS: Final[int] = 30
+
+# Repositories scanned at once during discovery (RC_ADO_SCAN_CONCURRENCY,
+# 1 to 8). Azure DevOps rate-limits per identity, so more is not always faster.
+ADO_SCAN_CONCURRENCY: Final[int] = min(
+    8, max(1, int(os.environ.get("RC_ADO_SCAN_CONCURRENCY", "").strip() or "4"))
+)
+
+# Directory (relative to the data root) of the content-addressed cache of
+# repository files (see ``tools.blob_cache``); used only when RC_DATA_DIR is
+# set, so local runs never write into the source tree.
+ADO_BLOB_CACHE_DIR: Final[str] = "cache/ado-blobs"
 
 # How old the newest live telemetry row may be for live evidence to count.
 DEFAULT_MAX_TELEMETRY_AGE_MINUTES: Final[int] = 60

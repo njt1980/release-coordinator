@@ -1,10 +1,13 @@
 """Batch-processing nodes for the Day-Zero discovery workflow."""
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from src.core import config
 from src.core.models import (
+    DiscoveryResult,
+    PipelineVariables,
     IDENTITY_LINK_METADATA_KEY,
     IDENTITY_SUGGESTIONS_METADATA_KEY,
     IDENTITY_UNLINKED_METADATA_KEY,
@@ -50,7 +53,7 @@ from src.core.service_ids import (
 )
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools.baseline_store import BaselineScope, default_store
-from src.tools.devops_extractor import DevOpsExtractor
+from src.tools.devops_extractor import DevOpsExtractor, RepositoryScan
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.policy_store import (
     PolicyInvalidError,
@@ -161,18 +164,33 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     errors: list[str] = []
     edge_count = 0
 
-    for repo_name in state["target_repositories"]:
+    def scan_one(
+        repo_name: str,
+    ) -> tuple[DiscoveryResult[RepositoryScan], list[PipelineVariables]]:
         result = extractor.scan_repository(repo_name)
+        return result, [
+            extractor.read_pipeline_variables(repo_name, repository_scan.revision)
+            for repository_scan in result.items
+        ]
+
+    # Repositories are read in parallel (bounded: Azure DevOps rate-limits
+    # per identity) and merged in their configured order, so the outcome
+    # doesn't depend on which scan finishes first.
+    repositories = list(state["target_repositories"])
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(config.ADO_SCAN_CONCURRENCY, len(repositories)))
+    ) as pool:
+        scanned = list(pool.map(scan_one, repositories))
+
+    for repo_name, (result, repository_pipelines) in zip(repositories, scanned):
         statuses.append(result.status)
         errors.extend(result.errors)
         scans = []
-        for repository_scan in result.items:
+        for repository_scan, variables in zip(result.items, repository_pipelines):
             scanned_revisions.append(repository_scan.revision)
             static_coverage.append(repository_scan.coverage())
             static_config.extend(repository_scan.static_config())
-            pipeline_variables.append(
-                extractor.read_pipeline_variables(repo_name, repository_scan.revision)
-            )
+            pipeline_variables.append(variables)
             scans.extend(repository_scan.services)
         for scan in scans:
             source_id = context.identity(scan.service.name, scan.service.namespace).uri

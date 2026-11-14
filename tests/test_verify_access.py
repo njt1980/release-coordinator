@@ -65,10 +65,11 @@ class RunWithTimeoutTests(unittest.TestCase):
 
 class DevOpsVerifyAccessTests(unittest.TestCase):
     def _extractor(self) -> DevOpsExtractor:
-        extractor = DevOpsExtractor.__new__(DevOpsExtractor)
+        with patch("src.tools.devops_extractor.DefaultAzureCredential"):
+            extractor = DevOpsExtractor(
+                org_url="https://dev.azure.com/org", project="proj", repositories=[]
+            )
         extractor._credential = MagicMock()
-        extractor._organization_url = "https://dev.azure.com/org"
-        extractor._project = "proj"
         return extractor
 
     def test_success_fetches_project_metadata(self) -> None:
