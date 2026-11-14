@@ -280,6 +280,12 @@ the customer's validation for its intended use can establish that):
   recomputes every hash and link, so a change made outside the application
   is detected.
 
+The assessments page shows every decision with its full signature line and
+asks the signer to confirm the meaning, name and commit before recording.
+Dependency review answers get the same protection: append-only, one hash
+chain, verified on every read (an older review database is migrated on
+first use, its answers chained in the order they were given).
+
 ## 4. Gaps before this works on applications we don't own
 
 Found while running the lab end to end (2026-11-13). Each gap is phrased as

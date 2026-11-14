@@ -2,6 +2,7 @@
 
 import sqlite3
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -262,17 +263,22 @@ class ReviewStoreTests(unittest.TestCase):
         with self.assertRaises(DuplicateAnswerError):
             self.store.append(self.scope, _answer(verdict=ReviewVerdict.DISAGREE, evidence_seen=("method:STATIC_CODE",), reason="x"))
 
+    def _tamper(self, statement: str) -> None:
+        """Change the file outside the application (the triggers only stop the application)."""
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("DROP TRIGGER review_answers_no_update")
+            connection.execute("DROP TRIGGER review_answers_no_delete")
+            connection.execute(statement)
+
     def test_corrupt_row_is_reported(self) -> None:
         self.store.append(self.scope, _answer())
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("UPDATE review_answers SET record = '{}'")
+        self._tamper("UPDATE review_answers SET record = '{}'")
         with self.assertRaises(ReviewStoreCorruptError):
             self.store.answers(self.scope)
 
     def test_row_must_match_its_record(self) -> None:
         self.store.append(self.scope, _answer())
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("UPDATE review_answers SET subject_key = 'edge:x->y'")
+        self._tamper("UPDATE review_answers SET subject_key = 'edge:x->y'")
         with self.assertRaisesRegex(ReviewStoreCorruptError, "does not match"):
             self.store.answers(self.scope, ReviewSubject(kind=EDGE.kind, key="edge:x->y"))
 
@@ -282,6 +288,71 @@ class ReviewStoreTests(unittest.TestCase):
             connection.execute("PRAGMA user_version = 99")
         with self.assertRaisesRegex(ReviewStoreCorruptError, "schema version"):
             self.store.answers(self.scope)
+
+    def test_the_table_refuses_update_and_delete(self) -> None:
+        self.store.append(self.scope, _answer())
+        connection = sqlite3.connect(self.path)
+        self.addCleanup(connection.close)
+        for statement in ["UPDATE review_answers SET record = record", "DELETE FROM review_answers"]:
+            with self.subTest(statement=statement), self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
+                connection.execute(statement)
+
+    def test_answers_form_a_verifiable_chain(self) -> None:
+        for number in range(1, 4):
+            self.store.append(self.scope, _answer(answer_id=f"a{number}"))
+        report = self.store.verify()
+        self.assertEqual((report.records, report.intact), (3, True))
+        self._tamper("DELETE FROM review_answers WHERE answer_id = 'a2'")
+        self.assertEqual(
+            self.store.verify().problems,
+            ["position 2: sequence 3 (an answer is missing)", "answer a3: does not link to the answer before it"],
+        )
+
+    def test_edited_answer_is_reported_on_read(self) -> None:
+        self.store.append(self.scope, _answer())
+        record = _answer(reason="edited").model_dump_json()
+        self._tamper(f"UPDATE review_answers SET record = '{record}'")
+        with self.assertRaisesRegex(ReviewStoreCorruptError, "does not match its hash"):
+            self.store.answers(self.scope)
+        self.assertFalse(self.store.verify().intact)
+
+    def test_version_1_database_is_migrated_into_a_chain(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        later, first = _answer(answer_id="b", answered_at=T0 + timedelta(minutes=1)), _answer(answer_id="a")
+        with sqlite3.connect(self.path) as connection:
+            connection.executescript(
+                """CREATE TABLE review_answers (answer_id TEXT PRIMARY KEY, tenant TEXT NOT NULL,
+                    project_id TEXT NOT NULL, subject_kind TEXT NOT NULL, subject_key TEXT NOT NULL,
+                    answered_at TEXT NOT NULL, record TEXT NOT NULL);
+                CREATE INDEX review_answers_by_subject
+                    ON review_answers (tenant, project_id, subject_kind, subject_key);
+                PRAGMA user_version = 1;"""
+            )
+            for answer in (later, first):
+                connection.execute(
+                    "INSERT INTO review_answers VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (answer.answer_id, "acme", "shop", answer.subject.kind.value, answer.subject.key,
+                     answer.answered_at.isoformat(), answer.model_dump_json()),
+                )
+        self.assertEqual(self.store.answers(self.scope), [first, later])
+        report = self.store.verify()
+        self.assertEqual((report.records, report.intact), (2, True))
+        self.store.append(self.scope, _answer(answer_id="c"))
+        self.assertEqual(self.store.verify().records, 3)
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+
+    def test_concurrent_writers_keep_the_chain_intact(self) -> None:
+        def write(number: int) -> None:
+            ReviewStore(self.path).append(self.scope, _answer(answer_id=f"t{number}"))
+
+        threads = [threading.Thread(target=write, args=(n,)) for n in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        report = self.store.verify()
+        self.assertEqual((report.records, report.intact), (8, True))
 
     def test_lock_file_vfs(self) -> None:
         store = ReviewStore(self.path, vfs="unix-dotfile")

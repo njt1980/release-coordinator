@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import DecisionPanel from "../components/DecisionPanel.jsx";
 import Nav from "../components/Nav.jsx";
 import { ROUTES } from "../lib/router.js";
 
@@ -155,6 +156,7 @@ function Briefing({ jobId }) {
         )}
       </div>
       <Headline briefing={briefing} />
+      <DecisionPanel jobId={jobId} toolApproved={briefing.approved} />
       {Object.entries(RANKS).map(([rank, meta]) => {
         const groups = briefing.groups.filter((g) => g.rank === rank);
         if (!groups.length) return null;
