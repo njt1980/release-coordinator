@@ -12,6 +12,7 @@ from src.coordinator.coverage import radius_shape_findings, static_coverage_issu
 from src.coordinator.policy import decide_release, needs_model
 from src.coordinator.project_policy import (
     live_coverage,
+    unobservable_protocols,
     with_unscoped_sources,
     live_runtime_state,
     baseline_freshness_issue,
@@ -752,8 +753,10 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     Real live edges are resolved against the baseline. Their coverage of
     the radius classifies the evidence (``live_runtime_state``): no rows is
     LIVE_EMPTY, an old newest row LIVE_STALE, an unobserved radius service
-    LIVE_UNCOVERED, otherwise LIVE. When that is weaker than the policy
-    requires, a REQUIRED_SOURCE_MISSING issue explains why. The resolved
+    LIVE_UNCOVERED, an unobserved service talking only protocols the
+    telemetry can't see LIVE_UNOBSERVABLE (``unobservable_protocols``),
+    otherwise LIVE. When that is weaker than the policy requires, a
+    REQUIRED_SOURCE_MISSING (or RUNTIME_UNOBSERVABLE) issue explains why. The resolved
     edges touching the radius are ``runtime_observed_edges``; a workspace
     other than the baseline's is a DISCOVERY_GAP, and radius edges the
     baseline lacks are BASELINE_DRIFT. Metrics are keyed by service FQURI.
@@ -809,7 +812,8 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         drift_issues, drift = live_drift_issues(state, workspace_id, observed)
         issues.extend(drift_issues)
     now = utc_now()
-    coverage = live_coverage(policy, observed, radius, now)
+    blind = unobservable_protocols(graph.edges, radius) if graph is not None else {}
+    coverage = live_coverage(policy, observed, radius, now, blind)
     if coverage.uncovered_services and not is_mock and policy is not None:
         coverage = with_unscoped_sources(
             coverage,

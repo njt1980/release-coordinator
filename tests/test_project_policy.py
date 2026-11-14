@@ -387,7 +387,12 @@ class RuntimeEvidenceTests(unittest.TestCase):
                         self.assertIsNone(issue)
                     else:
                         assert issue is not None
-                        self.assertIs(issue.code, ReasonCode.REQUIRED_SOURCE_MISSING)
+                        expected = (
+                            ReasonCode.RUNTIME_UNOBSERVABLE
+                            if state is RuntimeEvidenceState.LIVE_UNOBSERVABLE
+                            else ReasonCode.REQUIRED_SOURCE_MISSING
+                        )
+                        self.assertIs(issue.code, expected)
 
 
 class ExemptionTests(unittest.TestCase):

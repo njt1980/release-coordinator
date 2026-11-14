@@ -31,12 +31,14 @@ from src.core.models import (
 )
 from src.core.edge_resolution import (
     pipeline_index,
+    reference_protocol,
     resolve_endpoint,
     service_environment_index,
     static_config_index,
     target_context,
 )
 from src.core.identity_links import link_identities
+from src.core.telemetry_capability import wire_protocol
 from src.core.service_ids import (
     ENV_REFERENCE_PREFIX,
     IdentityContext,
@@ -198,6 +200,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
                         confidence_score=0.7,
                         last_observed_at=datetime.now(timezone.utc),
                         provenance=STATIC_CODE_PROVENANCE,
+                        protocol=wire_protocol(reference.endpoint),
                     )
                 )
                 edge_count += 1
@@ -557,6 +560,7 @@ def _merge_edge(existing_edge: DependencyEdge, edge: DependencyEdge) -> Dependen
         environment=_merge_labels(existing_edge.environment, edge.environment),
         dependency_type=existing_edge.dependency_type or edge.dependency_type,
         direction_uncertain=existing_edge.direction_uncertain and edge.direction_uncertain,
+        protocol=existing_edge.protocol or edge.protocol,
     )
 
 
@@ -656,8 +660,11 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
         )
         if source == target:
             continue
+        protocol = edge.protocol or reference_protocol(
+            edge.target_service_id, index, target_context(source, context), environments, pipelines, configs
+        )
         edge = edge.model_copy(
-            update={"source_service_id": source, "target_service_id": target}
+            update={"source_service_id": source, "target_service_id": target, "protocol": protocol}
         )
         edge_key = (source, target)
         existing_edge = merged_edges.get(edge_key)

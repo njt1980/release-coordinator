@@ -172,6 +172,28 @@ class SilentServiceExemption(_StrictModel):
         return f"{namespace}/{name}"
 
 
+class UnobservableProtocolExemption(_StrictModel):
+    """A protocol the configured telemetry can't see, accepted for review.
+
+    A radius service talking only protocols outside the telemetry's
+    capability is never observed, so live coverage can't vouch for it
+    (RUNTIME_UNOBSERVABLE). An entry accepts that blind spot for one
+    ``protocol`` (as named in assessments: ``amqp``, ``amqps``,
+    ``unknown``...) until ``expires_on`` (UTC, inclusive), with a reason:
+    for example that the service's consumers were checked by hand. It never
+    makes the protocol observable, and a silent-service allowance never
+    replaces it.
+    """
+
+    protocol: str = Field(pattern=r"^[a-z][a-z0-9+.-]*$")
+    reason: str = Field(min_length=1)
+    expires_on: date
+
+    def is_active(self, today: date) -> bool:
+        """Whether the entry still applies on ``today``."""
+        return today <= self.expires_on
+
+
 class EgressRule(_StrictModel):
     """An external destination the project calls on purpose (gap G2).
 
@@ -277,13 +299,15 @@ class Exemptions(_StrictModel):
 
     ``unscanned_files`` are source files the static scan can't read (an
     unsupported language) whose dependencies a reviewer has checked; the
-    same path globs as ``files``.
+    same path globs as ``files``. ``unobservable`` are protocols the
+    telemetry can't see, accepted per protocol (RUNTIME_UNOBSERVABLE).
     """
 
     files: list[FileExemption] = Field(default_factory=list)
     dependencies: list[DependencyExemption] = Field(default_factory=list)
     silent_services: list[SilentServiceExemption] = Field(default_factory=list)
     unscanned_files: list[FileExemption] = Field(default_factory=list)
+    unobservable: list[UnobservableProtocolExemption] = Field(default_factory=list)
 
 
 class ProjectPolicy(_StrictModel):
@@ -386,6 +410,17 @@ class ProjectPolicy(_StrictModel):
                     f"runtime_lookback_days {self.runtime_lookback_days}, so it can't be checked"
                 )
         return self
+
+    @model_validator(mode="after")
+    def _unobservable_protocols_are_unique(self) -> Self:
+        protocols = [rule.protocol for rule in self.exemptions.unobservable]
+        if len(set(protocols)) != len(protocols):
+            raise ValueError("exemptions.unobservable must list each protocol once")
+        return self
+
+    def unobservable_rule(self, protocol: str) -> UnobservableProtocolExemption | None:
+        """The exemption entry for ``protocol``, active or not."""
+        return next((rule for rule in self.exemptions.unobservable if rule.protocol == protocol), None)
 
     def silent_service_rule(self, service: str) -> SilentServiceExemption | None:
         """Return the silent-service entry for ``<namespace>/<name>``, if any."""

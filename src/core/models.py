@@ -943,6 +943,12 @@ class DependencyEdge(BaseModel):
     marks a telemetry edge whose target port is in the ephemeral range: it
     may be a call to a server listening high, or a reply reported in
     reverse. A merged edge is uncertain only if all its evidence is.
+
+    ``protocol`` is the wire protocol the source's address for the target
+    names (``http``, ``grpc``, ``amqp``, ``postgres``... see
+    ``telemetry_capability.wire_protocol``), ``unknown`` when the scheme
+    doesn't say, None when no address scheme was seen (telemetry edges,
+    bare host names).
     """
 
     source_service_id: str
@@ -954,6 +960,7 @@ class DependencyEdge(BaseModel):
     environment: str = Field(default=UNKNOWN_LABEL, min_length=1)
     dependency_type: str | None = None
     direction_uncertain: bool = False
+    protocol: str | None = None
 
     @model_validator(mode="after")
     def _mock_fixtures_carry_no_confidence(self) -> Self:
@@ -1130,6 +1137,10 @@ class RuntimeEvidenceState(str, Enum):
     LIVE_EMPTY: the live query completed but returned no usable rows.
     LIVE_STALE: the newest live row is older than the policy allows.
     LIVE_UNCOVERED: some service in the release radius was not observed.
+    LIVE_UNOBSERVABLE: every radius service was observed or allowed, except
+        services the configured telemetry can't see: each of their
+        dependencies uses a protocol outside its capability (or an unknown
+        one), so their absence proves nothing.
     LIVE_INCOMPLETE: the live query FAILED or was PARTIAL.
     MOCK: the live query was answered from the demo fixture.
     BASELINE: no workspace was queried; the baseline snapshot's
@@ -1142,6 +1153,7 @@ class RuntimeEvidenceState(str, Enum):
     LIVE_EMPTY = "live_empty"
     LIVE_STALE = "live_stale"
     LIVE_UNCOVERED = "live_uncovered"
+    LIVE_UNOBSERVABLE = "live_unobservable"
     LIVE_INCOMPLETE = "live_incomplete"
     MOCK = "mock"
     BASELINE = "baseline"
@@ -1187,6 +1199,12 @@ class LiveCoverage(BaseModel):
     cluster attribute; ``unscoped_services`` maps uncovered radius services
     to the unscoped source names that look like them. Unscoped rows never
     count as coverage; they explain why a service looks silent.
+
+    ``unobservable_services`` maps radius services not seen whose every
+    dependency uses a protocol the telemetry can't see (or an unknown one)
+    to those protocols; ``accepted_unobservable`` lists those an active
+    ``exemptions.unobservable`` entry covers for each protocol. A silent
+    allowance never applies to an unobservable service.
     """
 
     edge_count: int = Field(ge=0)
@@ -1198,6 +1216,8 @@ class LiveCoverage(BaseModel):
     expired_exemptions: List[str] = Field(default_factory=list)
     unscoped_sources: Optional[Dict[str, int]] = None
     unscoped_services: Dict[str, List[str]] = Field(default_factory=dict)
+    unobservable_services: Dict[str, List[str]] = Field(default_factory=dict)
+    accepted_unobservable: Dict[str, List[str]] = Field(default_factory=dict)
 
 
 class TelemetryStatus(BaseModel):
@@ -1276,6 +1296,10 @@ class ReasonCode(str, Enum):
         scanner couldn't read (an unsupported language, a read failure), at
         the baseline or the pull request's head, or the baseline predates
         coverage accounting; a dependency they declare is invisible.
+    RUNTIME_UNOBSERVABLE: live evidence is required, but a radius service
+        talks only protocols the configured telemetry can't see, so its
+        absence proves nothing; accepted per protocol only through
+        ``exemptions.unobservable``.
     IDENTITY_UNLINKED: a service in the radius exists in source code but
         matches no running service (by name, or by name up to case and
         separators), so its runtime calls and callers are unknown.
@@ -1302,6 +1326,7 @@ class ReasonCode(str, Enum):
     BASELINE_REVISION_MISMATCH = "BASELINE_REVISION_MISMATCH"
     STATIC_COVERAGE_INCOMPLETE = "STATIC_COVERAGE_INCOMPLETE"
     IDENTITY_UNLINKED = "IDENTITY_UNLINKED"
+    RUNTIME_UNOBSERVABLE = "RUNTIME_UNOBSERVABLE"
 
     @property
     def limits_actionability(self) -> bool:
