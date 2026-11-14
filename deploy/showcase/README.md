@@ -60,7 +60,14 @@ in `ActivationFailed` after the secrets are fixed, create a fresh one:
 `az containerapp update -g rc-showcase -n rcshow-app --revision-suffix <new>`.
 
 Give someone access: add them (a guest from another organization works) under *Enterprise applications →
-rc-showcase-signin → Users and groups*.
+rc-showcase-signin → Users and groups*, with the role **Default Access** (they can view, assess pull
+requests and answer the review).
+
+Let someone record release decisions: assign them, in the same place, the app role **Release
+Coordinator** (value `Release.Coordinator`). The container's `RC_DECISION_ROLE` (template parameter
+`decisionRole`) names it; the signed-in user's roles come from the Easy Auth principal header, and
+anyone without the role sees why they can't decide. Their signature is their Entra name and account,
+never a typed name. Role changes apply at the person's next sign-in.
 
 ## What the showcase does not do yet
 
@@ -68,6 +75,6 @@ rc-showcase-signin → Users and groups*.
   produced locally and uploaded to the share.
 - **Webhook `POST /api/v1/webhooks/pr-assessment`:** disabled (`RC_DISABLE_RAW_WEBHOOK`). Pull requests are
   read from Azure DevOps by PR intake.
-- **Roles:** anyone assigned can answer the review. The coordinator app role is a later step.
+- **Roles for the review:** anyone assigned can answer the dependency review; only decisions need the role.
 - **Overlapping replicas:** during a revision switch an old and a new replica overlap briefly. Answers
   written in that window rely on the lock file only.
