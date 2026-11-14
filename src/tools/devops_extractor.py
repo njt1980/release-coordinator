@@ -257,6 +257,9 @@ class EndpointReference(BaseModel):
     endpoint: str = Field(min_length=1)
     file_path: str = Field(min_length=1)
     kind: ReferenceKind = ReferenceKind.URL
+    # Every file of the service the reference was found in (``file_path``
+    # is the first); filled when the service's scan is finished.
+    evidence_files: list[str] = Field(default_factory=list)
 
     def dependency_target(self) -> str | None:
         """Return the edge target this reference names.
@@ -1079,6 +1082,7 @@ def binding_references(
                 endpoint=binding.variable,
                 file_path=source,
                 kind=ReferenceKind.ENV_VAR,
+                evidence_files=sorted({d.file_path.lstrip("/") for d in binding.defaults}),
             )
         )
     return references
@@ -1931,6 +1935,7 @@ class _ServiceAccumulator:
             service_name=boundary.name, root=boundary.root, libraries=libraries
         )
         self.references: dict[tuple[ReferenceKind, str], EndpointReference] = {}
+        self.reference_files: dict[tuple[ReferenceKind, str], set[str]] = {}
         self.bindings: list[ConfigBinding] = []
         self.images: list[tuple[str, ImageEnvironment]] = []
         self.sites: dict[str, list[OpaqueReferenceSite]] = {}
@@ -1964,7 +1969,9 @@ class _ServiceAccumulator:
         for reference in read.references:
             if reference.service_name != self.boundary.name:
                 reference = reference.model_copy(update={"service_name": self.boundary.name})
-            self.references.setdefault((reference.kind, reference.endpoint), reference)
+            key = (reference.kind, reference.endpoint)
+            self.references.setdefault(key, reference)
+            self.reference_files.setdefault(key, set()).add(reference.file_path.lstrip("/"))
         self.add_sites(relative, read.sites)
         if read.sections:
             self.sections.setdefault(relative, []).extend(read.sections)
@@ -1991,7 +1998,12 @@ class _ServiceAccumulator:
                 )
             )
         config = build_static_config(repository, self.boundary, commit_sha, self.bindings, self.images)
-        found = list(self.references.values())
+        found = [
+            reference.model_copy(
+                update={"evidence_files": sorted(self.reference_files.get(key, ()))}
+            )
+            for key, reference in self.references.items()
+        ]
         found.extend(binding_references(self.boundary.name, config.bindings, found))
         return ServiceScan(
             service=self.boundary, references=found, coverage=self.coverage, config=config
