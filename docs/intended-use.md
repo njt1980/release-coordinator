@@ -4,10 +4,10 @@ Approved 2026-11-14. Every user-facing claim about the platform must agree with 
 
 ## Intended use
 Release Coordinator helps a person decide whether, and in which order, to release a change to a
-microservices application. For one pull request it gathers evidence (source code, Kubernetes
-manifests, telemetry, the project's dependency review), shows which services the change can affect
-and a deployment order, and lists what the evidence cannot show. A named person makes and records
-the release decision.
+microservices application. For one pull request, or a set of pull requests released together, it
+gathers evidence (source code, Kubernetes manifests, telemetry, the project's dependency review),
+shows which services the change can affect and a deployment order, and lists what the evidence
+cannot show. A named person makes and records the release decision.
 
 ## It is
 - Decision support for release and change control.
@@ -21,16 +21,19 @@ the release decision.
   designed to support those requirements (signature manifestation, audit trail, record linking);
   whether it meets them is established by the customer's validation.
 - Not an approver. It never releases or blocks a deployment. "Go (advisory)" means every automated
-  check passed and the advisory review agreed; the decision is the person's.
+  check passed and the advisory review agreed; the decision is the person's. When switched on, the
+  status and comment it posts on an Azure DevOps pull request are advisory; it sets no branch policy.
 - Not a complete impact analysis. The blast radius covers dependencies the evidence shows; the
   briefing lists what it could not see (unscanned files, unobserved services, unresolved addresses).
+- Not a root-cause diagnosis. The "If it fails" view lists a service's dependencies and the changes
+  recorded for them, as a starting point for a person; it reads no logs, metrics or incidents.
 - Not a risk assessment under ISO 14971. The advisory risk review is AI-generated text that
   supports the person's judgement.
 
 ## Where each part of the output comes from (field labels)
 | Label | Meaning | Examples |
 |---|---|---|
-| Computed | Derived by deterministic code from recorded evidence; reproducible from the same inputs | blast radius, deployment order, reason codes, coverage, observability gaps |
+| Computed | Derived by deterministic code from recorded evidence; reproducible from the same inputs | blast radius, deployment order, reason codes, coverage, observability gaps, release-train order, "If it fails" list |
 | Human | Entered by a named person | review answers, release decision, reason, regulated-service list, policy |
 | AI-generated | Written by the external model; may be wrong | advisory risk score and justification, assistant answers |
 

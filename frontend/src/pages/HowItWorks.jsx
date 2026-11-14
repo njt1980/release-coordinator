@@ -13,6 +13,7 @@ const SECTIONS = [
   { id: "merge", label: "Merging into one graph" },
   { id: "storage", label: "What is stored where" },
   { id: "decides", label: "How a release is decided" },
+  { id: "beyond", label: "Beyond one pull request" },
   { id: "reasons", label: "Reason codes" },
   { id: "setup", label: "Set it up" },
   { id: "intended-use", label: "Intended use" },
@@ -26,7 +27,7 @@ const DECISION_STEPS = [
   ["Review", "Apply the dependency review's answers; an answer counts only while the files it rests on are unchanged.", "REVIEW_UNAVAILABLE"],
   ["Radius", "Walk every upstream caller and downstream dependency, counting hops; a message channel links its consumers to its producers. Check every unresolved node, the baseline's age and scope, required sources, unlinked identities, channels a changed service publishes to with no known consumer, and code coverage across the whole project (an unread file anywhere could be an unseen caller).", "DISCOVERY_GAP · BASELINE_STALE · STATIC_COVERAGE_INCOMPLETE · IDENTITY_UNLINKED · CHANNEL_CONSUMERS_UNKNOWN"],
   ["Live check", "Query telemetry now: every service in the radius must be seen within the policy's window, and a live edge the baseline lacks is drift.", "REQUIRED_SOURCE_MISSING · BASELINE_DRIFT · RUNTIME_UNOBSERVABLE"],
-  ["Contracts", "Compare changed .proto files and OpenAPI documents at base and head (removed or renamed operations, newly required parameters and request fields, removed response fields, type changes, narrowed enums), and the payload class or record of each changed message type a channel carries (removed or retyped properties). A breaking difference blocks; a compatible one verifies the order when nothing else changed (or every caller shares a contract, if the policy allows).", "CONTRACT_BREAKING · COMPATIBILITY_UNVERIFIED"],
+  ["Contracts", "Compare changed .proto files and OpenAPI documents at base and head (removed or renamed operations, newly required parameters and request fields, removed response fields, type changes, narrowed enums), and the payload class or record of each changed message type a channel carries (removed or retyped properties). For a broken OpenAPI operation, live telemetry names the callers seen using it. A breaking difference blocks; a compatible one verifies the order when nothing else changed (or every caller shares a contract, if the policy allows).", "CONTRACT_BREAKING · COMPATIBILITY_UNVERIFIED"],
   ["Change flags", "Flag database migrations (EF Core, Flyway, Liquibase), added, removed or changed configuration keys (appsettings, application.yml/.properties, .env) and feature-flag sections. Config files are compared key by key at base and head; values are never kept.", "DB_MIGRATION · CONFIG_KEYS_CHANGED · FEATURE_FLAGS_CHANGED"],
   ["Sequence", "Order the deployment deterministically (topological sort): providers first for additive changes, consumers first for breaking ones. A cycle is named.", "DEPENDENCY_CYCLE"],
   ["Risk", "Only with complete evidence and external AI allowed: a model writes an advisory review of the redacted change. It can reject a release, never approve one.", "MODEL_REJECTED · ADVISORY_DISABLED"],
@@ -42,6 +43,10 @@ const SOURCES = [
       "The default branch head, resolved to a commit; every file fetched pinned to it (429/503 retried, blobs cached by git object id).",
       "Service boundaries from release-coord.yaml, else from Dockerfile, package.json or go.mod markers and runnable build projects (.csproj, pom.xml, build.gradle). A file outside every service that Dockerfiles COPY in (a shared .proto, say) belongs to each service that copies it.",
       "Dependencies: literal URLs to in-cluster or private hosts; reads of address-like environment variables (*_ADDR, *_URL, *_HOST, ConnectionStrings__*) in Python, JS/TS, Go, Java, C#, PHP and Ruby; appsettings and Spring config keys; Dockerfile ENV; nginx and Envoy upstreams; Feign and Eureka names; gRPC <Protobuf> and NSwag <OpenApiReference> contract links; an OpenAPI document (openapi*, swagger*, *.openapi.*) in a service's directory is the API it serves.",
+      "Small helper functions (C#, Java, JS/TS, Python, parsed with tree-sitter): when a helper in the same file passes its parameter on as an environment name, config key or client address and every call passes a literal, the literal is read as that key. If a file doesn't parse, the pattern scan alone stands.",
+      "Message channels: literal queue, topic, exchange and message-type names in .NET (event bus, MassTransit, Azure Service Bus, RabbitMQ.Client) and Java (@RabbitListener, @KafkaListener, Rabbit/Kafka templates, Spring Cloud Stream bindings), each as a producer or a consumer of the channel.",
+      "Declared names, for identity only: docker-compose services and images, skaffold artifacts, Docker@2 pipeline tasks, .NET Aspire AppHost resources and a Dockerfile's org.opencontainers.image.title label.",
+      "Pull request flags: migrations (EF Core, Flyway, Liquibase), configuration and feature-flag keys compared at base and head; key names are kept, values never.",
     ],
     flags: "Flagged instead of guessed: dynamic variable names and config keys, client addresses built at runtime, a client library with no address anywhere, external config servers, unsupported languages (C/C++, Kotlin, Rust, Elixir, Scala…).",
   },
@@ -53,6 +58,8 @@ const SOURCES = [
       "Services, ConfigMaps, Deployments, StatefulSets, DaemonSets, ReplicaSets, CronJobs, Jobs and Pods. Secrets are never read.",
       "Container environments in Kubernetes' own precedence: literal values, configMapKeyRef, envFrom ConfigMaps. Secret references stay opaque names.",
       "An environment variable whose value names another Service becomes a dependency (unless it comes in bulk from a shared ConfigMap). The API server URL is recorded as proof of which cluster was read.",
+      "Identity facts per workload: app.kubernetes.io/name, app.kubernetes.io/component and app labels, OTEL_SERVICE_NAME, and OCI image annotations (title, source, revision). Used to link code to running services, never as dependencies.",
+      "Optional, per policy: the queues, topics and subscriptions of named Azure Service Bus namespaces, listed with read-only Resource Manager calls and stored as the baseline's broker inventory (never an edge).",
     ],
     flags: "Recorded as findings: Services that select nothing, workloads under controllers it can't read, ExternalName Services, name collisions.",
   },
@@ -64,6 +71,8 @@ const SOURCES = [
       "AppDependencies, scoped by Application Insights component and/or a cluster attribute from the policy; the caller is service.name (or the role name).",
       "The request join: a call's Id matched to the ParentId of the receiving service's AppRequests row names the callee, even when the call's Target is an IP or a span name.",
       "sum(ItemCount) counts sampled calls; a source with ItemCount above 1 is marked sampled. Classic targets (host | cid, tcp:host,1433, host/entity) are parsed.",
+      "Each role's instrumentation (Beyla, classic Application Insights SDK, Azure Monitor Distro with or without its activity source, plain OpenTelemetry SDK) decides which protocols it can see. Only capabilities seen in the lab or stated by the vendor clear a service; the rest are marked unverified.",
+      "Optional, per policy: further workspaces, and a filter keeping only roles in the inventory and instances among the scanned pods. The filter narrows rows; it doesn't prove which cluster they came from.",
     ],
     flags: "Dropped and counted: targets with no host (an HTTP method, a path), loopback calls, messaging rows whose direction is reversed.",
   },
@@ -77,11 +86,20 @@ const RESOLUTION = [
   ["Nothing sets it", "provably unset: the code default decides, so a person is asked"],
 ];
 
+// Views built on assessments and baselines (docs/release-model.md section 3).
+const BEYOND = [
+  ["Release train", "Combine completed assessments of one project into one release: changed services from every member, one radius, one deployment order from the existing sequencer, the worst member's verdict. Members assessed against different baselines, missing order facts or a combined cycle block the train.", "BASELINE_MISMATCH · ORDER_FACTS_MISSING · TRAIN_CYCLE"],
+  ["If it fails (advisory)", "For a selected service on the Inventory page: what it depends on, up to 4 hops, with the changes recorded across recent baselines (dependencies, image, commit, config key names, contract files) and recent assessments that changed it. Nearest and most recently changed first.", ""],
+  ["Validation package", "One sealed bundle per assessment for the customer's validation file: the decision record, review answers used, tool version, stored benchmark results and the intended-use statement, as JSON or a print view.", ""],
+  ["Azure DevOps polling (opt-in)", "With the policy's ado_connection switched on, new pull request iterations are assessed automatically; separate switches post an advisory status and the briefing as a closed comment. No branch policy is set.", ""],
+];
+
 const STORES = [
   ["Baseline snapshot", "baselines/{tenant}/{project}/{snapshot}.json", "Services, dependencies, unresolved endpoints, what was scanned (cluster, API server, commits, telemetry scope), container environments, per-service coverage, contract links", "Never. Written atomically; a new discovery writes a new file."],
   ["Policy", "policies/{tenant}/{project}.yaml", "Reviewed rules and exemptions; each assessment records its version and SHA-256", "Edited by people, never by the platform"],
   ["Review answers", "reviews/reviews.sqlite3", "Confirm, disagree, add, link and answer, each with reviewer, reason and the files it rests on", "Never: append-only, SHA-256 chained"],
   ["Assessment", "assessments/{job}.json", "Verdict, reason codes, issues, the full evidence record and the briefing", "Written once (needs RC_DATA_DIR)"],
+  ["PR watch", "pr-watch/{tenant}/{project}.json", "With polling on: the last pull request iteration assessed, so each new iteration is assessed once", "Overwritten as iterations are handled"],
   ["Decision record", "decisions/decisions.sqlite3", "Verdict, reason, signer, UTC time, the assessment's SHA-256, commit, baseline and policy hash", "Never: append-only, SHA-256 chained; corrections are new records"],
 ];
 
@@ -152,7 +170,8 @@ const INTENDED_USE_LIMITS = [
   "Not a medical device, and not part of one.",
   "Not validated software: the customer validates it for its own intended use.",
   "Not compliant with 21 CFR Part 11, IEC 62304, ISO 13485 or the MDR by itself; the decision record is designed to support them.",
-  "Not an approver: it never releases or blocks a deployment. The decision is the person's.",
+  "Not an approver: it never releases or blocks a deployment. The decision is the person's; a pull request status it posts is advisory.",
+  "Not a root-cause diagnosis: the \"If it fails\" view is a starting list of dependencies and recorded changes.",
   "Not a complete impact analysis: the blast radius covers what the evidence shows, and the briefing lists what it couldn't see.",
   "Not a risk assessment under ISO 14971: the advisory risk review is AI-generated text that supports the person's judgement.",
 ];
@@ -162,7 +181,8 @@ const LIMITS = [
   "Contracts: .proto files, OpenAPI documents (local $ref only; oneOf/anyOf not compared) and C#/Java message payload types of type-routed channels are compared. Client links are recorded for .NET builds only; JSON Schema, AsyncAPI and payloads of queue/topic channels aren't read.",
   "Telemetry exported through the OpenTelemetry Collector's Azure Monitor exporter can carry span names instead of addresses as targets (gRPC, Redis, DNS). When the request join names the callee of every such call the span name is dropped; calls to services without telemetry of their own (a cache, a database) stay unresolved.",
   "Code from Azure DevOps and telemetry from Azure Monitor only; GitHub, GitLab and other telemetry backends need adapters.",
-  "Messaging is modeled as service to broker, not producer to queue or topic to consumer.",
+  "Message channels are read from .NET and Java code only. Go, Node, Python and Rust producers, Confluent or plain Kafka clients, Dapr and NServiceBus aren't read, so their consumers can be missing from the radius without a flag.",
+  "The root-cause view lists dependencies and recorded changes only; it reads no logs, metrics or incidents.",
   "Applications outside Kubernetes, executing deployments and database migrations are out of scope.",
 ];
 
@@ -327,8 +347,10 @@ export default function HowItWorks() {
             <Section id="merge" title="Merging into one graph">
               <p>
                 A code service and a running service are linked only when their names are equal after
-                ignoring case and <code>-_.</code>, and the match is unique on both sides. Near names are
-                offered as questions, never applied. A variable read in code is resolved in this order:
+                ignoring case and <code>-_.</code>, and the match is unique on both sides, or when the names and
+                images declared in build files and on the workload point at exactly one running service that no
+                other code service also claims. Near names and conflicting declarations are offered as questions,
+                never applied. A variable read in code is resolved in this order:
               </p>
               <ol className="space-y-2 text-sm">
                 {RESOLUTION.map(([title, body], index) => (
@@ -379,7 +401,9 @@ export default function HowItWorks() {
               </div>
               <p>
                 Each assessment&apos;s record downloads as one sealed JSON file, or opens as a print view, from the
-                Assessments page.
+                Assessments page. The validation package adds the review answers it used, the tool version, the
+                stored benchmark results (held-out apps apart) and this intended-use statement, sealed with one
+                SHA-256; it is built on request, not stored. Release trains live in memory only.
               </p>
             </Section>
 
@@ -406,6 +430,21 @@ export default function HowItWorks() {
                   </li>
                 ))}
               </ol>
+            </Section>
+
+            <Section id="beyond" title="Beyond one pull request">
+              <p>
+                These views reuse completed assessments and stored baselines; they add no new evidence source.
+              </p>
+              <ul className="grid gap-3 sm:grid-cols-2">
+                {BEYOND.map(([title, body, codes]) => (
+                  <li key={title} className="rounded-xl bg-white p-4 ring-1 ring-slate-200">
+                    <p className="font-semibold text-slate-900">{title}</p>
+                    <p className="mt-1 text-sm text-slate-600">{body}</p>
+                    {codes && <p className="mt-2 font-mono text-[11px] text-slate-400 [overflow-wrap:anywhere]">{codes}</p>}
+                  </li>
+                ))}
+              </ul>
             </Section>
 
             <Section id="reasons" title="Reason codes">
@@ -452,7 +491,9 @@ export default function HowItWorks() {
                 <SetupStep number="1" title="Grant read-only access to a non-personal identity">
                   <p>
                     Locally, a service principal (its credentials go in a gitignored{" "}
-                    <code>.env</code>); on Azure, a managed identity.
+                    <code>.env</code>); on Azure, a managed identity. Optional extras: &quot;Contribute to pull
+                    requests&quot; on the project for posting statuses and comments, and Reader on Service Bus
+                    namespaces for the broker inventory.
                   </p>
                   <ul className="grid gap-3 md:grid-cols-3">
                     {ACCESS.map((item) => (
@@ -504,7 +545,7 @@ export default function HowItWorks() {
             <Section id="intended-use" title="Intended use">
               <p>
                 Release Coordinator helps a person decide whether, and in which order, to release a change to a
-                microservices application. It gathers the evidence, shows which services the change can affect
+                microservices application, one pull request or a set released together. It gathers the evidence, shows which services the change can affect
                 and a deployment order, and lists what the evidence cannot show. A named person makes and records
                 the decision.
               </p>
