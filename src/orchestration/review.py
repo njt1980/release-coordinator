@@ -554,8 +554,10 @@ def build_review(
     in_force: ReviewInForce,
 ) -> ProjectReview:
     """Lay out ``graph`` (the baseline, without the review applied) and the
-    project-wide ``issues`` for review. Declared dependencies in force are
-    listed as ADDED rows; removed ones keep their row as REMOVED."""
+    project-wide ``issues`` for review. Dependencies are between registered
+    services (an edge to an unresolved entity is listed as its question).
+    Declared dependencies in force are listed as ADDED rows; removed ones
+    keep their row as REMOVED."""
     services = [
         ServiceRow(
             service_id=node.service_id,
@@ -568,7 +570,10 @@ def build_review(
     ]
     dependencies: list[DependencyRow] = []
     listed: set[str] = set()
+    registered = {node.service_id for node in graph.services}
     for edge in graph.edges:
+        if edge.target_service_id not in registered or edge.source_service_id not in registered:
+            continue  # An unresolved end is a question, not a dependency to agree with.
         subject = ReviewSubject(kind=ReviewSubjectKind.DEPENDENCY, key=edge_key(edge.source_service_id, edge.target_service_id))
         listed.add(subject.key)
         dependencies.append(
