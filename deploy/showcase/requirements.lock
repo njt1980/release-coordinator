@@ -1,0 +1,13 @@
+# Exact versions of requirements.txt the showcase image installs (tested together).
+langgraph==1.2.20
+langchain==1.5.0
+pydantic==2.14.3
+pyyaml==6.0.3
+azure-identity==1.27.0
+azure-cosmos==4.17.1
+azure-devops==7.1.0b4
+azure-monitor-query==2.0.0
+kubernetes==37.0.2
+fastapi==0.162.5
+uvicorn==0.54.0
+anthropic==2.8.0

@@ -146,7 +146,7 @@ class ReviewStore:
 
 
 DEFAULT_REVIEW_DB: Final[Path] = (
-    Path(__file__).resolve().parents[2] / config.REVIEWS_DIR / config.REVIEWS_DB_NAME
+    config.DATA_ROOT / config.REVIEWS_DIR / config.REVIEWS_DB_NAME
 )
 
 

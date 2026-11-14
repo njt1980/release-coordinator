@@ -1,11 +1,13 @@
 """FastAPI boundary that lets a frontend trigger the Day-Zero discovery engine."""
 
 import logging
+from pathlib import Path
 from datetime import datetime
 from typing import Literal, Self
 from uuid import uuid4
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, status
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
@@ -489,3 +491,15 @@ def verify_telemetry_endpoint(
 ) -> SystemVerification:
     """Run the pre-flight read-only access check for telemetry."""
     return verify_telemetry(payload.workspace_id)
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz() -> dict[str, str]:
+    """Liveness probe: the process answers (touches no integration)."""
+    return {"status": "ok"}
+
+
+# The built frontend, when the deployment serves it (RC_FRONTEND_DIST).
+# Mounted last so every /api route above wins.
+if config.FRONTEND_DIST and Path(config.FRONTEND_DIST).is_dir():
+    app.mount("/", StaticFiles(directory=config.FRONTEND_DIST, html=True), name="frontend")

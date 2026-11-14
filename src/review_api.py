@@ -12,9 +12,9 @@ so an answer can't claim evidence it wasn't given on.
 ``GET  /api/v1/projects/{tenant}/{project_id}/review/export`` lists the
 corrections as feedback for scanner work.
 
-The reviewer is the signed-in user when the platform's authentication
-supplies one (``X-MS-CLIENT-PRINCIPAL-NAME``, set by Azure App Service /
-Container Apps authentication, which strips it from client requests);
+The reviewer is the signed-in user when the server runs behind the
+platform's authentication (``RC_TRUST_PRINCIPAL_HEADER``: Azure Container
+Apps sets ``X-MS-CLIENT-PRINCIPAL-NAME`` and strips client copies);
 otherwise the name the client sends (local pilot only).
 """
 
@@ -27,6 +27,7 @@ from fastapi import APIRouter, Header, HTTPException, Path, status
 from pydantic import BaseModel, Field, ValidationError
 
 from src.coordinator import nodes as coordinator_nodes
+from src.core import config
 from src.core.models import DependencyEdge, DiscoveryMethod
 from src.core.review import (
     DeclaredDependency,
@@ -192,7 +193,8 @@ def post_answer(
 ) -> ProjectReview:
     """Record one answer and return the updated review."""
     scope, baseline, review = _review(tenant, project_id)
-    reviewer = (principal or request.reviewer).strip()
+    signed_in = principal if config.TRUST_PRINCIPAL_HEADER else None
+    reviewer = (signed_in or request.reviewer).strip()
     if not reviewer:
         raise _unprocessable("a reviewer name is required")
     anchors, seen = _anchors_for(request, baseline, review)

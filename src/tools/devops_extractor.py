@@ -20,6 +20,7 @@ from azure.identity import DefaultAzureCredential
 from msrest.authentication import BasicTokenAuthentication
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from src.core import config
 from src.core.models import (
     ConfigBinding,
     ConfigFramework,
@@ -1264,10 +1265,13 @@ class DevOpsExtractor:
             repositories: Repository names in scope for this extractor.
 
         Raises:
-            ValueError: If org_url or project is blank.
+            ValueError: If org_url or project is blank, or org_url is not in
+                the deployment's ``RC_ADO_ORG_ALLOWLIST`` (when one is set).
         """
         if not org_url or not org_url.strip():
             raise ValueError("org_url is required")
+        if config.ADO_ORG_ALLOWLIST and org_url.strip().rstrip("/").lower() not in config.ADO_ORG_ALLOWLIST:
+            raise ValueError(f"{org_url.strip()} is not an Azure DevOps organization this server may read")
         if not project or not project.strip():
             raise ValueError("project is required")
         self._credential = DefaultAzureCredential()

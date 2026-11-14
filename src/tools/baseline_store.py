@@ -237,7 +237,7 @@ class BaselineStore:
 
 
 DEFAULT_BASELINES_ROOT: Final[Path] = (
-    Path(__file__).resolve().parents[2] / config.BASELINES_DIR
+    config.DATA_ROOT / config.BASELINES_DIR
 )
 
 

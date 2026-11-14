@@ -1,0 +1,11 @@
+# Allowlist: only what the showcase image needs reaches the build context
+# (az acr build uploads the context to Azure; .env and data must never go).
+*
+!src/
+!frontend/
+!deploy/showcase/
+!mock_telemetry.json
+frontend/node_modules/
+frontend/dist/
+**/__pycache__/
+**/*.pyc

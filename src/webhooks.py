@@ -13,7 +13,9 @@ from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+import logging
+
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from src.coordinator.file_mapping import ChangedFileMapping, map_changed_files
@@ -31,6 +33,7 @@ from src.orchestration.briefing import ReleaseBriefing, build_briefing
 from src.orchestration.narration import narrate_assessment
 from src.orchestration.run_log import DEFAULT_RUN_LOGS, run_graph
 from src.tools.devops_extractor import DevOpsExtractor
+from src.tools.assessment_archive import default_archive
 from src.tools.baseline_store import PATH_SEGMENT_PATTERN, BaselineScope, default_store
 from src.tools.policy_store import (
     PolicyInvalidError,
@@ -131,10 +134,41 @@ class PrAssessmentSummary(BaseModel):
 # mutated from the event loop, so no locking is needed.
 _assessment_jobs: dict[str, PrAssessmentJob] = {}
 RUN_LOGS = DEFAULT_RUN_LOGS
+# Finished assessments on disk (None: kept in memory only; see config).
+ASSESSMENT_ARCHIVE = default_archive()
+_archive_restored = False
+logger = logging.getLogger(__name__)
+
+
+def _restore_archive() -> None:
+    """Load archived assessments once, so they survive a restart."""
+    global _archive_restored
+    if _archive_restored or ASSESSMENT_ARCHIVE is None:
+        return
+    _archive_restored = True
+    for job_id, text in ASSESSMENT_ARCHIVE.load_all():
+        if job_id in _assessment_jobs:
+            continue
+        try:
+            _assessment_jobs[job_id] = PrAssessmentJob.model_validate_json(text)
+        except ValidationError as error:
+            logger.warning("Archived assessment %s is invalid: %s", job_id, error)
+
+
+def _finish(record: PrAssessmentJob) -> None:
+    """Record a finished job, and archive it when an archive is configured."""
+    _assessment_jobs[record.job_id] = record
+    if ASSESSMENT_ARCHIVE is None:
+        return
+    try:
+        ASSESSMENT_ARCHIVE.save(record.job_id, record.model_dump_json())
+    except (OSError, ValueError) as error:
+        logger.warning("Assessment %s not archived: %s", record.job_id, error)
 
 
 def find_assessment(job_id: str) -> PrAssessmentJob | None:
     """Return a PR assessment job's current record, or None if unknown."""
+    _restore_archive()
     return _assessment_jobs.get(job_id)
 
 
@@ -205,11 +239,13 @@ async def run_assessment_job(
         assessment = final_state["release_assessment"]
     except Exception as error:
         message = str(error) or repr(error)
-        _assessment_jobs[job_id] = PrAssessmentJob(
-            job_id=job_id,
-            pr_id=pr_id,
-            status="failed",
-            error_message=message,
+        _finish(
+            PrAssessmentJob(
+                job_id=job_id,
+                pr_id=pr_id,
+                status="failed",
+                error_message=message,
+            )
         )
         RUN_LOGS.finish(job_id, "failed", message)
     else:
@@ -221,13 +257,15 @@ async def run_assessment_job(
             else "Not approved: "
             + (", ".join(code.value for code in assessment.reason_codes) or "no reason given"),
         )
-        _assessment_jobs[job_id] = PrAssessmentJob(
-            job_id=job_id,
-            pr_id=pr_id,
-            status="completed",
-            assessment=assessment,
-            evidence_report=final_state.get("evidence_report"),
-            briefing=build_briefing(assessment),
+        _finish(
+            PrAssessmentJob(
+                job_id=job_id,
+                pr_id=pr_id,
+                status="completed",
+                assessment=assessment,
+                evidence_report=final_state.get("evidence_report"),
+                briefing=build_briefing(assessment),
+            )
         )
 
 
@@ -245,8 +283,14 @@ def pr_assessment_webhook(
     changed file belongs to a registered service. When only some files map,
     the assessment is scheduled and the rest are reported as unmapped, which
     makes the verdict non-actionable. The assessment is pinned to the
-    baseline snapshot the files were mapped against.
+    baseline snapshot the files were mapped against. Responds 403 where the
+    deployment disables it (``RC_DISABLE_RAW_WEBHOOK``): use PR intake.
     """
+    if config.DISABLE_RAW_WEBHOOK:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This server reads pull requests from Azure DevOps only; use PR intake.",
+        )
     return schedule_assessment(payload, background_tasks)
 
 
@@ -284,6 +328,7 @@ def schedule_assessment(
         _load_policy(scope), mapping.unmapped_files
     )
     job_id = str(uuid4())
+    _restore_archive()  # Archived jobs list before new ones.
     _assessment_jobs[job_id] = PrAssessmentJob(
         job_id=job_id, pr_id=payload.pr_id, status="queued"
     )
@@ -412,7 +457,9 @@ def pr_intake(request: PrIntakeRequest, background_tasks: BackgroundTasks) -> Pr
 
 @router.get("/pr-assessments", response_model=list[PrAssessmentSummary])
 def list_pr_assessments() -> list[PrAssessmentSummary]:
-    """PR assessments of this server session, newest first."""
+    """PR assessments, newest first: this server session's, plus archived
+    ones when an archive is configured."""
+    _restore_archive()
     return [
         PrAssessmentSummary(
             job_id=record.job_id,
@@ -429,7 +476,7 @@ def list_pr_assessments() -> list[PrAssessmentSummary]:
 @router.get("/pr-assessment/{job_id}/briefing", response_model=ReleaseBriefing)
 def get_pr_briefing(job_id: str) -> ReleaseBriefing:
     """The release briefing of a completed PR assessment."""
-    record = _assessment_jobs.get(job_id)
+    record = find_assessment(job_id)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown job ID")
     if record.briefing is None:
@@ -443,7 +490,7 @@ def get_pr_briefing(job_id: str) -> ReleaseBriefing:
 @router.get("/pr-assessment/{job_id}", response_model=PrAssessmentJob)
 def get_pr_assessment(job_id: str) -> PrAssessmentJob:
     """Return the current status of a scheduled PR assessment."""
-    record = _assessment_jobs.get(job_id)
+    record = find_assessment(job_id)
     if record is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Unknown job ID"
