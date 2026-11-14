@@ -423,10 +423,11 @@ class ReconcileEnvDependencyTests(unittest.TestCase):
 
         edges = {(e.source_service_id, e.target_service_id): e for e in graph["edges"]}
         resolved = edges[(f"{DEFAULT_NS}:order-service", f"{DEFAULT_NS}:rabbitmq")]
-        # The static env edge merged with the runtime edge to the same service.
+        # The static env edge merged with the runtime edge to the same
+        # service, and the environment itself corroborates it.
         self.assertEqual(
             resolved.discovery_methods,
-            [DiscoveryMethod.STATIC_CODE, DiscoveryMethod.RUNTIME_TELEMETRY],
+            [DiscoveryMethod.STATIC_CODE, DiscoveryMethod.RUNTIME_TELEMETRY, DiscoveryMethod.K8S_MANIFEST],
         )
         self.assertEqual(
             [(e.entity_id, e.kind) for e in graph["unresolved_entities"]],

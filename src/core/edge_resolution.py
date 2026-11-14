@@ -6,10 +6,15 @@ against), so both resolve a reference the same way.
 """
 
 from collections.abc import Iterable, Mapping
+from datetime import datetime
+from typing import Final
 
 from src.core.config_resolution import ResolutionOutcome, resolve_variable
+from src.core.env_names import endpoint_of_value, is_endpoint_variable
 from src.core.models import (
     REPOSITORY_METADATA_KEY,
+    DependencyEdge,
+    DiscoveryMethod,
     SERVICE_ROOT_METADATA_KEY,
     PipelineVariables,
     ServiceEnvironment,
@@ -20,7 +25,6 @@ from src.core.models import (
     UnresolvedEntity,
     UnresolvedEntityKind,
 )
-from src.core.telemetry_capability import wire_protocol
 from src.core.service_ids import (
     IdentityContext,
     IdentityIndex,
@@ -30,6 +34,11 @@ from src.core.service_ids import (
     resolve_reference,
     unresolved_entity,
 )
+from src.core.telemetry_capability import wire_protocol
+
+# Provenance of an edge a workload's Kubernetes environment declares
+# (``environment_edges``), as opposed to a read found in code.
+K8S_ENV_PROVENANCE: Final[str] = "kubernetes_env"
 
 
 def service_environment_index(
@@ -262,4 +271,64 @@ def reference_protocol(
         pipelines.get(owner.uri) if pipelines is not None else None,
     )
     return wire_protocol(resolution.endpoint) if resolution.endpoint else None
+
+
+def environment_addresses(variables: Mapping[str, str]) -> list[tuple[str, str]]:
+    """(variable, address) for each endpoint-like variable a workload's
+    Kubernetes environment sets to an address (a URL, ``host:port``, a bare
+    host or a connection string's server), in name order.
+
+    Only names that denote an endpoint count (``*_URL``, ``*_HOST``,
+    ``*_ADDR``, ``ConnectionStrings__*``...; see ``is_endpoint_variable``),
+    so a value like ``APP_NAME=frontend`` is never read as a dependency.
+    """
+    found: list[tuple[str, str]] = []
+    for name in sorted(variables):
+        if not is_endpoint_variable(name):
+            continue
+        address = endpoint_of_value(variables[name], connection_string=True)
+        if address:
+            found.append((name, address))
+    return found
+
+
+def environment_edges(
+    environments: Mapping[str, ServiceEnvironment],
+    index: IdentityIndex,
+    context: IdentityContext,
+    observed_at: datetime,
+) -> list[DependencyEdge]:
+    """Edges a workload's Kubernetes environment declares (gap: a dependency
+    configured for a service whose code reads it in a way the scanner can't
+    follow).
+
+    Each endpoint-like variable whose value resolves, in the service's
+    namespace, to exactly one registered service other than itself becomes
+    an edge with ``K8S_ENV_PROVENANCE``: weaker evidence than a read in code
+    (the variable may be unused), shown as such. Values that resolve to
+    nothing add nothing (no new gaps).
+    """
+    edges: list[DependencyEdge] = []
+    for service_id, environment in sorted(environments.items()):
+        try:
+            owner = ServiceIdentity.parse(service_id)
+        except ValueError:
+            continue
+        owner_context = context.in_namespace(owner.namespace)
+        for _, address in environment_addresses(environment.variables):
+            target = resolve_reference(address, index, owner_context)
+            if target is None or target.uri == service_id:
+                continue
+            edges.append(
+                DependencyEdge(
+                    source_service_id=service_id,
+                    target_service_id=target.uri,
+                    discovery_methods=[DiscoveryMethod.K8S_MANIFEST],
+                    confidence_score=0.5,
+                    last_observed_at=observed_at,
+                    provenance=K8S_ENV_PROVENANCE,
+                    protocol=wire_protocol(address),
+                )
+            )
+    return edges
 

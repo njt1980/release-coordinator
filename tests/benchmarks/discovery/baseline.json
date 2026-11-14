@@ -6,9 +6,9 @@
    "static_precision": 1.0,
    "static_recall": 0.5,
    "manifest_precision": 1.0,
-   "manifest_recall": 0.7,
+   "manifest_recall": 1.0,
    "missed_silent": 0,
-   "missed_flagged": 3
+   "missed_flagged": 0
   },
   "eShop": {
    "inventory_precision": 1.0,
@@ -16,9 +16,9 @@
    "static_precision": 1.0,
    "static_recall": 0.16,
    "manifest_precision": 1.0,
-   "manifest_recall": 0.68,
+   "manifest_recall": 0.88,
    "missed_silent": 0,
-   "missed_flagged": 5
+   "missed_flagged": 0
   },
   "online-boutique": {
    "inventory_precision": 1.0,
@@ -26,19 +26,19 @@
    "static_precision": null,
    "static_recall": 0.0,
    "manifest_precision": 1.0,
-   "manifest_recall": 0.125,
+   "manifest_recall": 1.0,
    "missed_silent": 0,
-   "missed_flagged": 14
+   "missed_flagged": 0
   },
   "otel-demo": {
    "inventory_precision": 0.944,
    "inventory_recall": 1.0,
    "static_precision": 0.0,
    "static_recall": 0.0,
-   "manifest_precision": 0.8,
-   "manifest_recall": 0.205,
-   "missed_silent": 8,
-   "missed_flagged": 23
+   "manifest_precision": 0.95,
+   "manifest_recall": 0.974,
+   "missed_silent": 0,
+   "missed_flagged": 1
   },
   "sock-shop": {
    "inventory_precision": 0.667,
@@ -65,10 +65,10 @@
    "inventory_recall": 1.0,
    "static_precision": null,
    "static_recall": 0.0,
-   "manifest_precision": null,
-   "manifest_recall": 0.0,
+   "manifest_precision": 1.0,
+   "manifest_recall": 0.462,
    "missed_silent": 0,
-   "missed_flagged": 13
+   "missed_flagged": 7
   }
  },
  "pooled": {
@@ -76,9 +76,9 @@
   "inventory_recall": 0.97,
   "static_precision": 0.929,
   "static_recall": 0.095,
-  "manifest_precision": 0.955,
-  "manifest_recall": 0.307,
-  "missed_silent": 15,
-  "missed_flagged": 76
+  "manifest_precision": 0.98,
+  "manifest_recall": 0.73,
+  "missed_silent": 7,
+  "missed_flagged": 26
  }
 }
