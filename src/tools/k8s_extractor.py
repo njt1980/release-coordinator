@@ -12,6 +12,8 @@ from kubernetes.config.config_exception import ConfigException
 
 from src.core.models import (
     DependencyEdge,
+    DeployedWorkload,
+    DeployingPipeline,
     DiscoveryMethod,
     DiscoveryResult,
     ServiceEnvironment,
@@ -347,13 +349,15 @@ class PodTemplate(NamedTuple):
     ``workload`` is ``<kind>/<name>`` (for example ``deployment/orders``).
     ``registrable`` is true for workloads that run continuously or on a
     schedule (registered as a service when no Service selects them), false
-    for bare Jobs and Pods, which come and go.
+    for bare Jobs and Pods, which come and go. ``annotations`` are the
+    workload object's, with its pod template's filling the gaps.
     """
 
     labels: dict[str, str]
     workload: str
     spec: Any
     registrable: bool = True
+    annotations: dict[str, str] = {}
 
 
 def _name(item: Any) -> str:
@@ -373,15 +377,78 @@ def _controller(item: Any) -> tuple[str, str] | None:
     return str(getattr(owner, "kind", None) or "?"), str(getattr(owner, "name", None) or "?")
 
 
+def _annotations(metadata: Any) -> dict[str, str]:
+    raw = getattr(metadata, "annotations", None)
+    if not isinstance(raw, Mapping):
+        return {}
+    return {str(key): str(value) for key, value in raw.items() if value is not None}
+
+
 def _template(kind: str, item: Any, template: Any, registrable: bool = True) -> PodTemplate | None:
     if template is None:
         return None
+    template_metadata = getattr(template, "metadata", None)
     return PodTemplate(
-        labels=_labels(getattr(template, "metadata", None)),
+        labels=_labels(template_metadata),
         workload=f"{kind}/{_name(item)}",
         spec=getattr(template, "spec", None),
         registrable=registrable,
+        annotations={
+            **_annotations(template_metadata),
+            **_annotations(getattr(item, "metadata", None)),
+        },
     )
+
+
+# The KubernetesManifest task's annotations (Azure Pipelines) and the
+# DeployingPipeline field each fills.
+_PIPELINE_ANNOTATIONS: Final[dict[str, str]] = {
+    "azure-pipelines/org": "organization",
+    "azure-pipelines/project": "project",
+    "azure-pipelines/pipeline": "pipeline",
+    "azure-pipelines/pipelineId": "pipeline_id",
+    "azure-pipelines/execution": "run_id",
+    "azure-pipelines/executionuri": "run_url",
+    "azure-pipelines/jobName": "job",
+}
+
+
+def _deploying_pipeline(annotations: Mapping[str, str]) -> DeployingPipeline | None:
+    fields = {
+        field: annotations[key].strip()
+        for key, field in _PIPELINE_ANNOTATIONS.items()
+        if annotations.get(key, "").strip()
+    }
+    return DeployingPipeline(**fields) if fields else None
+
+
+def _container_images(spec: Any) -> set[str]:
+    return {
+        str(image).strip()
+        for container in getattr(spec, "containers", None) or []
+        if (image := getattr(container, "image", None)) and str(image).strip()
+    }
+
+
+def deployed_workloads(templates: Iterable[PodTemplate]) -> list[DeployedWorkload] | None:
+    """What each workload among ``templates`` runs: images and deploying pipeline.
+
+    A workload read from several pods (an unread controller) unions their
+    images; the first template carrying pipeline annotations names the run.
+    """
+    images: dict[str, set[str]] = {}
+    pipelines: dict[str, DeployingPipeline] = {}
+    for template in templates:
+        images.setdefault(template.workload, set()).update(_container_images(template.spec))
+        pipeline = _deploying_pipeline(template.annotations)
+        if pipeline is not None:
+            pipelines.setdefault(template.workload, pipeline)
+    return [
+        DeployedWorkload(
+            workload=workload, images=sorted(images[workload]), pipeline=pipelines.get(workload)
+        )
+        for workload in sorted(images)
+    ] or None
 
 
 def _pod_templates(
@@ -435,7 +502,10 @@ def _pod_templates(
         owner = _controller(pod)
         if owner is None:
             templates.append(
-                PodTemplate(_labels(pod.metadata), f"pod/{_name(pod)}", pod.spec, False)
+                PodTemplate(
+                    _labels(pod.metadata), f"pod/{_name(pod)}", pod.spec, False,
+                    _annotations(pod.metadata),
+                )
             )
             continue
         top = _top_controller(owner, parents)
@@ -444,7 +514,10 @@ def _pod_templates(
     findings: list[ShapeFinding] = []
     for controller, owned in sorted(unread.items()):
         templates.extend(
-            PodTemplate(_labels(pod.metadata), controller.lower(), pod.spec) for pod in owned
+            PodTemplate(
+                _labels(pod.metadata), controller.lower(), pod.spec, True, _annotations(pod.metadata)
+            )
+            for pod in owned
         )
         findings.append(
             ShapeFinding(
@@ -555,6 +628,7 @@ def _namespace_topology(
         name = str(service.metadata.name)
         service_names.add(name)
         service_id = context.identity(name, namespace).uri
+        node_index = len(topology.services)
         topology.services.append(ServiceNode(service_id=service_id, name=name))
         spec = getattr(service, "spec", None)
         external = str(getattr(spec, "external_name", None) or "").strip().rstrip(".").lower()
@@ -602,6 +676,9 @@ def _namespace_topology(
             )
             continue
         selected_workloads.update(t.workload for t in selected)
+        topology.services[node_index] = topology.services[node_index].model_copy(
+            update={"deployed_workloads": deployed_workloads(selected)}
+        )
         topology.environments.append(_service_environment(service_id, selected, config_maps))
     _add_unexposed(topology, context, templates, selected_workloads, service_names, config_maps)
     return topology
@@ -655,6 +732,7 @@ def _add_unexposed(
                     _WORKLOAD_METADATA_KEY: ",".join(workloads),
                     _EXPOSED_METADATA_KEY: "false",
                 },
+                deployed_workloads=deployed_workloads(t for w in workloads for t in unexposed[w]),
             )
         )
         topology.environments.append(

@@ -30,6 +30,7 @@ from src.core.models import (
     UnresolvedEntityKind,
     baseline_problems,
     combine_statuses,
+    merge_deployed_workloads,
     merge_evidence_files,
     merge_target_details,
     unresolved_entity_id,
@@ -521,6 +522,9 @@ def _canonicalize_services(
                 update={
                     "repository_url": node.repository_url or service.repository_url,
                     "metadata": {**service.metadata, **node.metadata},
+                    "deployed_workloads": merge_deployed_workloads(
+                        node.deployed_workloads, service.deployed_workloads
+                    ),
                 }
             )
         merged.append(node)
