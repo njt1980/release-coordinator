@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from src.coordinator import nodes as coordinator_nodes
 from src.core.models import (
+    UnresolvedEntityKind,
     UNRESOLVED_ID_PREFIX,
     ContractChange,
     DependencyEdge,
@@ -391,20 +392,22 @@ class StaticRadiusTests(_StoreTestCase):
         result = self._radius()
 
         self.assertEqual(result["downstream_services"], [_id("ledger-service")])
+        (issue,) = result["discovery_issues"]
         self.assertEqual(
-            result["discovery_issues"],
-            [
-                EvidenceIssue(
-                    code=ReasonCode.DISCOVERY_GAP,
-                    detail=(
-                        "Unresolved dependency in critical path: "
-                        "unresolved:10.0.0.12:5432 (IP_ADDRESS) is downstream of "
-                        f"the release via {TARGET} -> {_id('ledger-service')} -> "
-                        "unresolved:10.0.0.12:5432"
-                    ),
-                )
-            ],
+            (issue.code, issue.detail),
+            (
+                ReasonCode.DISCOVERY_GAP,
+                "Unresolved dependency in critical path: "
+                "unresolved:10.0.0.12:5432 (IP_ADDRESS) is downstream of "
+                f"the release via {TARGET} -> {_id('ledger-service')} -> "
+                "unresolved:10.0.0.12:5432",
+            ),
         )
+        # Structured for grouping: what, which kind, the cause key and the path.
+        self.assertEqual([s.id for s in issue.subjects], [database.entity_id])
+        self.assertIs(issue.entity_kind, UnresolvedEntityKind.IP_ADDRESS)
+        self.assertEqual(issue.root_key, "host:10.0.0.12")
+        self.assertEqual(issue.via, [TARGET, _id("ledger-service"), database.entity_id])
 
     def test_unresolved_entity_upstream_is_a_discovery_issue(self) -> None:
         caller = unresolved_entity("legacy-batch")

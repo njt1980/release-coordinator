@@ -1175,10 +1175,18 @@ class ObservedEdge(BaseModel):
 
 
 class UnresolvedReach(BaseModel):
-    """An unresolved node reached by the radius traversal, and why it matters."""
+    """An unresolved node reached by the radius traversal, and why it matters.
+
+    ``reference`` and ``entity_kind`` come from the unresolved entity (blank
+    and None for an endpoint missing from the inventory); ``via`` is the
+    path from the release, in call direction.
+    """
 
     node: str
     detail: str
+    reference: str = ""
+    entity_kind: Optional[UnresolvedEntityKind] = None
+    via: List[str] = Field(default_factory=list)
 
 
 class LiveCoverage(BaseModel):
@@ -1334,11 +1342,46 @@ class ReasonCode(str, Enum):
         return self is not ReasonCode.MODEL_REJECTED
 
 
+class IssueSubjectKind(str, Enum):
+    """What an evidence issue is about."""
+
+    SERVICE = "service"
+    ENTITY = "entity"
+    FILE = "file"
+
+
+class IssueSubject(BaseModel, frozen=True):
+    """One thing an evidence issue concerns: a service FQURI, an unresolved
+    entity ID, or a repository file (``<repository>:<path>``)."""
+
+    kind: IssueSubjectKind
+    id: str = Field(min_length=1)
+
+
 class EvidenceIssue(BaseModel):
-    """One reason the evidence behind an assessment is insufficient."""
+    """One reason the evidence behind an assessment is insufficient.
+
+    ``detail`` is the sentence a person reads. The other fields let a
+    briefing group issues by cause without parsing it: ``subjects`` are
+    what the issue concerns, ``entity_kind`` the kind of an unresolved
+    entity, ``via`` the dependency path (call direction) that reached it,
+    and ``root_key`` a deterministic key shared by issues with one cause
+    (the same variable unset in several services, the same files not
+    understood in every consumer of a library). It defaults to the code.
+    """
 
     code: ReasonCode
     detail: str = Field(min_length=1)
+    subjects: List[IssueSubject] = Field(default_factory=list)
+    entity_kind: Optional[UnresolvedEntityKind] = None
+    root_key: str = ""
+    via: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _default_root_key(self) -> Self:
+        if not self.root_key:
+            self.root_key = self.code.value
+        return self
 
 
 class Exemption(BaseModel):

@@ -14,11 +14,14 @@ import os
 from collections import Counter
 from collections.abc import Iterable
 
+from src.core.issue_keys import files_key
 from src.core.models import (
     REPOSITORY_METADATA_KEY,
     SERVICE_ROOT_METADATA_KEY,
     EvidenceIssue,
     Exemption,
+    IssueSubject,
+    IssueSubjectKind,
     KnowledgeGraph,
     ReasonCode,
     RepositoryCoverage,
@@ -162,9 +165,15 @@ def static_coverage_issues(
         if not open_files:
             continue
         where = "the pull request's head" if at_head else "the baseline"
+        paths = [f.path for f in open_files]
         issues.append(
             EvidenceIssue(
                 code=ReasonCode.STATIC_COVERAGE_INCOMPLETE,
+                subjects=[
+                    IssueSubject(kind=IssueSubjectKind.FILE, id=f"{record.repository}:{path}")
+                    for path in paths
+                ],
+                root_key=files_key(record.repository, paths),
                 detail=(
                     f"{service.service_name} ({record.repository}/{service.root or '.'}) "
                     f"has {len(open_files)} source file(s) the scan couldn't read or "

@@ -41,6 +41,7 @@ from src.coordinator.runtime_drift import (
 from src.coordinator.sequencing import DeploymentPlan, sequence_deployment
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
+from src.core.issue_keys import identity_key, unresolved_key
 from src.core.models import (
     IDENTITY_SUGGESTIONS_METADATA_KEY,
     IDENTITY_UNLINKED_METADATA_KEY,
@@ -52,6 +53,8 @@ from src.core.models import (
     DiscoveryMethod,
     EvidenceIssue,
     Exemption,
+    IssueSubject,
+    IssueSubjectKind,
     KnowledgeGraph,
     ObservedEdge,
     PullRequestPayload,
@@ -268,7 +271,7 @@ def traverse_blast_radius(graph: KnowledgeGraph, targets: list[str]) -> BlastRad
     out of both lists and reported as an issue instead.
     """
     registered = {service.service_id for service in graph.services}
-    kinds = {e.entity_id: e.kind.value for e in graph.unresolved_entities}
+    entities = {e.entity_id: e for e in graph.unresolved_entities}
     walked: set[int] = set()
     radius: dict[Direction, list[str]] = {"upstream": [], "downstream": []}
     unresolved: list[UnresolvedReach] = []
@@ -283,9 +286,19 @@ def traverse_blast_radius(graph: KnowledgeGraph, targets: list[str]) -> BlastRad
                 radius[direction].append(node)
             elif node not in reported:
                 reported.add(node)
-                kind = kinds.get(node, "not in service inventory")
+                entity = entities.get(node)
+                kind = entity.kind.value if entity else "not in service inventory"
                 detail = _unresolved_issue(node, kind, direction, paths[node])
-                unresolved.append(UnresolvedReach(node=node, detail=detail))
+                hops = paths[node] if direction == "downstream" else list(reversed(paths[node]))
+                unresolved.append(
+                    UnresolvedReach(
+                        node=node,
+                        detail=detail,
+                        reference=entity.reference if entity else "",
+                        entity_kind=entity.kind if entity else None,
+                        via=hops,
+                    )
+                )
     return BlastRadius(
         upstream=radius["upstream"],
         downstream=radius["downstream"],
@@ -304,7 +317,16 @@ def unresolved_gaps(
     for reach in unresolved:
         exemption = dependency_exemption(policy, reach.node)
         if exemption is None:
-            issues.append(_gap(reach.detail))
+            issues.append(
+                EvidenceIssue(
+                    code=ReasonCode.DISCOVERY_GAP,
+                    detail=reach.detail,
+                    subjects=[IssueSubject(kind=IssueSubjectKind.ENTITY, id=reach.node)],
+                    entity_kind=reach.entity_kind,
+                    root_key=unresolved_key(reach.reference, reach.node),
+                    via=reach.via,
+                )
+            )
         else:
             exempted.append(exemption)
     return issues, exempted
@@ -333,6 +355,8 @@ def identity_issues(graph: KnowledgeGraph, services: Iterable[str]) -> list[Evid
         issues.append(
             EvidenceIssue(
                 code=ReasonCode.IDENTITY_UNLINKED,
+                subjects=[IssueSubject(kind=IssueSubjectKind.SERVICE, id=service_id)],
+                root_key=identity_key(node.name),
                 detail=(
                     f"{node.name} (source {location or 'unknown'}) matches no running service, "
                     f"so its runtime calls and callers are unknown.{hint} Declare its deployed "
