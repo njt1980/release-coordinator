@@ -21,7 +21,14 @@ from src.core.models import (
     TelemetryRoleProfile,
 )
 from src.core.service_ids import IdentityContext, IdentityIndex, resolve_reference
-from src.core.telemetry_capability import TelemetryStack
+from src.core.telemetry_capability import (
+    CollectorSource,
+    TelemetryCapability,
+    TelemetryProfile,
+    TelemetryStack,
+    combined_capability,
+    profiles_for_stacks,
+)
 from src.tools.telemetry_extractor import source_reference
 
 # A producer span's dependency type, as Application Insights writes it for
@@ -220,3 +227,40 @@ def gap_stacks(profiles: Iterable[TelemetryRoleProfile]) -> dict[TelemetryStack,
             for stack in profile.stacks:
                 counts[stack] = counts.get(stack, 0) + 1
     return counts
+
+
+def service_profiles(
+    graph: KnowledgeGraph,
+    context: IdentityContext,
+    profiles: Iterable[TelemetryRoleProfile],
+    collector_source: CollectorSource,
+) -> dict[str, list[TelemetryProfile]]:
+    """The capability profiles each inventory service's own telemetry shows.
+
+    Roles resolve to services as live edges do; a role resolving to no
+    service, or showing only unknown stacks, adds nothing.
+    """
+    index = IdentityIndex(service.identity for service in graph.services)
+    found: dict[str, set[TelemetryProfile]] = {}
+    for profile in profiles:
+        if not profile.role:
+            continue
+        identity = resolve_reference(_role_key(profile), index, context)
+        if identity is None:
+            continue
+        names = profiles_for_stacks(
+            profile.stacks, collector_source, profile.service_bus_activity_rows > 0
+        )
+        if names:
+            found.setdefault(identity.uri, set()).update(names)
+    return {
+        service: sorted(names, key=lambda name: name.value)
+        for service, names in sorted(found.items())
+    }
+
+
+def service_capabilities(
+    by_service: dict[str, list[TelemetryProfile]],
+) -> dict[str, TelemetryCapability]:
+    """Each service's combined capability (see ``combined_capability``)."""
+    return {service: combined_capability(names) for service, names in by_service.items()}

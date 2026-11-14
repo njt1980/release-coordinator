@@ -39,6 +39,7 @@ from src.core.models import (
     normalize_workspace_ids,
     telemetry_scope_of,
 )
+from src.core.telemetry_capability import CollectorSource
 from src.tools.baseline_store import BaselineScope
 
 _POLICY_SUFFIX: Final[str] = ".yaml"
@@ -216,7 +217,7 @@ class UnobservableProtocolExemption(_StrictModel):
     A radius service talking only protocols outside the telemetry's
     capability is never observed, so live coverage can't vouch for it
     (RUNTIME_UNOBSERVABLE). An entry accepts that blind spot for one
-    ``protocol`` (as named in assessments: ``amqp``, ``amqps``,
+    ``protocol`` (as named in assessments: ``amqp``, ``amqps``, ``servicebus``,
     ``unknown``...) until ``expires_on`` (UTC, inclusive), with a reason:
     for example that the service's consumers were checked by hand. It never
     makes the protocol observable, and a silent-service allowance never
@@ -386,6 +387,11 @@ class ProjectPolicy(_StrictModel):
     pull requests changing nothing but contract files) or ``interfaces``
     (code changes too, when every caller reaches the changed services
     through a shared contract); see ``coordinator.contracts``.
+    ``telemetry_collector_source`` says what feeds an OpenTelemetry
+    Collector's rows (``otelc-…``), which don't say it themselves: ``beyla``
+    or ``otel_sdk`` (an application's SDK, whose capability is unverified,
+    so it never shows a protocol as observable). It picks the capability
+    profile that judges LIVE_UNOBSERVABLE for those services.
     """
 
     policy_version: int = Field(ge=1)
@@ -419,6 +425,7 @@ class ProjectPolicy(_StrictModel):
     external_ai: bool = True
     service_owners: list[ServiceOwner] = Field(default_factory=list)
     contract_scope: ContractScope = ContractScope.STRICT
+    telemetry_collector_source: CollectorSource = CollectorSource.OTEL_SDK
 
     @field_validator("kubernetes_api_server")
     @classmethod

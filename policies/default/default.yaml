@@ -53,6 +53,12 @@ runtime_lookback_days: 7
 # within this many minutes (5..1440), unless listed in silent_services.
 max_telemetry_age_minutes: 60
 
+# What feeds the OpenTelemetry Collector's rows (otelc-...), which don't say:
+# here the lab's Beyla DaemonSet. It picks the capability profile that decides
+# which protocols telemetry can see (LIVE_UNOBSERVABLE); otel_sdk, the
+# default, proves none.
+telemetry_collector_source: beyla
+
 # External destinations called on purpose. Each rule names exactly one of
 # host, host_suffix (".example.com") or cidr, with a reason. Host rules
 # never match a bare IP, so an IP-only sighting of npm still blocks.

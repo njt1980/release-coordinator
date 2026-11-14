@@ -29,6 +29,10 @@ required_sources: [STATIC_CODE, K8S_MANIFEST, RUNTIME_TELEMETRY]
 runtime_evidence: live
 runtime_lookback_days: 1
 max_telemetry_age_minutes: 60
+# The collector's rows come from the services' OpenTelemetry SDKs, whose
+# capability is unverified: a protocol counts as observable only when a
+# service's own telemetry shows another profile.
+telemetry_collector_source: otel_sdk
 
 # Contract evidence (.proto) verifies only pull requests that change nothing
 # but contract files.

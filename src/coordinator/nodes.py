@@ -106,7 +106,12 @@ from src.orchestration.review import (
 from src.tools.devops_extractor import CommitComparison, DevOpsExtractor
 from src.tools.review_store import ReviewStoreCorruptError, default_review_store
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
-from src.coordinator.observability import observability_gaps
+from src.coordinator.observability import (
+    observability_gaps,
+    service_capabilities,
+    service_profiles,
+)
+from src.core.telemetry_capability import CollectorSource
 from src.coordinator.test_scope import suggested_test_scope
 from src.tools.telemetry_extractor import TelemetryExtractor
 
@@ -990,9 +995,42 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         drift_issues, drift = live_drift_issues(state, workspace_id, observed)
         issues.extend(drift_issues)
     now = utc_now()
-    blind = unobservable_protocols(graph.edges, radius) if graph is not None else {}
+    profiles = (
+        extractor.get_role_profiles(
+            policy.runtime_lookback_days if policy else config.DEFAULT_RUNTIME_LOOKBACK_DAYS,
+            policy.telemetry_scope if policy else None,
+        )
+        if not is_mock and graph is not None
+        else None
+    )
+    by_service = (
+        service_profiles(
+            graph,
+            baseline_identity_context(_scope(state).tenant, graph),
+            profiles,
+            policy.telemetry_collector_source if policy else CollectorSource.OTEL_SDK,
+        )
+        if graph is not None and profiles is not None
+        else None
+    )
+    blind = (
+        unobservable_protocols(
+            graph.edges,
+            radius,
+            service_capabilities=None if by_service is None else service_capabilities(by_service),
+        )
+        if graph is not None
+        else {}
+    )
     coverage = live_coverage(policy, observed, radius, now, blind).model_copy(
-        update={"sampled_sources": extractor.sampled_sources}
+        update={
+            "sampled_sources": extractor.sampled_sources,
+            "telemetry_profiles": {
+                service: [name.value for name in names]
+                for service, names in (by_service or {}).items()
+                if service in radius
+            },
+        }
     )
     if coverage.uncovered_services and not is_mock and policy is not None:
         coverage = with_unscoped_sources(
@@ -1013,20 +1051,15 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
     else:
         runtime_state, why = live_runtime_state(policy, coverage, now)
     gaps = None
-    if not is_mock and graph is not None:
-        profiles = extractor.get_role_profiles(
-            policy.runtime_lookback_days if policy else config.DEFAULT_RUNTIME_LOOKBACK_DAYS,
-            policy.telemetry_scope if policy else None,
+    if graph is not None and profiles is not None:
+        gaps = observability_gaps(
+            graph,
+            baseline_identity_context(_scope(state).tenant, graph),
+            profiles,
+            result.items,
+            now,
+            radius,
         )
-        if profiles is not None:
-            gaps = observability_gaps(
-                graph,
-                baseline_identity_context(_scope(state).tenant, graph),
-                profiles,
-                result.items,
-                now,
-                radius,
-            )
     status = TelemetryStatus(
         source="mock" if is_mock else "live",
         runtime_evidence=runtime_state,

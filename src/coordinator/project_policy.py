@@ -260,17 +260,31 @@ def unobservable_protocols(
     edges: Iterable[DependencyEdge],
     services: Collection[str],
     capability: TelemetryCapability = BEYLA,
+    service_capabilities: Mapping[str, TelemetryCapability] | None = None,
 ) -> dict[str, list[str]]:
     """Radius services the telemetry can't see, with the protocols why.
 
     A service is unobservable when it has dependencies (as caller or
-    callee) and every one is provably outside ``capability``: its address
-    names a protocol the telemetry can't parse, or one whose version is
-    unknown (``amqp://``), and telemetry never observed it. An edge whose
-    protocol is unknown because no address scheme was seen (a bare host)
-    proves nothing, so it keeps the service observable: it stays uncovered
-    if unseen.
+    callee) and every one is provably outside the telemetry's capability:
+    its address names a protocol the telemetry can't parse, or one whose
+    version is unknown (``amqp://``), and telemetry never observed it. An
+    edge whose protocol is unknown because no address scheme was seen (a
+    bare host) proves nothing, so it keeps the service observable: it
+    stays uncovered if unseen.
+
+    Without ``service_capabilities`` one ``capability`` judges every edge.
+    With it (per service, from the instrumentation stacks its telemetry
+    shows), an edge is observable when either end's capability sees its
+    protocol; an end with no telemetry of its own sees nothing.
     """
+    def sees(edge: DependencyEdge) -> bool:
+        if service_capabilities is None:
+            return capability.can_observe(edge.protocol)
+        return any(
+            end in service_capabilities and service_capabilities[end].can_observe(edge.protocol)
+            for end in (edge.source_service_id, edge.target_service_id)
+        )
+
     protocols: dict[str, set[str]] = {}
     observable: set[str] = set()
     for edge in edges:
@@ -278,7 +292,7 @@ def unobservable_protocols(
             if service not in services:
                 continue
             seen = DiscoveryMethod.RUNTIME_TELEMETRY in edge.discovery_methods
-            if seen or edge.protocol is None or capability.can_observe(edge.protocol):
+            if seen or edge.protocol is None or sees(edge):
                 observable.add(service)
             else:
                 protocols.setdefault(service, set()).add(edge.protocol)
@@ -486,11 +500,16 @@ def _unobservable_detail(coverage: LiveCoverage) -> str:
         f"{service} ({', '.join(protocols)})"
         for service, protocols in sorted(coverage.unobservable_services.items())
     )
+    profiles = "".join(
+        f" {service} is instrumented with {', '.join(names)}."
+        for service, names in sorted(coverage.telemetry_profiles.items())
+        if service in coverage.unobservable_services and names
+    )
     return (
         "The configured telemetry can't see these services' protocols, so not seeing "
-        f"them proves nothing: {services}. Instrument them (OpenTelemetry or Application "
-        "Insights auto-instrumentation), or accept the blind spot per protocol under "
-        "exemptions.unobservable after checking their dependencies by hand."
+        f"them proves nothing: {services}.{profiles} Instrument them (OpenTelemetry or "
+        "Application Insights auto-instrumentation), or accept the blind spot per protocol "
+        "under exemptions.unobservable after checking their dependencies by hand."
     )
 
 

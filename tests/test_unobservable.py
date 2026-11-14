@@ -50,7 +50,7 @@ class WireProtocolTests(unittest.TestCase):
             "https+http://catalog-api": "https",
             "jdbc:postgresql://db:5432/app": "postgres",
             "amqp://eventbus:5672": "amqp",  # 0-9-1 or 1.0: the scheme doesn't say
-            "sb://bus.servicebus.windows.net": "amqps",
+            "sb://bus.servicebus.windows.net": "servicebus",
             "lb://vets-service": "http",
             "tcp://legacy:9000": "unknown",
             "eventbus:5672": None,
