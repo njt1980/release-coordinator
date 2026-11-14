@@ -197,6 +197,18 @@ class RegulatedService(_StrictModel):
         return SilentServiceExemption._namespaced_name(value)
 
 
+class ServiceOwner(_StrictModel):
+    """Who answers for one service (a team, a person, a mailing list)."""
+
+    service: str
+    owner: str = Field(min_length=1, max_length=200)
+
+    @field_validator("service")
+    @classmethod
+    def _namespaced_name(cls, value: str) -> str:
+        return SilentServiceExemption._namespaced_name(value)
+
+
 class UnobservableProtocolExemption(_StrictModel):
     """A protocol the configured telemetry can't see, accepted for review.
 
@@ -367,7 +379,8 @@ class ProjectPolicy(_StrictModel):
     false keeps the project's data from the external model (Anthropic's
     Claude API): no advisory risk review (ADVISORY_DISABLED) and no
     assistant answers about the project. When true, what is sent is
-    redacted first (``core.redaction``).
+    redacted first (``core.redaction``). ``service_owners`` name who answers
+    for each service; the review queue shows them.
     """
 
     policy_version: int = Field(ge=1)
@@ -399,6 +412,7 @@ class ProjectPolicy(_StrictModel):
     source_control: SourceControl | None = None
     regulated_services: list[RegulatedService] = Field(default_factory=list)
     external_ai: bool = True
+    service_owners: list[ServiceOwner] = Field(default_factory=list)
 
     @field_validator("kubernetes_api_server")
     @classmethod
@@ -486,6 +500,10 @@ class ProjectPolicy(_StrictModel):
         if len(set(services)) != len(services):
             raise ValueError("regulated_services must list each service once")
         return self
+
+    def owner_of(self, service: str) -> str | None:
+        """The owner recorded for ``<namespace>/<name>``, if any."""
+        return next((entry.owner for entry in self.service_owners if entry.service == service), None)
 
     def regulated_service(self, service: str) -> RegulatedService | None:
         """Return the regulated-service entry for ``<namespace>/<name>``, if any."""

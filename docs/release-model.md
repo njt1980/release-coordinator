@@ -134,6 +134,13 @@ significant change: decide whether regulatory review is needed". The
 verdict is unchanged; whether the change is significant is the
 manufacturer's decision, recorded with the release decision.
 
+`service_owners` maps services (`<namespace>/<name>`) to who answers for
+them; the dependency review's "Next to review" queue names them (a
+dependency belongs to its caller). The queue lists every unanswered item,
+weakest evidence first: answers needing re-review, open questions, weak
+evidence, a single source, then corroborated dependencies; ties go to the
+more critical service.
+
 `source_control` (organization URL and project) is where pull request
 revisions are verified. It comes only from the policy, never from the
 caller; without it every assessment is `REVISION_UNVERIFIED`.

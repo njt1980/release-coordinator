@@ -16,6 +16,60 @@ const STATUS = {
 };
 
 const short = (id) => (id ?? "").split(":").pop();
+const rowId = (key) => `review-item-${key}`;
+
+// Queue levels, weakest evidence first (see src/orchestration/review_queue.py).
+const LEVELS = {
+  1: { label: "Re-review", className: "bg-red-50 text-red-700 ring-red-200" },
+  2: { label: "Question", className: "bg-amber-50 text-amber-800 ring-amber-200" },
+  3: { label: "Weak evidence", className: "bg-amber-50 text-amber-800 ring-amber-200" },
+  4: { label: "One source", className: "bg-sky-50 text-sky-800 ring-sky-200" },
+  5: { label: "Corroborated", className: "bg-slate-100 text-slate-600 ring-slate-200" },
+};
+const QUEUE_SHOWN = 10;
+
+function Queue({ queue, onOpen }) {
+  const [all, setAll] = useState(false);
+  if (!queue?.length) return null;
+  const shown = all ? queue : queue.slice(0, QUEUE_SHOWN);
+  return (
+    <section aria-labelledby="queue-heading">
+      <h2 id="queue-heading" className="text-lg font-semibold text-slate-900">Next to review</h2>
+      <p className="text-sm text-slate-500">
+        {queue.length} unanswered item(s), weakest evidence first; ties go to the more critical service.
+      </p>
+      <ol className="mt-3 divide-y divide-slate-100 rounded-xl bg-white ring-1 ring-slate-200">
+        {shown.map((item) => {
+          const level = LEVELS[item.level] ?? LEVELS[5];
+          return (
+            <li key={item.key} className="flex flex-col gap-1 px-4 py-3 sm:flex-row sm:items-center sm:gap-3">
+              <span className="w-6 shrink-0 text-sm text-slate-400">{item.position}</span>
+              <span className={`w-fit shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ${level.className}`}>
+                {level.label}
+              </span>
+              <div className="min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={() => onOpen(item)}
+                  className="text-left text-sm font-medium text-brand-700 hover:underline [overflow-wrap:anywhere]"
+                >
+                  {item.title}
+                </button>
+                <p className="text-xs text-slate-500 [overflow-wrap:anywhere]">{item.why}</p>
+              </div>
+              <span className="shrink-0 text-xs text-slate-600">{item.owners.length ? item.owners.join(", ") : "no owner recorded"}</span>
+            </li>
+          );
+        })}
+      </ol>
+      {queue.length > QUEUE_SHOWN && (
+        <button type="button" onClick={() => setAll(!all)} className="mt-2 text-xs font-medium text-brand-600 hover:text-brand-700">
+          {all ? "Show the first ten" : `Show all ${queue.length}`}
+        </button>
+      )}
+    </section>
+  );
+}
 
 function loadSaved() {
   try {
@@ -139,7 +193,7 @@ function Question({ question, services, answer, reviewer }) {
     return answer(body);
   };
   return (
-    <li className="rounded-xl bg-white p-4 ring-1 ring-slate-200">
+    <li id={rowId(question.subject.key)} className="scroll-mt-24 rounded-xl bg-white p-4 ring-1 ring-slate-200">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <h3 className="min-w-0 flex-1 font-mono text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">{question.subject.key}</h3>
         <Status status={question.status} />
@@ -168,7 +222,7 @@ function Dependency({ row, answer, reviewer }) {
   const onSubmit = (action, reason) => answer({ subject: row.subject, verdict: action.verdict, reason: reason || null });
   const settled = ["confirmed", "removed", "added"].includes(row.status);
   return (
-    <li className="rounded-xl bg-white p-4 ring-1 ring-slate-200">
+    <li id={rowId(row.subject.key)} className="scroll-mt-24 rounded-xl bg-white p-4 ring-1 ring-slate-200">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <h3 className="min-w-0 flex-1 text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">
           {short(row.source_id)} → {short(row.target_id)}
@@ -391,6 +445,19 @@ export default function Review() {
                 ))}
               </ul>
             )}
+
+            <Queue
+              queue={review.queue}
+              onOpen={(item) => {
+                if (item.kind === "dependency") setFilter("all");
+                // Let the filter render the row, then bring it into view.
+                setTimeout(() => {
+                  const element = document.getElementById(rowId(item.key));
+                  element?.scrollIntoView({ behavior: "smooth", block: "start" });
+                  element?.focus?.();
+                }, 0);
+              }}
+            />
 
             <section aria-labelledby="questions-heading">
               <h2 id="questions-heading" className="text-lg font-semibold text-slate-900">Questions</h2>
