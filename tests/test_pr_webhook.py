@@ -387,6 +387,7 @@ class PrAssessmentWebhookTests(BaselineFixture):
         self.assertEqual(briefing.headline, "No-go: risk found (MODEL_REJECTED).")
         (summary,) = [s for s in webhooks.list_pr_assessments() if s.job_id == "job-1"]
         self.assertEqual((summary.pr_id, summary.headline), ("PR-2048", briefing.headline))
+        self.assertEqual((summary.tenant, summary.project_id), (record.tenant, record.project_id))
 
     def test_job_records_failure_and_unknown_job_is_404(self) -> None:
         coordinator = MagicMock()
