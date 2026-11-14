@@ -13,7 +13,7 @@ import re
 from datetime import date
 from enum import Enum
 from pathlib import Path
-from typing import Final, Self
+from typing import Final, Literal, Self
 
 import yaml
 from pydantic import (
@@ -255,6 +255,23 @@ class EgressRule(_StrictModel):
             return False
 
 
+class SourceControl(_StrictModel):
+    """Where the project's code lives, as the operator configured it.
+
+    Pull request revisions are verified against this organization and
+    project only, never against a caller-supplied URL.
+    """
+
+    provider: Literal["azure_devops"] = "azure_devops"
+    organization_url: str = Field(pattern=r"^https://[^\s/]+(?:/[^\s/]+)*$")
+    project: str = Field(min_length=1)
+
+    @field_validator("organization_url")
+    @classmethod
+    def _strip_trailing_slash(cls, value: str) -> str:
+        return value.rstrip("/")
+
+
 class Exemptions(_StrictModel):
     """Explicit allowlist of evidence gaps a project accepts, each justified."""
 
@@ -282,7 +299,8 @@ class ProjectPolicy(_StrictModel):
     ``runtime_lookback_days`` is how far back every telemetry query reads.
     ``max_telemetry_age_minutes`` bounds how old the newest live row may be
     for live evidence to count. ``egress`` lists external destinations the
-    project calls on purpose.
+    project calls on purpose. ``source_control`` is where pull request
+    revisions are verified; without it they can't be (REVISION_UNVERIFIED).
     """
 
     policy_version: int = Field(ge=1)
@@ -309,6 +327,7 @@ class ProjectPolicy(_StrictModel):
         default=config.DEFAULT_MAX_TELEMETRY_AGE_MINUTES, ge=5, le=1440
     )
     egress: list[EgressRule] = Field(default_factory=list)
+    source_control: SourceControl | None = None
 
     @field_validator("kubernetes_api_server")
     @classmethod

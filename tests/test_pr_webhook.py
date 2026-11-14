@@ -34,10 +34,17 @@ from src.core.models import (
 from src.tools.baseline_store import BaselineScope, BaselineStore, new_snapshot_id
 from src.tools.policy_store import LoadedPolicy, PolicyStore
 from src.webhooks import PrAssessmentJob, PullRequestWebhook
+from tests.fake_devops import FakeDevOps, sha, url
 
+BASE = sha("3f1c2aa")
+HEAD = sha("9b7e410c0ffee")
+OTHER_BASE = sha("beefcafe")
+NEWER_BASE = sha("4444444")
+OLDER_BASE = sha("1111111")
+DIVERGED_BASE = sha("5555555")
 URN = "urn:release-coord:acme:prod:aks-1:shop"
 SHOP_REVISION = ScannedRevision(
-    repository="Shop", branch="main", commit_sha="3f1c2aa" + "0" * 33
+    repository="Shop", branch="main", commit_sha=BASE
 )
 SCAN = ScanContext(
     environment="prod",
@@ -91,6 +98,9 @@ runtime_evidence: baseline
 kubernetes_api_server: https://aks-1.example.azmk8s.io
 telemetry_cluster:
   value: aks-1
+source_control:
+  organization_url: https://dev.azure.com/acme
+  project: Shop
 exemptions:
   files:
     - pattern: "docs/*"
@@ -173,8 +183,8 @@ class MapChangedFilesTests(unittest.TestCase):
 def _payload(**overrides: Any) -> PullRequestWebhook:
     fields: dict[str, Any] = {
         "pr_id": "PR-2048",
-        "base_sha": "3f1c2aa",
-        "head_sha": "9b7e410c0ffee",
+        "base_sha": BASE,
+        "head_sha": HEAD,
         "repository": "shop",
         "changed_files": ["src/order-service/routes/root.js", "docs/../../x"],
         "change_type": "breaking",
@@ -194,6 +204,7 @@ class PullRequestWebhookPayloadTests(unittest.TestCase):
     def test_rejects_malformed_payloads(self) -> None:
         for overrides in [
             {"base_sha": "not-a-sha"},
+            {"base_sha": "3f1c2aa"},  # abbreviated SHAs can't be verified
             {"changed_files": []},
             {"changed_files": ["  "]},
             {"change_type": "maybe"},
@@ -243,7 +254,9 @@ class PrAssessmentWebhookTests(unittest.TestCase):
             confidence_score=0.7,
             last_observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
-        return KnowledgeGraph(services=SERVICES, edges=[edge], discovery=REPORTS, scan=scan)
+        return KnowledgeGraph(
+            services=SERVICES, edges=[edge], discovery=REPORTS, scan=scan, service_environments=[]
+        )
 
     def _write_baseline(self) -> str:
         return self.store.write(self.scope, self._graph()).snapshot_id
@@ -289,7 +302,7 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         self.assertEqual(event["target_service"], _id("order-service"))
         self.assertEqual(
             (event["repository"], event["base_sha"], event["head_sha"]),
-            ("shop", "3f1c2aa", "9b7e410c0ffee"),
+            ("shop", BASE, HEAD),
         )
         self.assertEqual(
             event["changed_files"], ["src/order-service/routes/root.js", "docs/../../x"]
@@ -357,14 +370,24 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 404)
 
     def _run_graph(
-        self, payload: PullRequestWebhook, verdict: RiskAssessment
+        self,
+        payload: PullRequestWebhook,
+        verdict: RiskAssessment,
+        devops: FakeDevOps | None = None,
     ) -> tuple[dict[str, Any], MagicMock]:
         tasks = BackgroundTasks()
         webhooks.pr_assessment_webhook(payload, tasks)
         state = tasks.tasks[0].args[2]
+        # By default the PR is real: its base is the scanned revision, the
+        # head follows it, and the commits change exactly the listed files.
+        devops = devops or FakeDevOps(
+            history=[payload.base_sha, payload.head_sha],
+            changes={(payload.base_sha, payload.head_sha): list(payload.changed_files)},
+        )
         with (
             patch.object(coordinator_nodes, "BASELINE_STORE", self.store),
             patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls,
+            patch.object(coordinator_nodes, "DevOpsExtractor", devops),
         ):
             reasoner_cls.return_value.assess.return_value = verdict
             final = webhooks.coordinator_app.invoke(state)
@@ -396,8 +419,8 @@ class PrAssessmentWebhookTests(unittest.TestCase):
             AssessmentEvidence(
                 pr_id="PR-2048",
                 repository="shop",
-                base_sha="3f1c2aa",
-                head_sha="9b7e410c0ffee",
+                base_sha=BASE,
+                head_sha=HEAD,
                 baseline_snapshot_id=snapshot_id,
                 baseline_created_at=final["baseline_created_at"],
                 changed_files=["src/order-service/routes/root.js"],
@@ -407,6 +430,7 @@ class PrAssessmentWebhookTests(unittest.TestCase):
                 baseline_environment="prod",
                 baseline_cluster="aks-1",
                 scanned_revisions=SCAN.scanned_revisions,
+                head_scanned=True,
             ),
         )
         self.assertIsNotNone(assessment.evidence.baseline_created_at)
@@ -473,10 +497,16 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         )
         state = tasks.tasks[0].args[2]
         later = datetime.now(timezone.utc) + timedelta(hours=25)
+        payload = _payload()
+        devops = FakeDevOps(
+            history=[payload.base_sha, payload.head_sha],
+            changes={(payload.base_sha, payload.head_sha): ["src/order-service/routes/root.js"]},
+        )
         with (
             patch.object(coordinator_nodes, "BASELINE_STORE", self.store),
             patch.object(coordinator_nodes, "utc_now", return_value=later),
             patch.object(coordinator_nodes, "RiskReasoner") as reasoner_cls,
+            patch.object(coordinator_nodes, "DevOpsExtractor", devops),
         ):
             final = webhooks.coordinator_app.invoke(state)
 
@@ -587,7 +617,7 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         )
         other_base = _payload(
             repository="Shop",
-            base_sha="beefcafe",
+            base_sha=OTHER_BASE,
             changed_files=["src/order-service/routes/root.js"],
         )
 
@@ -595,7 +625,188 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         other, _ = self._run_graph(other_base, verdict)
 
         self.assertNotIn("differs", same["evidence_report"])
-        self.assertIn("[PR base beefcafe differs]", other["evidence_report"])
+        self.assertIn("[PR base " + OTHER_BASE + " differs]", other["evidence_report"])
+
+    # --- Verified revisions and the head scan (review finding #4) ---
+
+    ORDER_FILE = "src/order-service/routes/root.js"
+
+    def _assess(self, devops: FakeDevOps, **payload: Any) -> tuple[dict[str, Any], Any]:
+        self._write_baseline()
+        verdict = RiskAssessment(risk_score=0.1, approved=True, justification="why")
+        final, _ = self._run_graph(
+            _payload(**{"changed_files": [self.ORDER_FILE], **payload}), verdict, devops
+        )
+        return final, final["release_assessment"]
+
+    def _codes(self, assessment: Any) -> list[ReasonCode]:
+        return list(assessment.reason_codes)
+
+    def _issue(self, assessment: Any, code: ReasonCode) -> str:
+        return " | ".join(i.detail for i in assessment.issues if i.code is code)
+
+    def _real_pr(self, **kwargs: Any) -> FakeDevOps:
+        return FakeDevOps(
+            history=[BASE, HEAD],
+            changes={(BASE, HEAD): [self.ORDER_FILE]},
+            **kwargs,
+        )
+
+    def test_a_dependency_the_head_adds_is_assessed(self) -> None:
+        # The reviewer's case: without the head scan this PR would be
+        # assessed on the old topology and the new call would be invisible.
+        devops = self._real_pr(
+            head_references={
+                "src/order-service": [url("order-service", "http://fraud-check:8080/score")]
+            }
+        )
+        final, assessment = self._assess(devops)
+
+        self.assertEqual(devops.scanned[0][1], {"src/order-service"})
+        self.assertEqual(devops.scanned[0][0].commit_sha, sha(HEAD))
+        self.assertEqual(
+            [(c.source_id, c.target_id) for c in assessment.evidence.dependencies_added],
+            [(_id("order-service"), "unresolved:fraud-check")],
+        )
+        self.assertIn(ReasonCode.DISCOVERY_GAP, self._codes(assessment))
+        self.assertIn("unresolved:fraud-check", self._issue(assessment, ReasonCode.DISCOVERY_GAP))
+        self.assertIn("Dependencies Added by the PR:** " + _id("order-service"), final["evidence_report"])
+
+    def test_a_new_dependency_on_a_registered_service_joins_the_radius(self) -> None:
+        devops = self._real_pr(
+            head_references={"src/order-service": [url("order-service", "http://rabbitmq:15672/api")]}
+        )
+        final, assessment = self._assess(devops)
+
+        self.assertIn(_id("rabbitmq"), final["downstream_services"])
+        self.assertEqual(
+            self._codes(assessment), [ReasonCode.COMPATIBILITY_UNVERIFIED]
+        )
+        self.assertTrue(assessment.evidence.head_scanned)
+
+    def test_a_dependency_the_head_drops_leaves_the_radius(self) -> None:
+        devops = FakeDevOps(
+            history=[BASE, HEAD],
+            changes={(BASE, HEAD): ["src/store-front/src/App.vue"]},
+        )
+        final, assessment = self._assess(devops, changed_files=["src/store-front/src/App.vue"])
+
+        self.assertEqual(
+            [(c.source_id, c.target_id) for c in assessment.evidence.dependencies_removed],
+            [(_id("store-front"), _id("order-service"))],
+        )
+        self.assertNotIn(_id("order-service"), final["downstream_services"])
+
+    def test_base_that_is_not_an_ancestor_of_the_head_is_unverified(self) -> None:
+        devops = FakeDevOps(history=[HEAD, BASE])
+        _, assessment = self._assess(devops)
+        self.assertIn(ReasonCode.REVISION_UNVERIFIED, self._codes(assessment))
+        self.assertIn("is not an ancestor", self._issue(assessment, ReasonCode.REVISION_UNVERIFIED))
+
+    def test_changed_files_must_match_the_commits(self) -> None:
+        devops = FakeDevOps(
+            history=[BASE, HEAD],
+            changes={(BASE, HEAD): [self.ORDER_FILE, "src/payments/x.py"]},
+        )
+        _, assessment = self._assess(devops)
+        detail = self._issue(assessment, ReasonCode.REVISION_UNVERIFIED)
+        self.assertIn("changed by the commits but not listed: src/payments/x.py", detail)
+
+    def test_without_source_control_in_the_policy_nothing_is_verified(self) -> None:
+        self.policy = self._write_policy(
+            POLICY_YAML.replace(
+                "source_control:\n  organization_url: https://dev.azure.com/acme\n  project: Shop\n", ""
+            )
+        )
+        devops = self._real_pr()
+        _, assessment = self._assess(devops)
+        self.assertIn("names no source_control", self._issue(assessment, ReasonCode.REVISION_UNVERIFIED))
+        self.assertFalse(assessment.evidence.head_scanned)
+        self.assertEqual(devops.scanned, [])
+
+    def test_commits_that_cannot_be_read_are_unverified(self) -> None:
+        _, assessment = self._assess(FakeDevOps(history=[], fail_compare=True))
+        self.assertIn("commit not found", self._issue(assessment, ReasonCode.REVISION_UNVERIFIED))
+
+    def test_a_head_that_cannot_be_scanned_is_unverified(self) -> None:
+        _, assessment = self._assess(self._real_pr(fail_scan=True))
+        self.assertIn("couldn't be scanned", self._issue(assessment, ReasonCode.REVISION_UNVERIFIED))
+        self.assertFalse(assessment.evidence.head_scanned)
+
+    def test_a_service_missing_at_the_head_is_unverified(self) -> None:
+        _, assessment = self._assess(self._real_pr(missing_roots={"src/order-service"}))
+        self.assertIn("no longer a service boundary", self._issue(assessment, ReasonCode.REVISION_UNVERIFIED))
+
+    def test_base_ahead_of_the_baseline_blocks_only_if_the_radius_changed(self) -> None:
+        def run(lag_files: list[str]) -> Any:
+            devops = FakeDevOps(
+                history=[BASE, NEWER_BASE, HEAD],
+                changes={
+                    (NEWER_BASE, HEAD): [self.ORDER_FILE],
+                    (BASE, NEWER_BASE): lag_files,
+                },
+            )
+            return self._assess(devops, base_sha=NEWER_BASE)[1]
+
+        touched = run(["src/store-front/src/App.vue"])  # store-front is upstream
+        self.assertIn(ReasonCode.BASELINE_REVISION_MISMATCH, self._codes(touched))
+        self.assertIn(_id("store-front"), self._issue(touched, ReasonCode.BASELINE_REVISION_MISMATCH))
+        unrelated = run(["services/payments/api/main.py"])
+        self.assertNotIn(ReasonCode.BASELINE_REVISION_MISMATCH, self._codes(unrelated))
+
+    def test_baseline_ahead_of_the_base_blocks_only_if_the_targets_changed(self) -> None:
+        def run(lag_files: list[str]) -> Any:
+            # The PR branched at OLDER_BASE; main then moved on to the
+            # baseline's commit BASE, which the head doesn't contain.
+            devops = FakeDevOps(
+                history=[OLDER_BASE, BASE],
+                branch=[HEAD],
+                changes={
+                    (OLDER_BASE, HEAD): [self.ORDER_FILE],
+                    (OLDER_BASE, BASE): lag_files,
+                },
+            )
+            return self._assess(devops, base_sha=OLDER_BASE)[1]
+
+        target_changed = run([self.ORDER_FILE])
+        self.assertIn(ReasonCode.BASELINE_REVISION_MISMATCH, self._codes(target_changed))
+        radius_changed = run(["src/store-front/src/App.vue"])
+        self.assertNotIn(ReasonCode.BASELINE_REVISION_MISMATCH, self._codes(radius_changed))
+
+    def test_a_head_that_merged_the_baseline_commit_has_no_lag(self) -> None:
+        # The branch started at OLDER_BASE, then merged main up to the
+        # baseline's commit (BASE): the head contains what the baseline saw.
+        devops = FakeDevOps(
+            history=["1111111", "3f1c2aa", "9b7e410c0ffee"],
+            changes={
+                ("1111111", "9b7e410c0ffee"): [self.ORDER_FILE],
+                ("1111111", "3f1c2aa"): [self.ORDER_FILE],
+            },
+        )
+        _, assessment = self._assess(devops, base_sha=OLDER_BASE)
+        self.assertNotIn(ReasonCode.BASELINE_REVISION_MISMATCH, self._codes(assessment))
+
+    def test_a_base_diverged_from_the_baseline_blocks(self) -> None:
+        devops = FakeDevOps(
+            history=[DIVERGED_BASE, HEAD],
+            unrelated={BASE},
+            changes={(DIVERGED_BASE, HEAD): [self.ORDER_FILE]},
+        )
+        _, assessment = self._assess(devops, base_sha=DIVERGED_BASE)
+        self.assertIn("has diverged", self._issue(assessment, ReasonCode.BASELINE_REVISION_MISMATCH))
+
+    def test_a_baseline_without_recorded_environments_blocks(self) -> None:
+        graph = self._graph().model_copy(update={"service_environments": None})
+        self.store.write(self.scope, graph)
+        verdict = RiskAssessment(risk_score=0.1, approved=True, justification="why")
+        final, _ = self._run_graph(
+            _payload(changed_files=[self.ORDER_FILE]), verdict, self._real_pr()
+        )
+        assessment = final["release_assessment"]
+        self.assertIn(
+            "predates recorded container environments",
+            self._issue(assessment, ReasonCode.BASELINE_REVISION_MISMATCH),
+        )
 
     def test_coordinator_state_is_a_valid_pull_request(self) -> None:
         state = webhooks.build_coordinator_state(

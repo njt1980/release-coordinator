@@ -40,7 +40,9 @@ router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
 BASELINE_STORE = default_store()
 POLICY_STORE = default_policy_store()
 
-_GIT_SHA_PATTERN = r"^[0-9a-fA-F]{7,64}$"
+# Full SHA-1 or SHA-256 commit IDs only: source control verifies them, and
+# Azure DevOps rejects abbreviated IDs.
+_GIT_SHA_PATTERN = r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$"
 
 
 class PullRequestWebhook(BaseModel):

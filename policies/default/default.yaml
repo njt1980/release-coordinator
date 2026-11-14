@@ -7,7 +7,7 @@
 # succeeded in a baseline under 24h old that scanned the environment and
 # cluster below, runtime evidence must come from a live telemetry query,
 # and nothing is exempt.
-policy_version: 4
+policy_version: 5
 tenant: default
 project_id: default
 
@@ -25,6 +25,14 @@ kubernetes_api_server: https://rc-cluster-releasecoordinat-48a721-ao9498jv.hcp.e
 telemetry_cluster:
   attribute: k8s.cluster.name
   value: MC_ReleaseCoordinatorLab_RC-Cluster_eastus
+
+# Where the project's code lives. Pull request revisions are verified here
+# (the base is an ancestor of the head, the changed files are what the
+# commits change) and the changed services are scanned at the head. Never
+# taken from the caller. Without it every assessment is REVISION_UNVERIFIED.
+source_control:
+  organization_url: https://dev.azure.com/thomasnimel
+  project: Release_Coordinator
 
 # Hours; 1..24. A project may require fresher baselines, never older ones.
 max_baseline_age_hours: 24

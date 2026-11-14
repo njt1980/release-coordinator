@@ -11,13 +11,18 @@ from urllib.parse import urlsplit
 import yaml
 
 from azure.devops.connection import Connection
-from azure.devops.released.git import GitVersionDescriptor  # type: ignore[import-untyped]
+from azure.devops.released.git import (  # type: ignore[import-untyped]
+    GitBaseVersionDescriptor,
+    GitTargetVersionDescriptor,
+    GitVersionDescriptor,
+)
 from azure.identity import DefaultAzureCredential
 from msrest.authentication import BasicTokenAuthentication
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.core.models import DiscoveryResult, ScannedRevision
-from src.core.service_ids import is_private_dns_host
+from src.core.env_names import is_endpoint_variable
+from src.core.service_ids import env_var_reference, is_private_dns_host
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
     VERIFY_TIMEOUT_SECONDS,
@@ -102,21 +107,6 @@ _ENV_VAR_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
         rf"(?<![\w.])(?:\$_)?ENV(?:\.fetch\(|\[)\s*{_QUOTED_ENV_NAME}",
     )
 )
-# Final name tokens of variables that hold the address of another service.
-_ENDPOINT_ENV_SUFFIXES = {
-    "ADDR",
-    "ADDRESS",
-    "API",
-    "DSN",
-    "ENDPOINT",
-    "ENDPOINTS",
-    "HOST",
-    "HOSTNAME",
-    "URI",
-    "URL",
-    "URLS",
-}
-_ENV_NAME_TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
 
 
 class ReferenceKind(str, Enum):
@@ -138,6 +128,17 @@ class EndpointReference(BaseModel):
     endpoint: str = Field(min_length=1)
     file_path: str = Field(min_length=1)
     kind: ReferenceKind = ReferenceKind.URL
+
+    def dependency_target(self) -> str | None:
+        """Return the edge target this reference names.
+
+        A URL is reduced to its hostname; an environment variable becomes a
+        per-service ``env:`` reference, resolved later through the
+        variable's Kubernetes-configured value when one is known.
+        """
+        if self.kind is ReferenceKind.ENV_VAR:
+            return env_var_reference(self.service_name, self.endpoint)
+        return urlsplit(self.endpoint).hostname or None
 
 
 class BoundarySource(str, Enum):
@@ -180,12 +181,54 @@ class RepositoryScan(BaseModel):
     services: list[ServiceScan] = Field(default_factory=list)
 
 
+class CommitComparison(BaseModel):
+    """How two commits of one repository relate, as the server reports it.
+
+    ``merge_bases`` are the best common ancestors of ``base`` and
+    ``target``; ``base`` is an ancestor of ``target`` exactly when it is
+    one of them. ``changed_paths`` are the repository-relative paths (no
+    leading slash) changed from the merge base to ``target``: what a pull
+    request from ``base`` to ``target`` changes.
+    """
+
+    repository: str = Field(min_length=1)
+    base: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+    merge_bases: list[str] = Field(default_factory=list)
+    changed_paths: list[str] = Field(default_factory=list)
+
+    @property
+    def base_is_ancestor(self) -> bool:
+        """Whether ``base`` is an ancestor of (or equal to) ``target``."""
+        return self.base == self.target or self.base in self.merge_bases
+
+
+# Page size for commit diffs; the server's maximum.
+_DIFF_PAGE_SIZE: Final[int] = 2000
 _HEADS_PREFIX: Final[str] = "refs/heads/"
 
 
 def _commit_version(commit_sha: str) -> GitVersionDescriptor:
     """Return the descriptor that pins a read to ``commit_sha``."""
     return GitVersionDescriptor(version=commit_sha, version_type="commit")
+
+
+def _field(value: Any, snake: str, camel: str) -> Any:
+    """Read a field from an SDK model or the raw JSON dict some endpoints
+    return (commit diff changes arrive as camelCase dicts)."""
+    if isinstance(value, dict):
+        return value.get(camel, value.get(snake))
+    return getattr(value, snake, None)
+
+
+def _diff_path(change: Any) -> str | None:
+    """Return a commit diff change's file path, relative and without a
+    leading slash, or None for folders and entries without a path."""
+    item = _field(change, "item", "item")
+    if item is None or _field(item, "is_folder", "isFolder"):
+        return None
+    path = str(_field(item, "path", "path") or "").strip("/")
+    return path or None
 
 
 def resolve_default_branch_head(
@@ -427,23 +470,13 @@ def _is_noise_endpoint(endpoint: str) -> bool:
     return not _is_dependency_host(hostname)
 
 
-def _is_endpoint_env_var(name: str) -> bool:
-    """Return True for variable names that hold another service's address.
-
-    The final name token decides: ``SERVICE_URL``, ``PAYMENTS_API``,
-    ``orderServiceHost`` qualify; ``API_KEY``, ``NODE_ENV``, ``PORT`` do not.
-    """
-    tokens = [token for token in _ENV_NAME_TOKEN_SPLIT.split(name) if token]
-    return bool(tokens) and tokens[-1].upper() in _ENDPOINT_ENV_SUFFIXES
-
-
 def _extract_env_var_names(content: str) -> list[str]:
     """Return endpoint-like environment variables read in ``content``, in order."""
     found: list[tuple[int, str]] = []
     for pattern in _ENV_VAR_PATTERNS:
         found.extend((match.start(), match.group(1)) for match in pattern.finditer(content))
     names = [name for _, name in sorted(found)]
-    return [name for name in dict.fromkeys(names) if _is_endpoint_env_var(name)]
+    return [name for name in dict.fromkeys(names) if is_endpoint_variable(name)]
 
 
 def _extract_references(
@@ -681,6 +714,79 @@ class DevOpsExtractor:
             )
             return {}
 
+    def compare_commits(
+        self, repo_name: str, base: str, target: str
+    ) -> DiscoveryResult[CommitComparison]:
+        """Report how ``base`` and ``target`` relate and what ``target`` changes.
+
+        Read-only. Both commits must exist in the repository. Every page of
+        the diff is read, so ``changed_paths`` is complete.
+
+        Returns:
+            SUCCESS with one ``CommitComparison``, or FAILED when the
+            repository or a commit can't be found or the server can't be
+            read.
+        """
+        base, target = base.strip().lower(), target.strip().lower()
+        try:
+            _, git_client, project = self._get_clients()
+            repository = self._find_repository(git_client, project, repo_name)
+            if repository is None:
+                return DiscoveryResult[CommitComparison].failed(
+                    f"{repo_name}: repository was not found"
+                )
+            # Resolve to the full commit IDs the server knows, so an
+            # abbreviated SHA compares equal to the merge bases it returns.
+            base, target = (
+                (getattr(git_client.get_commit(sha, repository.id, project=project),
+                         "commit_id", None) or sha).lower()
+                for sha in (base, target)
+            )
+            merge_bases = [
+                (getattr(ref, "commit_id", None) or "").lower()
+                for ref in git_client.get_merge_bases(
+                    repository.id, base, target, project=project
+                )
+                or []
+            ]
+            changed: list[str] = []
+            skip = 0
+            while True:
+                diffs = git_client.get_commit_diffs(
+                    repository.id,
+                    project=project,
+                    diff_common_commit=True,
+                    top=_DIFF_PAGE_SIZE,
+                    skip=skip,
+                    base_version_descriptor=GitBaseVersionDescriptor(
+                        base_version=base, base_version_type="commit"
+                    ),
+                    target_version_descriptor=GitTargetVersionDescriptor(
+                        target_version=target, target_version_type="commit"
+                    ),
+                )
+                changes = list(getattr(diffs, "changes", None) or [])
+                changed.extend(path for path in map(_diff_path, changes) if path)
+                if getattr(diffs, "all_changes_included", True) or not changes:
+                    break
+                skip += len(changes)
+            return DiscoveryResult[CommitComparison].success(
+                [
+                    CommitComparison(
+                        repository=repo_name,
+                        base=base,
+                        target=target,
+                        merge_bases=[sha for sha in merge_bases if sha],
+                        changed_paths=list(dict.fromkeys(changed)),
+                    )
+                ]
+            )
+        except Exception as error:
+            logger.warning("Cannot compare %s %s..%s: %s", repo_name, base, target, error)
+            return DiscoveryResult[CommitComparison].failed(
+                f"{repo_name}: cannot compare {base[:12]}..{target[:12]}: {error}"
+            )
+
     def _repository_boundaries(
         self,
         git_client: Any,
@@ -705,12 +811,19 @@ class DevOpsExtractor:
             return _boundaries_from_manifest(parse_release_coord_manifest(content))
         return _infer_service_boundaries(file_paths, repo_name)
 
-    def scan_repository(self, repo_name: str) -> DiscoveryResult[RepositoryScan]:
+    def scan_repository(
+        self,
+        repo_name: str,
+        commit: ScannedRevision | None = None,
+        only_roots: set[str] | None = None,
+    ) -> DiscoveryResult[RepositoryScan]:
         """Find the services in a repository and the dependencies they reference.
 
-        The default branch is first resolved to one commit, and every file
-        is listed and read at that commit, so the recorded revision is
-        exactly what was scanned even if the branch moves meanwhile.
+        The default branch is first resolved to one commit (or ``commit`` is
+        read, such as a pull request's head), and every file is listed and
+        read at that commit, so the recorded revision is exactly what was
+        scanned even if the branch moves meanwhile. With ``only_roots``,
+        only the services whose root is listed are returned and read.
 
         Service boundaries come from ``release-coord.yaml`` when the
         repository has one, otherwise from directories (the root and its
@@ -743,13 +856,16 @@ class DevOpsExtractor:
                 return DiscoveryResult[RepositoryScan].failed(
                     f"{repo_name}: repository was not found"
                 )
-            try:
-                revision = resolve_default_branch_head(
-                    git_client, repository, project, repo_name
-                )
-            except ValueError as error:
-                logger.warning("Cannot pin %s to a commit: %s", repo_name, error)
-                return DiscoveryResult[RepositoryScan].failed(str(error))
+            if commit is None:
+                try:
+                    revision = resolve_default_branch_head(
+                        git_client, repository, project, repo_name
+                    )
+                except ValueError as error:
+                    logger.warning("Cannot pin %s to a commit: %s", repo_name, error)
+                    return DiscoveryResult[RepositoryScan].failed(str(error))
+            else:
+                revision = commit
             commit_sha = revision.commit_sha
 
             items = git_client.get_items(
@@ -772,6 +888,8 @@ class DevOpsExtractor:
                 return DiscoveryResult[RepositoryScan].failed(
                     f"{repo_name}: invalid release-coord.yaml: {error}"
                 )
+            if only_roots is not None:
+                boundaries = [b for b in boundaries if b.root in only_roots]
 
             references: dict[str, dict[tuple[ReferenceKind, str], EndpointReference]] = {
                 boundary.root: {} for boundary in boundaries

@@ -1,4 +1,5 @@
 import unittest
+from typing import Any
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -604,3 +605,59 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommitComparisonTests(unittest.TestCase):
+    """The adapter side of PR verification: full SHAs and every diff page."""
+
+    def _extractor(self, git: MagicMock) -> Any:
+        from src.tools.devops_extractor import DevOpsExtractor
+
+        extractor = DevOpsExtractor.__new__(DevOpsExtractor)
+        extractor._get_clients = lambda: (MagicMock(), git, "Shop")  # type: ignore[method-assign]
+        return extractor
+
+    def _change(self, path: str, folder: bool = False) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(item=SimpleNamespace(path=path, is_folder=folder))
+
+    def test_compare_resolves_full_shas_and_reads_every_page(self) -> None:
+        from types import SimpleNamespace
+
+        base, head = "a" * 40, "b" * 40
+        git = MagicMock()
+        git.get_repositories.return_value = [SimpleNamespace(name="Shop", id="r1")]
+        git.get_commit.side_effect = lambda sha, *_a, **_k: SimpleNamespace(
+            commit_id=base if base.startswith(sha) else head
+        )
+        git.get_merge_bases.return_value = [SimpleNamespace(commit_id=base.upper())]
+        git.get_commit_diffs.side_effect = [
+            SimpleNamespace(
+                changes=[self._change("/src/a.js"), self._change("/src", folder=True)],
+                all_changes_included=False,
+            ),
+            # The live API returns changes as raw camelCase dicts.
+            SimpleNamespace(
+                changes=[
+                    {"item": {"path": "/src/b.js", "gitObjectType": "blob"}, "changeType": "edit"},
+                    {"item": {"path": "/src", "isFolder": True}, "changeType": "edit"},
+                ],
+                all_changes_included=True,
+            ),
+        ]
+
+        result = self._extractor(git).compare_commits("Shop", "aaaaaaa", "bbbbbbb")
+
+        (comparison,) = result.items
+        self.assertEqual((comparison.base, comparison.target), (base, head))
+        self.assertTrue(comparison.base_is_ancestor)
+        self.assertEqual(comparison.changed_paths, ["src/a.js", "src/b.js"])
+        self.assertEqual(git.get_commit_diffs.call_args_list[1].kwargs["skip"], 2)
+
+    def test_compare_fails_explicitly(self) -> None:
+        git = MagicMock()
+        git.get_repositories.return_value = []
+        result = self._extractor(git).compare_commits("Shop", "a" * 7, "b" * 7)
+        self.assertEqual(result.items, [])
+        self.assertIn("repository was not found", result.errors[0])

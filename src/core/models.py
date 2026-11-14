@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Dict, Final, Generic, List, Literal, Optional, Self, TypeVar
 from urllib.parse import urlsplit
 
+from src.core.env_names import is_endpoint_variable, storable_endpoint_value
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -255,14 +256,16 @@ class ServiceEnvironment(BaseModel):
     ``variable_sources`` records where each readable value came from, as
     ``<kind>/<workload>/<container>:<source>`` entries. ``has_opaque_sources`` is true when a workload imports a whole
     Secret or a config map that couldn't be read (``envFrom``), so any name
-    may be set. Together they let a variable be proven unset: absent from
-    all three.
+    may be set. ``withheld_variables`` are readable names whose values a
+    stored snapshot leaves out (see ``for_storage``). Together they let a
+    variable be proven unset: absent from all of them.
     """
 
     service_id: str
     variables: Dict[str, str] = Field(default_factory=dict)
     variable_sources: Dict[str, List[str]] = Field(default_factory=dict)
     opaque_variables: List[str] = Field(default_factory=list)
+    withheld_variables: List[str] = Field(default_factory=list)
     has_opaque_sources: bool = False
 
     def is_unset(self, variable: str) -> bool:
@@ -271,6 +274,34 @@ class ServiceEnvironment(BaseModel):
             self.has_opaque_sources
             or variable in self.variables
             or variable in self.opaque_variables
+            or variable in self.withheld_variables
+        )
+
+    def for_storage(self) -> "ServiceEnvironment":
+        """Return the environment safe to write into a baseline snapshot.
+
+        Only endpoint-like variables (the ones dependency resolution reads)
+        keep a value, with credentials stripped (see
+        ``storable_endpoint_value``). Every other readable variable, and an
+        endpoint whose value carries a credential, is kept by name only in
+        ``withheld_variables``, so it still counts as set.
+        """
+        kept: dict[str, str] = {}
+        withheld = set(self.withheld_variables)
+        for name, value in self.variables.items():
+            cleaned = storable_endpoint_value(value) if is_endpoint_variable(name) else None
+            if cleaned is None:
+                withheld.add(name)
+            else:
+                kept[name] = cleaned
+        return self.model_copy(
+            update={
+                "variables": kept,
+                "variable_sources": {
+                    name: sources for name, sources in self.variable_sources.items() if name in kept
+                },
+                "withheld_variables": sorted(withheld),
+            }
         )
 
     @field_validator("service_id")
@@ -552,6 +583,9 @@ class KnowledgeGraph(BaseModel):
     cluster and revisions were recorded. When present, every service FQURI
     must carry its environment and cluster, and every service found in a
     repository must name a repository with a scanned revision.
+    ``service_environments`` are the container environments the manifest
+    scan read (None in snapshots written before they were recorded); a
+    pull request's head references are resolved through them.
     """
 
     services: List[ServiceNode]
@@ -559,6 +593,7 @@ class KnowledgeGraph(BaseModel):
     discovery: Optional[List[DiscoveryStageReport]] = None
     unresolved_entities: List[UnresolvedEntity] = Field(default_factory=list)
     scan: Optional[ScanContext] = None
+    service_environments: Optional[List[ServiceEnvironment]] = None
 
     @model_validator(mode="after")
     def _services_match_scan(self) -> Self:
@@ -814,6 +849,13 @@ class ReasonCode(str, Enum):
         release radius that the baseline does not have; re-run discovery.
     BASELINE_SCOPE_MISMATCH: the baseline does not record the environment
         and cluster it scanned, or they differ from the project policy's.
+    REVISION_UNVERIFIED: the pull request's revisions couldn't be verified
+        with source control: a commit is missing, the base isn't an ancestor
+        of the head, the changed files differ from what the commits change,
+        or the head couldn't be scanned.
+    BASELINE_REVISION_MISMATCH: the commits between the baseline's scanned
+        revision and the pull request's base change services in the radius,
+        or the two revisions can't be related; re-run discovery or rebase.
 
     Every code except MODEL_REJECTED makes the assessment non-actionable: the
     evidence is insufficient to rely on the verdict, which is different from
@@ -833,6 +875,8 @@ class ReasonCode(str, Enum):
     REQUIRED_SOURCE_MISSING = "REQUIRED_SOURCE_MISSING"
     BASELINE_DRIFT = "BASELINE_DRIFT"
     BASELINE_SCOPE_MISMATCH = "BASELINE_SCOPE_MISMATCH"
+    REVISION_UNVERIFIED = "REVISION_UNVERIFIED"
+    BASELINE_REVISION_MISMATCH = "BASELINE_REVISION_MISMATCH"
 
     @property
     def limits_actionability(self) -> bool:
@@ -860,6 +904,13 @@ class Exemption(BaseModel):
     reason: str = Field(min_length=1)
 
 
+class DependencyChange(BaseModel):
+    """A code dependency a pull request's head adds or no longer declares."""
+
+    source_id: str = Field(min_length=1)
+    target_id: str = Field(min_length=1)
+
+
 class AssessmentEvidence(BaseModel):
     """The exact inputs one release assessment was computed from.
 
@@ -875,7 +926,10 @@ class AssessmentEvidence(BaseModel):
     ``baseline_environment``, ``baseline_cluster`` and ``scanned_revisions``
     are what the baseline snapshot scanned (None and empty for snapshots
     that predate scan recording). ``unbaselined_edges`` are live edges in
-    the release radius missing from the baseline.
+    the release radius missing from the baseline. ``head_scanned`` is true
+    when the pull request's revisions were verified and its changed
+    services scanned at the head; ``dependencies_added`` and
+    ``dependencies_removed`` are the code dependencies the head changed.
     """
 
     pr_id: str = Field(min_length=1)
@@ -898,6 +952,9 @@ class AssessmentEvidence(BaseModel):
     unbaselined_edges: List[ObservedEdge] = Field(default_factory=list)
     # How the live query covered the radius (None without a real live query).
     live_coverage: Optional["LiveCoverage"] = None
+    head_scanned: bool = False
+    dependencies_added: List[DependencyChange] = Field(default_factory=list)
+    dependencies_removed: List[DependencyChange] = Field(default_factory=list)
 
 
 class ReleaseAssessment(BaseModel):
