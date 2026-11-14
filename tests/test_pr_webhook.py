@@ -527,7 +527,13 @@ class PrAssessmentWebhookTests(BaselineFixture):
                 baseline_cluster="aks-1",
                 scanned_revisions=SCAN.scanned_revisions,
                 head_scanned=True,
+                test_scope=assessment.evidence.test_scope,
             ),
+        )
+        # store-front calls the changed order-service: it is the second tier.
+        self.assertEqual(
+            [(tier.title, tier.services) for tier in assessment.evidence.test_scope][:2],
+            [("Changed services", [_id("order-service")]), ("Direct callers", [_id("store-front")])],
         )
         self.assertIsNotNone(assessment.evidence.baseline_created_at)
         report = final["evidence_report"]

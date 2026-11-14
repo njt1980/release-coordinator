@@ -30,6 +30,7 @@ from typing import Final, Self
 from pydantic import BaseModel, Field, model_validator
 
 from src.core.models import (
+    TestScopeTier,
     EvidenceIssue,
     IssueSubjectKind,
     ReasonCode,
@@ -159,6 +160,8 @@ class ReleaseBriefing(BaseModel):
     rollback_order: list[str]
     raw_issue_count: int = Field(ge=0)
     advisory: AdvisoryNote | None = None
+    # Suggested test scope (computed), services by short name.
+    test_scope: list[TestScopeTier] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _faithful(self) -> Self:
@@ -483,6 +486,10 @@ def build_briefing(assessment: ReleaseAssessment) -> ReleaseBriefing:
         deployment=_deployment(assessment),
         rollback_order=[short_name(s) for s in reversed(assessment.services_to_deploy)],
         raw_issue_count=len(assessment.issues),
+        test_scope=[
+            tier.model_copy(update={"services": [short_name(s) for s in tier.services]})
+            for tier in assessment.evidence.test_scope
+        ],
         advisory=(
             AdvisoryNote(
                 approved=assessment.advisory_assessment.approved,
@@ -531,6 +538,12 @@ def render_markdown(briefing: ReleaseBriefing) -> str:
                 lines.append(f"   {group.why_it_matters}")
             lines += [f"   - Check: {item}" for item in group.what_to_check]
             lines += [f"   - Close: {item}" for item in group.how_to_close]
+    if briefing.test_scope:
+        lines += ["", f"### Suggested test scope [{_ORIGIN_LABELS[Origin.COMPUTED]}]"]
+        lines += [
+            f"{tier.tier}. **{tier.title}**: {', '.join(tier.services)}. {tier.why}"
+            for tier in briefing.test_scope
+        ]
     if briefing.advisory:
         note = briefing.advisory
         lines += [
