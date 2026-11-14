@@ -6,7 +6,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterable
 from enum import Enum
 from typing import Any, Final, Self
 
@@ -36,6 +36,7 @@ from src.core.models import (
     ServiceCoverage,
     ServiceStaticConfig,
     ContractLink,
+    SharedFile,
     SharedLibrary,
     UnscannedFile,
     UnscannedReason,
@@ -61,6 +62,7 @@ from src.tools.build_projects import (
     unresolved_sites,
 )
 from src.tools.client_libraries import client_libraries, manifest_ecosystem
+from src.tools.docker_copies import copied_files
 from src.tools.spring_cloud import (
     ServedFile,
     config_servers,
@@ -324,6 +326,7 @@ class RepositoryScan(BaseModel):
     services: list[ServiceScan] = Field(default_factory=list)
     unowned_source_files: list[str] = Field(default_factory=list)
     libraries: list[SharedLibrary] = Field(default_factory=list)
+    shared_files: list[SharedFile] = Field(default_factory=list)
 
     def coverage(self) -> RepositoryCoverage:
         """Return the scan's coverage record, as a snapshot stores it."""
@@ -333,6 +336,7 @@ class RepositoryScan(BaseModel):
             services=[scan.coverage for scan in self.services if scan.coverage],
             unowned_source_files=self.unowned_source_files,
             libraries=self.libraries,
+            shared_files=self.shared_files,
         )
 
     def static_config(self) -> list[ServiceStaticConfig]:
@@ -1825,6 +1829,11 @@ class DevOpsExtractor:
                         services=scans,
                         unowned_source_files=unowned,
                         libraries=layout.shared_libraries() if only_roots is None else [],
+                        shared_files=(
+                            shared_files(services.values(), layout, file_paths)
+                            if only_roots is None
+                            else []
+                        ),
                     )
                 ],
                 errors,
@@ -2010,6 +2019,8 @@ class DevOpsExtractor:
                 continue
             for owner in owners:
                 owner.add_read(path, read, from_library=ownership.library is not None)
+                if ownership.library is None and _path_segments(path)[-1].lower() == "dockerfile":
+                    owner.dockerfiles[relative] = content
         return unowned
 
     @staticmethod
@@ -2069,6 +2080,26 @@ class _SpringWiring(BaseModel):
     application_names: dict[str, str | None] = Field(default_factory=dict)
 
 
+def shared_files(
+    services: Iterable["_ServiceAccumulator"], layout: RepositoryLayout, file_paths: list[str]
+) -> list[SharedFile]:
+    """Files outside every service that the services' Dockerfiles copy in."""
+    consumers: dict[str, set[str]] = {}
+    copied_by: dict[str, set[str]] = {}
+    for service in services:
+        for dockerfile, content in service.dockerfiles.items():
+            for path in copied_files(content, dockerfile, service.boundary.root, file_paths):
+                ownership = layout.owner(path)
+                if ownership.services or ownership.excluded:
+                    continue
+                consumers.setdefault(path, set()).add(service.boundary.root)
+                copied_by.setdefault(path, set()).add(dockerfile)
+    return [
+        SharedFile(path=path, consumers=sorted(consumers[path]), copied_by=sorted(copied_by[path]))
+        for path in sorted(consumers)
+    ]
+
+
 class _ServiceAccumulator:
     """What one service's files contribute while its repository is read."""
 
@@ -2084,6 +2115,9 @@ class _ServiceAccumulator:
         self.sites: dict[str, list[OpaqueReferenceSite]] = {}
         self.sections: dict[str, list[BoundSection]] = {}
         self.keys: dict[ConfigFramework, set[str]] = {}
+        # The service's own Dockerfiles (path -> content), for the files
+        # they copy in from outside every service (see docker_copies).
+        self.dockerfiles: dict[str, str] = {}
         # Its config server is a service of this repository whose served
         # files are read, so importing from it hides nothing.
         self.config_served_in_repository = False
