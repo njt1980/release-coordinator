@@ -8,7 +8,10 @@ the one that was signed. ``GET /api/v1/decisions/verify`` walks the whole
 hash chain, and ``GET /api/v1/decisions/signer`` says who a decision made
 now would be signed by. ``GET /api/v1/webhooks/pr-assessment/{job_id}/record``
 exports the assessment with its decisions for archiving (JSON, or
-``?format=html`` for a print view; see ``orchestration.record_export``).
+``?format=html`` for a print view; see ``orchestration.record_export``), and
+``.../validation-bundle`` the release's validation-support package: that
+record plus the review answers it used, the tool version, the discovery
+benchmark and the intended-use statement (``orchestration.validation_bundle``).
 
 The client says only what was decided and why. The server sets the signer,
 the time, the assessment hash and everything the decision is about, from
@@ -20,6 +23,7 @@ recorded as such: not an electronic signature.
 """
 
 import re
+import sqlite3
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -41,7 +45,14 @@ from src.core.decision import (
 )
 from src.coordinator import nodes as coordinator_nodes
 from src.core.models import ReleaseAssessment
-from src.orchestration.record_export import ChainState, ExportedDecision, build_export, render_print_view
+from src.orchestration.record_export import (
+    ChainState,
+    ExportedDecision,
+    RecordExport,
+    build_export,
+    render_print_view,
+)
+from src.orchestration.validation_bundle import ReviewEvidence, build_bundle, render_bundle_view, review_evidence
 from src.tools.baseline_store import BaselineScope
 from src.tools.decision_store import (
     ChainReport,
@@ -49,6 +60,8 @@ from src.tools.decision_store import (
     UnknownCorrectionError,
     default_decision_store,
 )
+from src.tools.review_store import ReviewStoreCorruptError
+from src.tools.validation_sources import read_benchmark, read_intended_use, read_tool_version
 from src.tools.principal import CLAIMS_HEADER, ID_HEADER, NAME_HEADER, Principal, parse_principal
 from src.webhooks import PrAssessmentJob, find_assessment
 
@@ -259,11 +272,7 @@ def _baseline_readable(scope: BaselineScope, snapshot_id: str | None) -> bool:
     return True
 
 
-@router.get("/api/v1/webhooks/pr-assessment/{job_id}/record", response_model=None)
-def export_record(
-    job_id: str, format: Annotated[Literal["json", "html"], Query()] = "json"
-) -> Response:
-    """The assessment and its decisions as one archivable file (or a print view)."""
+def _record_export(job_id: str) -> RecordExport:
     job, assessment = _job(job_id)
     scope = BaselineScope(tenant=job.tenant, project_id=job.project_id)
     try:
@@ -271,7 +280,7 @@ def export_record(
         chain = DECISION_STORE.verify()
     except (DecisionStoreCorruptError, OSError) as error:
         raise _store_unavailable(error) from error
-    export = build_export(
+    return build_export(
         job_id=job_id,
         tenant=job.tenant,
         project_id=job.project_id,
@@ -293,11 +302,57 @@ def export_record(
         baseline_snapshot_available=_baseline_readable(scope, assessment.evidence.baseline_snapshot_id),
         exported_at=datetime.now(timezone.utc),
     )
+
+
+def _download(content: str, kind: str, pr_id: str, job_id: str) -> Response:
+    safe_pr = re.sub(r"[^A-Za-z0-9._-]+", "-", pr_id)[:60]
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{kind}-{safe_pr}-{job_id[:12]}.json"'},
+    )
+
+
+@router.get("/api/v1/webhooks/pr-assessment/{job_id}/record", response_model=None)
+def export_record(
+    job_id: str, format: Annotated[Literal["json", "html"], Query()] = "json"
+) -> Response:
+    """The assessment and its decisions as one archivable file (or a print view)."""
+    export = _record_export(job_id)
     if format == "html":
         return HTMLResponse(render_print_view(export))
-    safe_pr = re.sub(r"[^A-Za-z0-9._-]+", "-", assessment.evidence.pr_id)[:60]
-    return Response(
-        content=export.model_dump_json(indent=2),
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="decision-record-{safe_pr}-{job_id[:12]}.json"'},
+    return _download(export.model_dump_json(indent=2), "decision-record", export.assessment.evidence.pr_id, job_id)
+
+
+def _review_evidence(export: RecordExport) -> ReviewEvidence:
+    scope = BaselineScope(tenant=export.tenant, project_id=export.project_id)
+    try:
+        answers = coordinator_nodes.REVIEW_STORE.answers(scope)
+        report = coordinator_nodes.REVIEW_STORE.verify()
+    except (ReviewStoreCorruptError, sqlite3.Error, OSError) as error:
+        return ReviewEvidence(problem=str(error))
+    chain = ChainState(
+        records=report.records, last_hash=report.last_hash, intact=report.intact, problems=report.problems
     )
+    return review_evidence(export, answers, chain)
+
+
+@router.get("/api/v1/webhooks/pr-assessment/{job_id}/validation-bundle", response_model=None)
+def export_validation_bundle(
+    job_id: str, format: Annotated[Literal["json", "html"], Query()] = "json"
+) -> Response:
+    """The validation-support package of one release: the decision record,
+    the review answers it used, the tool version, the discovery benchmark
+    and the intended-use statement (JSON, or ``?format=html`` to print)."""
+    export = _record_export(job_id)
+    bundle = build_bundle(
+        record=export,
+        tool=read_tool_version(),
+        review=_review_evidence(export),
+        benchmark=read_benchmark(),
+        intended_use=read_intended_use(),
+        exported_at=export.exported_at,
+    )
+    if format == "html":
+        return HTMLResponse(render_bundle_view(bundle))
+    return _download(bundle.model_dump_json(indent=2), "validation-package", export.assessment.evidence.pr_id, job_id)

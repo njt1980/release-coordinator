@@ -101,6 +101,7 @@ def export_digest(export: RecordExport) -> str:
 
 
 _STYLE: Final[str] = """
+pre{white-space:pre-wrap;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;background:#f8fafc;border:1px solid #e2e8f0;padding:8px;overflow-wrap:anywhere}
 body{font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;color:#0f172a;background:#fff;margin:0}
 main{max-width:860px;margin:0 auto;padding:24px 16px}
 h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px;border-bottom:1px solid #cbd5e1;padding-bottom:4px}
@@ -134,8 +135,8 @@ def _decision_html(decision: ExportedDecision) -> str:
     )
 
 
-def render_print_view(export: RecordExport) -> str:
-    """The export as a printable, script-free HTML page."""
+def record_sections(export: RecordExport) -> str:
+    """The record's sections (assessment to integrity) as escaped HTML."""
     assessment, evidence, briefing = export.assessment, export.assessment.evidence, export.briefing
     chain = "intact" if export.chain.intact else "BROKEN: " + "; ".join(export.chain.problems)
     summary = "".join(
@@ -167,14 +168,7 @@ def render_print_view(export: RecordExport) -> str:
         if briefing.advisory
         else ""
     )
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Decision record {escape(evidence.pr_id)}</title><style>{_STYLE}</style></head>
-<body><main>
-<h1>Release decision record: {escape(evidence.pr_id)}</h1>
-<p class="note">Exported {export.exported_at:%Y-%m-%d %H:%M:%S} UTC by Release Coordinator (export format {export.export_version}).
-The assessment is advisory; the decisions below are the people's.</p>
-<h2>Assessment</h2><table>{summary}</table>
+    return f"""<h2>Assessment</h2><table>{summary}</table>
 <p><strong>{escape(briefing.headline)}</strong></p>
 <h2>Decisions</h2>{decisions}
 <h2>What the assessment found</h2><ul>{groups or '<li>Nothing to report.</li>'}</ul>
@@ -185,7 +179,27 @@ The assessment is advisory; the decisions below are the people's.</p>
 {_row("Chain head hash", export.chain.last_hash, mono=True)}
 {_row("Export SHA-256", export.export_sha256, mono=True)}
 </table>
-<p class="note">The export SHA-256 is taken over the JSON export's content; download the JSON for the
-complete, machine-checkable record.</p>
+"""
+
+
+def print_page(title: str, body: str) -> str:
+    """A printable, script-free HTML page around ``body`` (already escaped)."""
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{escape(title)}</title><style>{_STYLE}</style></head>
+<body><main>
+{body}
 </main></body></html>
 """
+
+
+def render_print_view(export: RecordExport) -> str:
+    """The export as a printable, script-free HTML page."""
+    pr_id = export.assessment.evidence.pr_id
+    intro = f"""<h1>Release decision record: {escape(pr_id)}</h1>
+<p class="note">Exported {export.exported_at:%Y-%m-%d %H:%M:%S} UTC by Release Coordinator (export format {export.export_version}).
+The assessment is advisory; the decisions below are the people's.</p>
+"""
+    outro = """<p class="note">The export SHA-256 is taken over the JSON export's content; download the JSON for the
+complete, machine-checkable record.</p>"""
+    return print_page(f"Decision record {pr_id}", intro + record_sections(export) + outro)

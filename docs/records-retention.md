@@ -33,6 +33,14 @@ the life of a medical device plus a fixed period) is set by your quality system,
   detectable. Store the file in your document management system with the release.
 - **Print view.** `?format=html` (or **Print view of the record**) shows the same content as a
   printable page, for a signature binder or a review meeting.
+- **Validation package per release.** `GET /api/v1/webhooks/pr-assessment/{job_id}/validation-bundle`
+  (JSON, or `?format=html` to print; links under the decisions on the Assessments page) adds to the
+  record everything needed to validate the tool's use for that release: the tool version (the
+  showcase image's commit, `RC_TOOL_VERSION`; locally the git commit), the stored dependency review
+  answers the assessment used (with reasons, and the review chain's state), the discovery benchmark
+  as stored with this build (held-out apps reported apart from the apps the scanner was tuned on),
+  and the intended-use statement (`docs/intended-use.md`) with its SHA-256. `bundle_sha256` is taken
+  over all of it. A part that can't be read is reported in the bundle, not left out silently.
 - **Check integrity.** `GET /api/v1/decisions/verify` walks the whole decision chain and reports any
   record whose hash, link or position doesn't check out.
 

@@ -139,6 +139,23 @@ export default function DecisionPanel({ jobId, toolApproved }) {
           Download the record (JSON)
         </a>
       </p>
+      <p className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+        <span className="text-slate-600">Validation package (record, review answers, tool version, benchmark, intended use):</span>
+        <a
+          href={`${API}/webhooks/pr-assessment/${jobId}/validation-bundle?format=html`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-medium text-brand-700 hover:underline"
+        >
+          Print view
+        </a>
+        <a
+          href={`${API}/webhooks/pr-assessment/${jobId}/validation-bundle`}
+          className="font-medium text-brand-700 hover:underline"
+        >
+          Download (JSON)
+        </a>
+      </p>
 
       {signer && !signer.can_decide ? (
         <p className="mt-3 text-sm text-slate-600">{signer.why}</p>
