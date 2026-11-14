@@ -89,6 +89,11 @@ class ReviewApiTests(unittest.TestCase):
         (question,) = review["questions"]
         self.assertEqual(question["subject"]["key"], "host:config-server")
         self.assertEqual(question["anchors"][0]["paths"], ["src/store-front/"])
+        # The queue: the open question before the one-source dependency.
+        self.assertEqual(
+            [(item["kind"], item["key"]) for item in review["queue"]],
+            [("question", "host:config-server"), ("dependency", self.edge)],
+        )
 
     def test_answers_are_anchored_by_the_server(self) -> None:
         response = self._post(

@@ -44,6 +44,8 @@ from src.orchestration.review import (
     build_review,
     edge_anchors,
 )
+from src.orchestration.inventory import build_inventory
+from src.orchestration.review_queue import QueueItem, review_queue
 from src.tools.baseline_store import PATH_SEGMENT_PATTERN, BaselineScope, StoredBaseline
 from src.tools.policy_store import PolicyInvalidError, PolicyMissingError, ProjectPolicy
 from src.tools.review_store import DuplicateAnswerError, ReviewStoreCorruptError
@@ -108,7 +110,13 @@ def _in_force(scope: BaselineScope, baseline: StoredBaseline, policy: ProjectPol
         ) from error
 
 
-def _review(tenant: str, project_id: str) -> tuple[BaselineScope, StoredBaseline, ProjectReview]:
+class ReviewPage(ProjectReview):
+    """The review with its queue: every unanswered item, weakest evidence first."""
+
+    queue: list[QueueItem] = Field(default_factory=list)
+
+
+def _review(tenant: str, project_id: str) -> tuple[BaselineScope, StoredBaseline, ReviewPage]:
     scope, baseline, policy = _context(tenant, project_id)
     review = build_review(
         baseline.graph,
@@ -116,11 +124,13 @@ def _review(tenant: str, project_id: str) -> tuple[BaselineScope, StoredBaseline
         coordinator_nodes.project_questions(policy, baseline),
         _in_force(scope, baseline, policy),
     )
-    return scope, baseline, review
+    ranks = {row.service_id: row.criticality_rank for row in build_inventory(baseline.graph, baseline.snapshot_id).rows}
+    queue = review_queue(review, ranks, policy.owner_of if policy else lambda _: None)
+    return scope, baseline, ReviewPage(**review.model_dump(), queue=queue)
 
 
-@router.get("", response_model=ProjectReview)
-def get_review(tenant: Tenant, project_id: ProjectId) -> ProjectReview:
+@router.get("", response_model=ReviewPage)
+def get_review(tenant: Tenant, project_id: ProjectId) -> ReviewPage:
     """The newest baseline laid out for review."""
     return _review(tenant, project_id)[2]
 
@@ -184,13 +194,13 @@ def _anchors_for(
     return question.anchors, ()
 
 
-@router.post("/answers", response_model=ProjectReview, status_code=status.HTTP_201_CREATED)
+@router.post("/answers", response_model=ReviewPage, status_code=status.HTTP_201_CREATED)
 def post_answer(
     tenant: Tenant,
     project_id: ProjectId,
     request: AnswerRequest,
     principal: Annotated[str | None, Header(alias=PRINCIPAL_HEADER)] = None,
-) -> ProjectReview:
+) -> ReviewPage:
     """Record one answer and return the updated review."""
     scope, baseline, review = _review(tenant, project_id)
     signed_in = principal if config.TRUST_PRINCIPAL_HEADER else None
