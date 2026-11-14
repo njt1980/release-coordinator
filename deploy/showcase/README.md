@@ -22,8 +22,11 @@ revisions with them did not start.
 
 ```bash
 # 0. Image (no local Docker): build from a clean copy of committed files only.
-git archive HEAD src frontend deploy/showcase mock_telemetry.json .dockerignore | tar -x -C <empty dir>
-az acr build -r rclab48a7217e -t release-coordinator:showcase-<sha> -f deploy/showcase/Dockerfile <empty dir>
+#    Validation bundles also quote the intended-use statement and the stored benchmark.
+git archive HEAD src frontend deploy/showcase mock_telemetry.json .dockerignore docs/intended-use.md \
+  tests/benchmarks/discovery/baseline.json tests/benchmarks/discovery/apps | tar -x -C <empty dir>
+az acr build -r rclab48a7217e -t release-coordinator:showcase-<sha> --build-arg RC_TOOL_VERSION=<full sha> \
+  -f deploy/showcase/Dockerfile <empty dir>
 
 # 1. Infrastructure (no app yet).
 az group create -n rc-showcase -l eastus --tags project=release-coordinator purpose=showcase
