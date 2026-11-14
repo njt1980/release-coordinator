@@ -108,11 +108,17 @@ AssessmentJobStatus = Literal["queued", "running", "completed", "failed"]
 
 
 class PrAssessmentJob(BaseModel):
-    """Current state of one scheduled PR assessment."""
+    """Current state of one scheduled PR assessment.
+
+    ``tenant`` and ``project_id`` are the project it was assessed for
+    (records archived before they were kept read as the defaults).
+    """
 
     job_id: str
     pr_id: str
     status: AssessmentJobStatus
+    tenant: str = config.DEFAULT_TENANT
+    project_id: str = config.DEFAULT_PROJECT_ID
     error_message: str | None = None
     assessment: ReleaseAssessment | None = None
     evidence_report: str | None = None
@@ -229,8 +235,10 @@ async def run_assessment_job(
     The synchronous graph runs in the thread pool so status polls are
     answered while the LLM call is in progress.
     """
+    tenant = state.get("tenant") or config.DEFAULT_TENANT
+    project_id = state.get("project_id") or config.DEFAULT_PROJECT_ID
     _assessment_jobs[job_id] = PrAssessmentJob(
-        job_id=job_id, pr_id=pr_id, status="running"
+        job_id=job_id, pr_id=pr_id, status="running", tenant=tenant, project_id=project_id
     )
     try:
         final_state = await run_in_threadpool(
@@ -245,6 +253,8 @@ async def run_assessment_job(
                 pr_id=pr_id,
                 status="failed",
                 error_message=message,
+                tenant=tenant,
+                project_id=project_id,
             )
         )
         RUN_LOGS.finish(job_id, "failed", message)
@@ -265,6 +275,8 @@ async def run_assessment_job(
                 assessment=assessment,
                 evidence_report=final_state.get("evidence_report"),
                 briefing=build_briefing(assessment),
+                tenant=tenant,
+                project_id=project_id,
             )
         )
 
@@ -330,7 +342,11 @@ def schedule_assessment(
     job_id = str(uuid4())
     _restore_archive()  # Archived jobs list before new ones.
     _assessment_jobs[job_id] = PrAssessmentJob(
-        job_id=job_id, pr_id=payload.pr_id, status="queued"
+        job_id=job_id,
+        pr_id=payload.pr_id,
+        status="queued",
+        tenant=payload.tenant,
+        project_id=payload.project_id,
     )
     RUN_LOGS.start(
         job_id,

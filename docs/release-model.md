@@ -250,6 +250,36 @@ policy (G19) is required before anyone else's data goes through it.
 | `COMPATIBILITY_UNVERIFIED` | No evidence that the contract change is compatible |
 | `DEMO_EVIDENCE`, `MODEL_REJECTED` | Mock data, or the risk model rejected the release |
 
+### A person decides, and the decision is recorded
+
+The assessment advises; a person decides. On a completed assessment the
+coordinator records **Approve**, **Decline** or **Further analysis**
+(`POST /api/v1/webhooks/pr-assessment/{job_id}/decisions`). Declining,
+asking for further analysis, and approving what the assessment did not
+approve all need a reason.
+
+Each record is shaped for 21 CFR Part 11 (shaped for, not compliant: only
+the customer's validation for its intended use can establish that):
+
+- **Signature manifestation (11.50):** the signer's printed name and ID,
+  the UTC time and the meaning ("Approved for release", "Declined for
+  release", "Further analysis requested before release") are part of the
+  record and of every view of it.
+- **Signer:** behind the platform's sign-in the signer is the signed-in
+  Entra user (display name, user principal name, object ID), never a typed
+  name; `RC_DECISION_ROLE` can require an app role. Locally the typed name
+  is kept and labelled "not an electronic signature".
+- **Signature/record link (11.70):** the record carries the SHA-256 of the
+  exact assessment shown, the PR, head commit, baseline snapshot, policy
+  version and policy hash, and the tool's own verdict at signing time.
+  Listing a decision says whether the stored assessment is still the one
+  signed.
+- **Audit trail (11.10(e)):** records are only appended, into one SHA-256
+  hash chain; the database refuses UPDATE and DELETE, and a correction is a
+  new record naming the one it corrects. `GET /api/v1/decisions/verify`
+  recomputes every hash and link, so a change made outside the application
+  is detected.
+
 ## 4. Gaps before this works on applications we don't own
 
 Found while running the lab end to end (2026-11-13). Each gap is phrased as

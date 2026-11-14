@@ -314,7 +314,7 @@ class PrAssessmentWebhookTests(BaselineFixture):
         self.assertEqual(response.exempted_files, [])
         self.assertEqual(
             webhooks._assessment_jobs[response.job_id],
-            PrAssessmentJob(job_id=response.job_id, pr_id="PR-2048", status="queued"),
+            PrAssessmentJob(job_id=response.job_id, pr_id="PR-2048", status="queued", tenant="acme", project_id="shop"),
         )
         self.assertEqual(len(tasks.tasks), 1)
         task = tasks.tasks[0]

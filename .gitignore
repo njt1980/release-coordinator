@@ -35,6 +35,8 @@ baselines/
 
 # Project dependency review answers (reviews/reviews.sqlite3)
 reviews/
+# Release decision records (decisions/decisions.sqlite3)
+decisions/
 
 # Local dev server pid files and logs (start-app skill)
 .run/
