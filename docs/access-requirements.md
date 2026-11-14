@@ -17,6 +17,11 @@ before falling back to the developer's `az login`.
 - Add the identity to the organization (**Organization settings → Users**,
   access level Basic) and to the project's **Readers** group. It reads
   repositories, files and build definitions.
+- Throttled requests (HTTP 429) are retried, waiting as Azure DevOps'
+  `Retry-After` header says. Azure DevOps rate-limits per identity, so a
+  large estate's first scan can take a while; with `RC_DATA_DIR` set, later
+  scans read only files that changed. `RC_ADO_SCAN_CONCURRENCY` (default 4)
+  sets how many repositories are scanned at once.
 - Build definitions are read for their variables (the pipeline YAML at the
   scanned commit, definition variables and variable groups by name). If
   they can't be read, discovery still succeeds, but no environment variable
@@ -48,15 +53,29 @@ before falling back to the developer's `az login`.
     which is ambiguous when the name exists in several namespaces;
   - `service.name` (or the role name Application Insights derives from it):
     the workload's name as Kubernetes knows it.
-- Application Insights SDKs and the Azure Monitor exporter may map only
-  `service.*` attributes and drop `k8s.*` ones, so those rows are filtered
-  out and a busy service can look silent. Either add the attributes in the
-  application's OpenTelemetry resource (`OTEL_RESOURCE_ATTRIBUTES`, or the
-  Kubernetes attributes processor of an OpenTelemetry Collector in front of
-  the exporter), or fall back to Beyla (eBPF), which sets them without
-  changing the application. When a radius service is uncovered, assessments
-  count the dropped rows by source name and say which uncovered service they
-  look like (`LiveCoverage.unscoped_sources`); the rows still never count.
+- Whether rows carry these attributes depends on the telemetry stack. Most
+  .NET estates that send to Application Insights do **not** carry them
+  today, so every row is filtered out and busy services look silent:
+
+  | Telemetry stack | `k8s.*` in the row's Properties? | What to do today |
+  | --- | --- | --- |
+  | Beyla (eBPF) → OpenTelemetry Collector → Azure Monitor | Yes (set by the Collector's Kubernetes attributes processor; seen in our lab) | Nothing |
+  | OpenTelemetry SDK → Collector with the Kubernetes attributes processor → Azure Monitor | Yes, inferred from the same Collector path; not tested with an application SDK | Nothing |
+  | Azure Monitor OpenTelemetry Distro, `Microsoft.OpenTelemetry`, Application Insights SDK 3.x (.NET) | **No.** The exporter keeps resource attributes (`OTEL_RESOURCE_ATTRIBUTES`, Kubernetes detectors) out of Properties; only span attributes get there | Add the cluster and namespace as *span* attributes (a span processor in the application), route through a Collector, or use Beyla |
+  | Classic Application Insights SDK 2.x (with or without the Kubernetes enricher) | **No.** The enricher writes `Kubernetes.*` keys and has no cluster key | Add the properties with a telemetry initializer, or use Beyla |
+
+  Both workarounds other than Beyla change the application, which the
+  platform otherwise never needs. Scoping by Application Insights resource
+  or by role name against the Kubernetes inventory (no attribute needed) is
+  planned (step T2c); until then, use Beyla where changing the application
+  isn't possible.
+- Application Insights target formats (`host | cid-v1:<appId>`,
+  `server | database`, `sb://namespace/ | queue`) are understood: the host is
+  the dependency and the database, queue or callee component is kept with
+  the edge.
+- When a radius service is uncovered, assessments count the dropped rows by
+  source name and say which uncovered service they look like
+  (`LiveCoverage.unscoped_sources`); the rows still never count.
 - Role assignments can take a few minutes to take effect.
 
 ## Kubernetes (manifest scan)
@@ -66,6 +85,9 @@ before falling back to the developer's `az login`.
   `jobs` and `cronjobs` (batch) in each target namespace. Secrets are never
   read. A kind that can't be listed makes the stage PARTIAL, so no baseline
   is written.
+- From the same objects, discovery records each workload's container images
+  and, when the Azure DevOps `KubernetesManifest` task deployed it, the
+  pipeline run from its `azure-pipelines/*` annotations. No extra permission.
 - Locally the backend uses the current kubeconfig context; on Azure it uses
   the in-cluster service account or the cluster's Entra integration.
 - Whichever it uses, discovery records the API server it actually read. The
