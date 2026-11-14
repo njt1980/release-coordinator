@@ -1746,9 +1746,18 @@ class ReasonCode(str, Enum):
         keeps its data from the external model (``external_ai: false``), so
         no advisory risk review was made and nothing is approved
         automatically; a person decides.
+    DB_MIGRATION: the pull request adds or changes a database migration
+        (EF Core, Flyway, Liquibase); advisory, a person decides.
+    CONFIG_KEYS_CHANGED: the pull request adds, removes or changes keys in
+        a service configuration file (appsettings*.json, application*.yml
+        or .properties, .env files); advisory, a person decides.
+    FEATURE_FLAGS_CHANGED: the pull request changes a feature-flag section
+        (FeatureManagement, features/togglz/ff4j, FEATURE_* variables);
+        advisory, a person decides.
 
-    Every code except MODEL_REJECTED, ADVISORY_DISABLED and
-    CONTRACT_BREAKING makes the
+    Every code except MODEL_REJECTED, ADVISORY_DISABLED, CONTRACT_BREAKING
+    and the change flags (DB_MIGRATION, CONFIG_KEYS_CHANGED,
+    FEATURE_FLAGS_CHANGED) makes the
     assessment non-actionable: the evidence is insufficient to rely on the
     verdict, which is different from a fully evidenced verdict that the
     release is too risky or that a person must judge.
@@ -1775,6 +1784,9 @@ class ReasonCode(str, Enum):
     RUNTIME_UNOBSERVABLE = "RUNTIME_UNOBSERVABLE"
     REVIEW_UNAVAILABLE = "REVIEW_UNAVAILABLE"
     ADVISORY_DISABLED = "ADVISORY_DISABLED"
+    DB_MIGRATION = "DB_MIGRATION"
+    CONFIG_KEYS_CHANGED = "CONFIG_KEYS_CHANGED"
+    FEATURE_FLAGS_CHANGED = "FEATURE_FLAGS_CHANGED"
 
     @property
     def limits_actionability(self) -> bool:
@@ -1783,7 +1795,64 @@ class ReasonCode(str, Enum):
             ReasonCode.MODEL_REJECTED,
             ReasonCode.ADVISORY_DISABLED,
             ReasonCode.CONTRACT_BREAKING,
+            ReasonCode.DB_MIGRATION,
+            ReasonCode.CONFIG_KEYS_CHANGED,
+            ReasonCode.FEATURE_FLAGS_CHANGED,
         )
+
+
+class ChangeFlagKind(str, Enum):
+    """What kind of operational change a pull request makes (plan item 4e)."""
+
+    MIGRATION = "migration"
+    CONFIG = "config"
+    FEATURE_FLAG = "feature_flag"
+
+    @property
+    def reason_code(self) -> "ReasonCode":
+        return {
+            ChangeFlagKind.MIGRATION: ReasonCode.DB_MIGRATION,
+            ChangeFlagKind.CONFIG: ReasonCode.CONFIG_KEYS_CHANGED,
+            ChangeFlagKind.FEATURE_FLAG: ReasonCode.FEATURE_FLAGS_CHANGED,
+        }[self]
+
+
+class ChangeFlag(BaseModel, frozen=True):
+    """One changed file that deserves a person's attention.
+
+    ``stack`` is ``dotnet``, ``java`` or ``node``. Key lists hold key names
+    only, never values (a value may be a secret). ``exact`` is true when
+    the keys come from reading the file at the base and the head; false
+    when they were picked from the pull request's diff lines (no source
+    control, or a read failed), which can miss or misplace nested keys.
+    ``file_added`` is true for a file the pull request creates.
+    """
+
+    kind: ChangeFlagKind
+    path: str = Field(min_length=1)
+    stack: str = Field(min_length=1)
+    file_added: bool = False
+    added_keys: List[str] = Field(default_factory=list)
+    removed_keys: List[str] = Field(default_factory=list)
+    changed_keys: List[str] = Field(default_factory=list)
+    exact: bool = True
+    detail: str = Field(min_length=1)
+
+
+class ChangeFlags(BaseModel):
+    """The advisory change flags for one pull request (see ``coordinator.change_flags``).
+
+    ``unreadable`` maps files whose base or head couldn't be read to why;
+    their flags fall back to the diff (``exact`` false).
+    """
+
+    flags: List[ChangeFlag] = Field(default_factory=list)
+    unreadable: Dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def reason_codes(self) -> List["ReasonCode"]:
+        kinds = {flag.kind for flag in self.flags}
+        return [kind.reason_code for kind in ChangeFlagKind if kind in kinds]
 
 
 class IssueSubjectKind(str, Enum):
@@ -2035,6 +2104,8 @@ class AssessmentEvidence(BaseModel):
     advisory_redactions: Dict[str, int] = Field(default_factory=dict)
     # Contract compatibility evidence (None for records made before it existed).
     contract_check: Optional[ContractCheck] = None
+    # Migrations, configuration and feature-flag changes (None for older records).
+    change_flags: Optional[ChangeFlags] = None
 
 
 class ReleaseAssessment(BaseModel):

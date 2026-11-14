@@ -27,6 +27,7 @@ const DECISION_STEPS = [
   ["Radius", "Walk every upstream caller and downstream dependency, counting hops. Check every unresolved node, the baseline's age and scope, required sources, unlinked identities, and code coverage across the whole project (an unread file anywhere could be an unseen caller).", "DISCOVERY_GAP · BASELINE_STALE · STATIC_COVERAGE_INCOMPLETE · IDENTITY_UNLINKED"],
   ["Live check", "Query telemetry now: every service in the radius must be seen within the policy's window, and a live edge the baseline lacks is drift.", "REQUIRED_SOURCE_MISSING · BASELINE_DRIFT · RUNTIME_UNOBSERVABLE"],
   ["Contracts", "Compare changed .proto files at base and head. A breaking difference blocks; a compatible one verifies the order when nothing else changed (or every caller shares a contract, if the policy allows).", "CONTRACT_BREAKING · COMPATIBILITY_UNVERIFIED"],
+  ["Change flags", "Flag database migrations (EF Core, Flyway, Liquibase), added, removed or changed configuration keys (appsettings, application.yml/.properties, .env) and feature-flag sections. Config files are compared key by key at base and head; values are never kept.", "DB_MIGRATION · CONFIG_KEYS_CHANGED · FEATURE_FLAGS_CHANGED"],
   ["Sequence", "Order the deployment deterministically (topological sort): providers first for additive changes, consumers first for breaking ones. A cycle is named.", "DEPENDENCY_CYCLE"],
   ["Risk", "Only with complete evidence and external AI allowed: a model writes an advisory review of the redacted change. It can reject a release, never approve one.", "MODEL_REJECTED · ADVISORY_DISABLED"],
   ["Verdict", "Computed in code. The briefing groups issues by cause and labels every item computed, human or AI-generated; a named person records the decision.", ""],
@@ -101,6 +102,7 @@ const REASONS = [
   ["CONTRACT_BREAKING", "A changed .proto contract breaks compatibility: a No-go on complete evidence", false],
   ["MODEL_REJECTED", "The advisory risk review rejected the release", false],
   ["ADVISORY_DISABLED", "External AI is off for the project; a person decides", false],
+  ["DB_MIGRATION, CONFIG_KEYS_CHANGED, FEATURE_FLAGS_CHANGED", "The change includes a migration, configuration keys or feature flags; a person decides", false],
 ];
 
 const ACCESS = [
