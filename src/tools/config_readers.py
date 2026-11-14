@@ -327,6 +327,12 @@ def dotnet_code_bindings(content: str, file_path: str) -> list[ConfigBinding]:
     return [binding for binding in found if binding is not None]
 
 
+def dotnet_key_binding(key: str, default: str | None, file_path: str) -> ConfigBinding | None:
+    """A binding for a .NET key code reads with a literal key and default
+    (as ``dotnet_code_bindings`` finds, for keys followed through a helper)."""
+    return _dotnet_binding(key, default, StaticDefaultSource.CODE, file_path, None)
+
+
 # --- Spring ----------------------------------------------------------------
 
 
@@ -460,6 +466,12 @@ def spring_code_bindings(content: str, file_path: str) -> list[ConfigBinding]:
             _spring_binding(match.group("key"), _string(match), StaticDefaultSource.CODE, file_path, None)
         )
     return [binding for binding in found if binding is not None]
+
+
+def spring_key_binding(key: str, default: str | None, file_path: str) -> ConfigBinding | None:
+    """A binding for a Spring property code reads with a literal key and
+    default (as ``spring_code_bindings`` finds ``getProperty``)."""
+    return _spring_binding(key, default, StaticDefaultSource.CODE, file_path, None)
 
 
 def feign_client_services(content: str) -> list[str]:

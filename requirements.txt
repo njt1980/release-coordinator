@@ -10,3 +10,8 @@ kubernetes
 fastapi
 uvicorn
 anthropic>=2.8.0
+tree-sitter>=0.25,<0.26
+tree-sitter-c-sharp
+tree-sitter-java
+tree-sitter-typescript
+tree-sitter-python
