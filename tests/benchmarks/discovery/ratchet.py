@@ -17,6 +17,8 @@ _RATES = (
     "static_recall",
     "manifest_precision",
     "manifest_recall",
+    "flag_precision",
+    "cause_precision",
 )
 
 

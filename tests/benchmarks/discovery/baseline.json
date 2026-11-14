@@ -8,7 +8,23 @@
    "manifest_precision": 1.0,
    "manifest_recall": 1.0,
    "missed_silent": 0,
-   "missed_flagged": 0
+   "missed_flagged": 0,
+   "services_flagged": 4,
+   "flag_precision": 0.0,
+   "cause_precision": 0.0
+  },
+  "bank-of-anthos": {
+   "inventory_precision": 1.0,
+   "inventory_recall": 0.714,
+   "static_precision": null,
+   "static_recall": 0.0,
+   "manifest_precision": 0.769,
+   "manifest_recall": 0.833,
+   "missed_silent": 0,
+   "missed_flagged": 0,
+   "services_flagged": 4,
+   "flag_precision": 0.0,
+   "cause_precision": 0.0
   },
   "eShop": {
    "inventory_precision": 1.0,
@@ -18,7 +34,23 @@
    "manifest_precision": 1.0,
    "manifest_recall": 0.88,
    "missed_silent": 0,
-   "missed_flagged": 0
+   "missed_flagged": 0,
+   "services_flagged": 9,
+   "flag_precision": 0.0,
+   "cause_precision": 0.0
+  },
+  "eShopOnContainers": {
+   "inventory_precision": 1.0,
+   "inventory_recall": 1.0,
+   "static_precision": 0.0,
+   "static_recall": 0.0,
+   "manifest_precision": 0.476,
+   "manifest_recall": 0.488,
+   "missed_silent": 3,
+   "missed_flagged": 8,
+   "services_flagged": 5,
+   "flag_precision": 0.4,
+   "cause_precision": 0.4
   },
   "online-boutique": {
    "inventory_precision": 1.0,
@@ -28,7 +60,10 @@
    "manifest_precision": 1.0,
    "manifest_recall": 1.0,
    "missed_silent": 0,
-   "missed_flagged": 0
+   "missed_flagged": 0,
+   "services_flagged": 6,
+   "flag_precision": 0.0,
+   "cause_precision": 0.0
   },
   "otel-demo": {
    "inventory_precision": 0.944,
@@ -38,7 +73,36 @@
    "manifest_precision": 0.95,
    "manifest_recall": 0.974,
    "missed_silent": 0,
-   "missed_flagged": 1
+   "missed_flagged": 1,
+   "services_flagged": 11,
+   "flag_precision": 0.091,
+   "cause_precision": 0.091
+  },
+  "piggymetrics": {
+   "inventory_precision": 1.0,
+   "inventory_recall": 1.0,
+   "static_precision": 0.75,
+   "static_recall": 0.091,
+   "manifest_precision": 0.818,
+   "manifest_recall": 0.273,
+   "missed_silent": 12,
+   "missed_flagged": 8,
+   "services_flagged": 2,
+   "flag_precision": 1.0,
+   "cause_precision": 1.0
+  },
+  "robot-shop": {
+   "inventory_precision": 1.0,
+   "inventory_recall": 1.0,
+   "static_precision": 1.0,
+   "static_recall": 0.05,
+   "manifest_precision": 1.0,
+   "manifest_recall": 0.15,
+   "missed_silent": 15,
+   "missed_flagged": 2,
+   "services_flagged": 2,
+   "flag_precision": 0.5,
+   "cause_precision": 0.5
   },
   "sock-shop": {
    "inventory_precision": 0.667,
@@ -48,7 +112,10 @@
    "manifest_precision": 1.0,
    "manifest_recall": 0.133,
    "missed_silent": 7,
-   "missed_flagged": 5
+   "missed_flagged": 5,
+   "services_flagged": 1,
+   "flag_precision": 1.0,
+   "cause_precision": 1.0
   },
   "spring-petclinic-microservices": {
    "inventory_precision": 1.0,
@@ -58,7 +125,10 @@
    "manifest_precision": 1.0,
    "manifest_recall": 0.316,
    "missed_silent": 0,
-   "missed_flagged": 13
+   "missed_flagged": 13,
+   "services_flagged": 7,
+   "flag_precision": 1.0,
+   "cause_precision": 1.0
   },
   "teastore": {
    "inventory_precision": 1.0,
@@ -68,17 +138,36 @@
    "manifest_precision": 1.0,
    "manifest_recall": 0.462,
    "missed_silent": 0,
-   "missed_flagged": 7
+   "missed_flagged": 7,
+   "services_flagged": 5,
+   "flag_precision": 0.8,
+   "cause_precision": 1.0
   }
  },
  "pooled": {
-  "inventory_precision": 0.941,
-  "inventory_recall": 0.97,
-  "static_precision": 0.929,
-  "static_recall": 0.095,
-  "manifest_precision": 0.98,
-  "manifest_recall": 0.73,
-  "missed_silent": 7,
-  "missed_flagged": 26
+  "inventory_precision": 0.96,
+  "inventory_recall": 0.96,
+  "static_precision": 0.607,
+  "static_recall": 0.07,
+  "manifest_precision": 0.83,
+  "manifest_recall": 0.584,
+  "missed_silent": 37,
+  "missed_flagged": 44,
+  "services_flagged": 56,
+  "flag_precision": 0.321,
+  "cause_precision": 0.306
+ },
+ "pooled_held_out": {
+  "inventory_precision": 1.0,
+  "inventory_recall": 0.943,
+  "static_precision": 0.286,
+  "static_recall": 0.038,
+  "manifest_precision": 0.609,
+  "manifest_recall": 0.396,
+  "missed_silent": 30,
+  "missed_flagged": 18,
+  "services_flagged": 13,
+  "flag_precision": 0.385,
+  "cause_precision": 0.385
  }
 }

@@ -1,0 +1,698 @@
+{
+ "app": "eShopOnContainers",
+ "split": "held_out",
+ "upstream": "https://github.com/dotnet-architecture/eShopOnContainers",
+ "gt_source": "dev branch (main is an archive stub): src/docker-compose.yml + docker-compose.override.yml + src/.env, Envoy configs in src/ApiGateways/Envoy/config, and Startup/Program wiring (AddGrpcClient, AddHttpClient, JwtBearer/OIDC Authority, EventBus, UseSqlServer, Redis) in each service; cross-checked with the README architecture diagram.",
+ "repos": [
+  {
+   "name": "eShopOnContainers",
+   "url": "https://github.com/dotnet-architecture/eShopOnContainers.git",
+   "sha": "b6965936842cab32553543c1abe8a68714956f44"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "compose",
+   "paths": [
+    "eShopOnContainers/src/docker-compose.yml",
+    "eShopOnContainers/src/docker-compose.override.yml"
+   ],
+   "dotenv": "eShopOnContainers/src/.env"
+  }
+ ],
+ "observability": [
+  "seq",
+  "webstatus",
+  "application-insights"
+ ],
+ "services": {
+  "identity-api": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "basket-api": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "catalog-api": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "ordering-api": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "ordering-backgroundtasks": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "ordering-signalrhub": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "payment-api": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "webhooks-api": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "webshoppingagg": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "mobileshoppingagg": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "webmvc": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "webspa": {
+   "kind": "service",
+   "lang": "csharp+angular",
+   "source": true
+  },
+  "webhooks-client": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "webshoppingapigw": {
+   "kind": "service",
+   "lang": "envoy",
+   "source": false
+  },
+  "mobileshoppingapigw": {
+   "kind": "service",
+   "lang": "envoy",
+   "source": false
+  },
+  "sqldata": {
+   "kind": "infra",
+   "what": "sqlserver"
+  },
+  "basketdata": {
+   "kind": "infra",
+   "what": "redis"
+  },
+  "rabbitmq": {
+   "kind": "infra",
+   "what": "rabbitmq"
+  },
+  "nosqldata": {
+   "kind": "infra",
+   "what": "mongodb",
+   "optional": true
+  },
+  "azure-service-bus": {
+   "kind": "infra",
+   "what": "azure-service-bus",
+   "source": false,
+   "optional": true
+  }
+ },
+ "edges": [
+  {
+   "from": "webshoppingapigw",
+   "to": "webshoppingagg",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy static cluster socket_address webshoppingagg:80 (routes /c/, /b/, /o/, /hub/notificationhub, / -> agg); config mounted via compose volume",
+   "source": "src/ApiGateways/Envoy/config/webshopping/envoy.yaml:109"
+  },
+  {
+   "from": "webshoppingapigw",
+   "to": "catalog-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy static cluster socket_address catalog-api:80 (routes /c/, /b/, /o/, /hub/notificationhub, / -> agg); config mounted via compose volume",
+   "source": "src/ApiGateways/Envoy/config/webshopping/envoy.yaml:117"
+  },
+  {
+   "from": "webshoppingapigw",
+   "to": "basket-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy static cluster socket_address basket-api:80 (routes /c/, /b/, /o/, /hub/notificationhub, / -> agg); config mounted via compose volume",
+   "source": "src/ApiGateways/Envoy/config/webshopping/envoy.yaml:125"
+  },
+  {
+   "from": "webshoppingapigw",
+   "to": "ordering-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy static cluster socket_address ordering-api:80 (routes /c/, /b/, /o/, /hub/notificationhub, / -> agg); config mounted via compose volume",
+   "source": "src/ApiGateways/Envoy/config/webshopping/envoy.yaml:133"
+  },
+  {
+   "from": "webshoppingapigw",
+   "to": "ordering-signalrhub",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy static cluster socket_address ordering-signalrhub:80 (routes /c/, /b/, /o/, /hub/notificationhub, / -> agg); config mounted via compose volume",
+   "source": "src/ApiGateways/Envoy/config/webshopping/envoy.yaml:141"
+  },
+  {
+   "from": "mobileshoppingapigw",
+   "to": "mobileshoppingagg",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy static cluster socket_address mobileshoppingagg:80 (routes /c/, /b/, /o/, /hub/notificationhub, / -> agg); config mounted via compose volume",
+   "source": "src/ApiGateways/Envoy/config/mobileshopping/envoy.yaml:106"
+  },
+  {
+   "from": "mobileshoppingapigw",
+   "to": "catalog-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy static cluster socket_address catalog-api:80 (routes /c/, /b/, /o/, /hub/notificationhub, / -> agg); config mounted via compose volume",
+   "source": "src/ApiGateways/Envoy/config/mobileshopping/envoy.yaml:114"
+  },
+  {
+   "from": "mobileshoppingapigw",
+   "to": "basket-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy static cluster socket_address basket-api:80 (routes /c/, /b/, /o/, /hub/notificationhub, / -> agg); config mounted via compose volume",
+   "source": "src/ApiGateways/Envoy/config/mobileshopping/envoy.yaml:122"
+  },
+  {
+   "from": "mobileshoppingapigw",
+   "to": "ordering-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy static cluster socket_address ordering-api:80 (routes /c/, /b/, /o/, /hub/notificationhub, / -> agg); config mounted via compose volume",
+   "source": "src/ApiGateways/Envoy/config/mobileshopping/envoy.yaml:130"
+  },
+  {
+   "from": "mobileshoppingapigw",
+   "to": "ordering-signalrhub",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy static cluster socket_address ordering-signalrhub:80 (routes /c/, /b/, /o/, /hub/notificationhub, / -> agg); config mounted via compose volume",
+   "source": "src/ApiGateways/Envoy/config/mobileshopping/envoy.yaml:138"
+  },
+  {
+   "from": "webshoppingagg",
+   "to": "basket-api",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddGrpcClient<Basket.BasketClient> Address = UrlsConfig.GrpcBasket (env urls__grpcBasket=http://basket-api:81)",
+   "source": "src/ApiGateways/Web.Bff.Shopping/aggregator/Startup.cs:177; src/docker-compose.override.yml:216"
+  },
+  {
+   "from": "webshoppingagg",
+   "to": "catalog-api",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddGrpcClient<Catalog.CatalogClient> Address = UrlsConfig.GrpcCatalog (env urls__grpcCatalog=http://catalog-api:81)",
+   "source": "src/ApiGateways/Web.Bff.Shopping/aggregator/Startup.cs:185; src/docker-compose.override.yml:217"
+  },
+  {
+   "from": "webshoppingagg",
+   "to": "ordering-api",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddGrpcClient<OrderingGrpc.OrderingGrpcClient> Address = UrlsConfig.GrpcOrdering (env urls__grpcOrdering=http://ordering-api:81)",
+   "source": "src/ApiGateways/Web.Bff.Shopping/aggregator/Startup.cs:193; src/docker-compose.override.yml:218"
+  },
+  {
+   "from": "webshoppingagg",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddJwtBearer Authority = urls:identity (env urls__identity=http://identity-api); OIDC discovery/JWKS back-channel",
+   "source": "src/ApiGateways/Web.Bff.Shopping/aggregator/Startup.cs:93; src/docker-compose.override.yml:215"
+  },
+  {
+   "from": "webshoppingagg",
+   "to": "payment-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "health check only: AddUrlGroup(PaymentUrlHC=http://payment-api/hc); no functional call",
+   "source": "src/ApiGateways/Web.Bff.Shopping/aggregator/Startup.cs:24; src/docker-compose.override.yml:223"
+  },
+  {
+   "from": "mobileshoppingagg",
+   "to": "basket-api",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddGrpcClient<Basket.BasketClient> Address = UrlsConfig.GrpcBasket (env urls__grpcBasket=http://basket-api:81)",
+   "source": "src/ApiGateways/Mobile.Bff.Shopping/aggregator/Startup.cs:190; src/docker-compose.override.yml:197"
+  },
+  {
+   "from": "mobileshoppingagg",
+   "to": "catalog-api",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddGrpcClient<Catalog.CatalogClient> Address = UrlsConfig.GrpcCatalog (env urls__grpcCatalog=http://catalog-api:81)",
+   "source": "src/ApiGateways/Mobile.Bff.Shopping/aggregator/Startup.cs:198; src/docker-compose.override.yml:198"
+  },
+  {
+   "from": "mobileshoppingagg",
+   "to": "ordering-api",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddGrpcClient<OrderingGrpc.OrderingGrpcClient> Address = UrlsConfig.GrpcOrdering (env urls__grpcOrdering=http://ordering-api:81)",
+   "source": "src/ApiGateways/Mobile.Bff.Shopping/aggregator/Startup.cs:206; src/docker-compose.override.yml:199"
+  },
+  {
+   "from": "mobileshoppingagg",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddJwtBearer Authority = urls:identity (env urls__identity=http://identity-api); OIDC discovery/JWKS back-channel",
+   "source": "src/ApiGateways/Mobile.Bff.Shopping/aggregator/Startup.cs:146; src/docker-compose.override.yml:196"
+  },
+  {
+   "from": "mobileshoppingagg",
+   "to": "payment-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "health check only: AddUrlGroup(PaymentUrlHC=http://payment-api/hc); no functional call",
+   "source": "src/ApiGateways/Mobile.Bff.Shopping/aggregator/Startup.cs:24; src/docker-compose.override.yml:204"
+  },
+  {
+   "from": "basket-api",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: EventBusRabbitMQ ConnectionFactory HostName = Configuration[\"EventBusConnection\"] (env ${ESHOP_AZURE_SERVICE_BUS:-rabbitmq}, AzureServiceBusEnabled=False)",
+   "source": "src/docker-compose.override.yml:68"
+  },
+  {
+   "from": "basket-api",
+   "to": "azure-service-bus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "C#: EventBusServiceBus when AzureServiceBusEnabled=true (EventBusConnection = Service Bus connection string); disabled in compose",
+   "source": "src/Services/Basket/Basket.API/Startup.cs:83; src/docker-compose.override.yml:71"
+  },
+  {
+   "from": "catalog-api",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: EventBusRabbitMQ ConnectionFactory HostName = Configuration[\"EventBusConnection\"] (env ${ESHOP_AZURE_SERVICE_BUS:-rabbitmq}, AzureServiceBusEnabled=False)",
+   "source": "src/docker-compose.override.yml:87"
+  },
+  {
+   "from": "catalog-api",
+   "to": "azure-service-bus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "C#: EventBusServiceBus when AzureServiceBusEnabled=true (EventBusConnection = Service Bus connection string); disabled in compose",
+   "source": "src/Services/Catalog/Catalog.API/Startup.cs:148; src/docker-compose.override.yml:93"
+  },
+  {
+   "from": "ordering-api",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: EventBusRabbitMQ ConnectionFactory HostName = Configuration[\"EventBusConnection\"] (env ${ESHOP_AZURE_SERVICE_BUS:-rabbitmq}, AzureServiceBusEnabled=False)",
+   "source": "src/docker-compose.override.yml:111"
+  },
+  {
+   "from": "ordering-api",
+   "to": "azure-service-bus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "C#: EventBusServiceBus when AzureServiceBusEnabled=true (EventBusConnection = Service Bus connection string); disabled in compose",
+   "source": "src/Services/Ordering/Ordering.API/Startup.cs:168; src/docker-compose.override.yml:115"
+  },
+  {
+   "from": "ordering-backgroundtasks",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: EventBusRabbitMQ ConnectionFactory HostName = Configuration[\"EventBusConnection\"] (env ${ESHOP_AZURE_SERVICE_BUS:-rabbitmq}, AzureServiceBusEnabled=False)",
+   "source": "src/docker-compose.override.yml:134"
+  },
+  {
+   "from": "ordering-backgroundtasks",
+   "to": "azure-service-bus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "C#: EventBusServiceBus when AzureServiceBusEnabled=true (EventBusConnection = Service Bus connection string); disabled in compose",
+   "source": "src/Services/Ordering/Ordering.BackgroundTasks/Extensions/CustomExtensionMethods.cs:29; src/docker-compose.override.yml:138"
+  },
+  {
+   "from": "ordering-signalrhub",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: EventBusRabbitMQ ConnectionFactory HostName = Configuration[\"EventBusConnection\"] (env ${ESHOP_AZURE_SERVICE_BUS:-rabbitmq}, AzureServiceBusEnabled=False)",
+   "source": "src/docker-compose.override.yml:232"
+  },
+  {
+   "from": "ordering-signalrhub",
+   "to": "azure-service-bus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "C#: EventBusServiceBus when AzureServiceBusEnabled=true (EventBusConnection = Service Bus connection string); disabled in compose",
+   "source": "src/Services/Ordering/Ordering.SignalrHub/Startup.cs:42; src/docker-compose.override.yml:235"
+  },
+  {
+   "from": "payment-api",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: EventBusRabbitMQ ConnectionFactory HostName = Configuration[\"EventBusConnection\"] (env ${ESHOP_AZURE_SERVICE_BUS:-rabbitmq}, AzureServiceBusEnabled=False)",
+   "source": "src/docker-compose.override.yml:152"
+  },
+  {
+   "from": "payment-api",
+   "to": "azure-service-bus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "C#: EventBusServiceBus when AzureServiceBusEnabled=true (EventBusConnection = Service Bus connection string); disabled in compose",
+   "source": "src/Services/Payment/Payment.API/Startup.cs:20; src/docker-compose.override.yml:155"
+  },
+  {
+   "from": "webhooks-api",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: EventBusRabbitMQ ConnectionFactory HostName = Configuration[\"EventBusConnection\"] (env ${ESHOP_AZURE_SERVICE_BUS:-rabbitmq}, AzureServiceBusEnabled=False)",
+   "source": "src/docker-compose.override.yml:168"
+  },
+  {
+   "from": "webhooks-api",
+   "to": "azure-service-bus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "C#: EventBusServiceBus when AzureServiceBusEnabled=true (EventBusConnection = Service Bus connection string); disabled in compose",
+   "source": "src/Services/Webhooks/Webhooks.API/Startup.cs:176"
+  },
+  {
+   "from": "identity-api",
+   "to": "sqldata",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: SQL Server (EF Core UseSqlServer / SqlConnection) with Configuration[\"ConnectionString\"] = Server=sqldata;...",
+   "source": "src/Services/Identity/Identity.API/ProgramExtensions.cs:44; src/docker-compose.override.yml:47"
+  },
+  {
+   "from": "catalog-api",
+   "to": "sqldata",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: SQL Server (EF Core UseSqlServer / SqlConnection) with Configuration[\"ConnectionString\"] = Server=sqldata;...",
+   "source": "src/Services/Catalog/Catalog.API/Startup.cs:174; src/docker-compose.override.yml:85"
+  },
+  {
+   "from": "ordering-api",
+   "to": "sqldata",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: SQL Server (EF Core UseSqlServer / SqlConnection) with Configuration[\"ConnectionString\"] = Server=sqldata;...",
+   "source": "src/Services/Ordering/Ordering.API/Startup.cs:193; src/docker-compose.override.yml:108"
+  },
+  {
+   "from": "ordering-backgroundtasks",
+   "to": "sqldata",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: SQL Server (EF Core UseSqlServer / SqlConnection) with Configuration[\"ConnectionString\"] = Server=sqldata;...",
+   "source": "src/Services/Ordering/Ordering.BackgroundTasks/Services/GracePeriodManagerService.cs:66; src/docker-compose.override.yml:133"
+  },
+  {
+   "from": "webhooks-api",
+   "to": "sqldata",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: SQL Server (EF Core UseSqlServer / SqlConnection) with Configuration[\"ConnectionString\"] = Server=sqldata;...",
+   "source": "src/Services/Webhooks/Webhooks.API/Startup.cs:129; src/docker-compose.override.yml:167"
+  },
+  {
+   "from": "basket-api",
+   "to": "basketdata",
+   "proto": "redis",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "C#: StackExchange.Redis ConnectionMultiplexer.Connect(ConnectionString) (env ${ESHOP_AZURE_REDIS_BASKET_DB:-basketdata})",
+   "source": "src/Services/Basket/Basket.API/Startup.cs:79; src/docker-compose.override.yml:65"
+  },
+  {
+   "from": "basket-api",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddJwtBearer Authority = Configuration[\"IdentityUrl\"] (env =http://identity-api); OIDC discovery/JWKS back-channel",
+   "source": "src/Services/Basket/Basket.API/Startup.cs:222; src/docker-compose.override.yml:66"
+  },
+  {
+   "from": "ordering-api",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddJwtBearer Authority = Configuration[\"IdentityUrl\"] (env =http://identity-api); OIDC discovery/JWKS back-channel",
+   "source": "src/Services/Ordering/Ordering.API/Startup.cs:381; src/docker-compose.override.yml:109"
+  },
+  {
+   "from": "ordering-signalrhub",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddJwtBearer Authority = Configuration[\"IdentityUrl\"] (env =http://identity-api); OIDC discovery/JWKS back-channel",
+   "source": "src/Services/Ordering/Ordering.SignalrHub/Startup.cs:159; src/docker-compose.override.yml:238"
+  },
+  {
+   "from": "webhooks-api",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddJwtBearer Authority = Configuration[\"IdentityUrl\"] (env =http://identity-api); OIDC discovery/JWKS back-channel",
+   "source": "src/Services/Webhooks/Webhooks.API/Startup.cs:306; src/docker-compose.override.yml:171"
+  },
+  {
+   "from": "webmvc",
+   "to": "webshoppingapigw",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: typed HttpClients (Basket/Catalog/OrderingService) to settings.PurchaseUrl + /b/,/c/,/o/ (env PurchaseUrl=http://webshoppingapigw); browser SignalR via SignalrHubUrl (external :5202)",
+   "source": "src/Web/WebMVC/Services/CatalogService.cs:17; src/docker-compose.override.yml:291"
+  },
+  {
+   "from": "webmvc",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddOpenIdConnect Authority = IdentityUrl (external host :5105, mapped to identity-api) + health check IdentityUrlHC=http://identity-api/hc",
+   "source": "src/Web/WebMVC/Startup.cs:170; src/docker-compose.override.yml:294"
+  },
+  {
+   "from": "webspa",
+   "to": "webshoppingapigw",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "browser-side Angular SPA: API + SignalR calls to PurchaseUrl/SignalrHubUrl = http://${ESHOP_EXTERNAL_DNS_NAME_OR_IP}:5202 (host port of webshoppingapigw); server only serves settings",
+   "source": "src/docker-compose.override.yml:278; src/Web/WebSPA/Client/src/modules/shared/services/signalr.service.ts:45"
+  },
+  {
+   "from": "webspa",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "browser-side OIDC to IdentityUrl (external :5105) + server health check IdentityUrlHC=http://identity-api/hc",
+   "source": "src/Web/WebSPA/Startup.cs:26; src/docker-compose.override.yml:279"
+  },
+  {
+   "from": "webhooks-client",
+   "to": "webhooks-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: HttpClient GET/POST settings.WebhooksUrl + /api/v1/webhooks (env WebhooksUrl=http://webhooks-api)",
+   "source": "src/Web/WebhookClient/Services/WebhooksClient.cs:16; src/docker-compose.override.yml:308"
+  },
+  {
+   "from": "webhooks-client",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "C#: AddOpenIdConnect Authority = IdentityUrl (external host :5105, mapped to identity-api)",
+   "source": "src/Web/WebhookClient/Startup.cs:120; src/docker-compose.override.yml:306"
+  },
+  {
+   "from": "webhooks-api",
+   "to": "webhooks-client",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "C#: GrantUrlTesterService/WebhooksSender POST to subscriber-registered URLs (webhooks-client registers SelfUrl=http://webhooks-client/); only after a user registers a webhook",
+   "source": "src/Services/Webhooks/Webhooks.API/Services/WebhooksSender.cs:35; src/docker-compose.override.yml:309"
+  },
+  {
+   "from": "webstatus",
+   "to": "webmvc",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "HealthChecksUI polling http://webmvc/hc (health dashboard only)",
+   "source": "src/docker-compose.override.yml:247"
+  },
+  {
+   "from": "webstatus",
+   "to": "webspa",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "HealthChecksUI polling http://webspa/hc (health dashboard only)",
+   "source": "src/docker-compose.override.yml:249"
+  },
+  {
+   "from": "webstatus",
+   "to": "webshoppingagg",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "HealthChecksUI polling http://webshoppingagg/hc (health dashboard only)",
+   "source": "src/docker-compose.override.yml:251"
+  },
+  {
+   "from": "webstatus",
+   "to": "mobileshoppingagg",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "HealthChecksUI polling http://mobileshoppingagg/hc (health dashboard only)",
+   "source": "src/docker-compose.override.yml:253"
+  },
+  {
+   "from": "webstatus",
+   "to": "ordering-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "HealthChecksUI polling http://ordering-api/hc (health dashboard only)",
+   "source": "src/docker-compose.override.yml:255"
+  },
+  {
+   "from": "webstatus",
+   "to": "basket-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "HealthChecksUI polling http://basket-api/hc (health dashboard only)",
+   "source": "src/docker-compose.override.yml:257"
+  },
+  {
+   "from": "webstatus",
+   "to": "catalog-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "HealthChecksUI polling http://catalog-api/hc (health dashboard only)",
+   "source": "src/docker-compose.override.yml:259"
+  },
+  {
+   "from": "webstatus",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "HealthChecksUI polling http://identity-api/hc (health dashboard only)",
+   "source": "src/docker-compose.override.yml:261"
+  },
+  {
+   "from": "webstatus",
+   "to": "payment-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "HealthChecksUI polling http://payment-api/hc (health dashboard only)",
+   "source": "src/docker-compose.override.yml:263"
+  },
+  {
+   "from": "webstatus",
+   "to": "ordering-signalrhub",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "HealthChecksUI polling http://ordering-signalrhub/hc (health dashboard only)",
+   "source": "src/docker-compose.override.yml:265"
+  },
+  {
+   "from": "webstatus",
+   "to": "ordering-backgroundtasks",
+   "proto": "http",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "HealthChecksUI polling http://ordering-backgroundtasks/hc (health dashboard only)",
+   "source": "src/docker-compose.override.yml:267"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "root:eShopOnContainers:src/ApiGateways/Mobile.Bff.Shopping/aggregator": "mobileshoppingagg",
+   "root:eShopOnContainers:src/ApiGateways/Web.Bff.Shopping/aggregator": "webshoppingagg",
+   "webhookclient": "webhooks-client",
+   "webstatus": "__optional__"
+  },
+  "hosts": {},
+  "workloads": {}
+ }
+}

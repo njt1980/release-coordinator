@@ -33,6 +33,30 @@ The default test run (`python -m unittest discover -s tests`) only runs `test_be
 checks the scoring, the ratchet, the env emulation and the integrity of the ground truth, offline. The
 benchmark itself runs in CI through `.github/workflows/discovery-benchmark.yml`.
 
+## Tuned vs held-out apps, and acceptance
+
+Each app file has a `split`:
+
+- **`tuned`** (the original 7): the scanner was changed while looking at these apps' misses, so their numbers flatter it.
+- **`held_out`** (bank-of-anthos, piggymetrics, robot-shop, eShopOnContainers): never used to tune. Their ground truth was
+  built by a separate agent that never saw the scanner or its output.
+
+Acceptance is judged on held-out apps only, per app (`acceptance.py`, agreed 2026-11-14):
+
+1. no silent miss;
+2. at least 50% of flagged causes point at a real missed dependency.
+
+```bash
+python -m tests.benchmarks.discovery.run_bench --offline --acceptance
+```
+
+**Rule:** once a scanner change is made by looking at a held-out app's misses, that app becomes `tuned`. An honest
+re-measurement then needs new held-out apps. CI runs the ratchet, not acceptance.
+
+**Result on 2026-11-14 (FAILED):** across the held-out apps, manifest-mode recall is 0.40 and precision 0.61, with 30
+silent misses. 38% of flagged causes point at a real miss. On the tuned apps the same scanner shows recall 0.73,
+precision 0.98 and 7 silent misses.
+
 ## What is measured
 
 | Metric | Meaning |
@@ -41,6 +65,7 @@ benchmark itself runs in CI through `.github/workflows/discovery-benchmark.yml`.
 | static P/R | Edges from literal URLs in code only. |
 | manifest P/R | Static edges plus env-variable references resolved against env read from the app's own deployment files. This emulates the Kubernetes source. |
 | missed flagged / silent / no-boundary | How each missed edge (manifest mode) shows up to a coordinator. |
+| flags useful (services, causes) | Of the services flagged incomplete (and of the causes, services sharing the same unread files), how many have a real missed edge; the rest are false alarms. |
 
 Edges are split into `svc` (service to service) and `infra` (service to database, cache or broker).
 Unresolved targets count as false positives in `all`.

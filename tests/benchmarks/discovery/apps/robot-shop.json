@@ -1,0 +1,296 @@
+{
+ "app": "robot-shop",
+ "split": "held_out",
+ "upstream": "https://github.com/instana/robot-shop",
+ "gt_source": "docker-compose.yaml/docker-compose-load.yaml + .env, web/default.conf.template nginx proxy_pass with web/Dockerfile env defaults, and the env-with-default call sites in each service's source (cart/user/catalogue server.js, payment.py, dispatch main.go, shipping Controller/JpaConfig, ratings Kernel.php).",
+ "repos": [
+  {
+   "name": "robot-shop",
+   "url": "https://github.com/instana/robot-shop.git",
+   "sha": "55292e2199f2fb00a165b1f7d3045fe7f8922038"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "compose",
+   "paths": [
+    "robot-shop/docker-compose.yaml",
+    "robot-shop/docker-compose-load.yaml"
+   ],
+   "dotenv": "robot-shop/.env"
+  }
+ ],
+ "observability": [
+  "instana-agent",
+  "fluentd"
+ ],
+ "services": {
+  "web": {
+   "kind": "service",
+   "lang": "nginx",
+   "source": true
+  },
+  "catalogue": {
+   "kind": "service",
+   "lang": "node",
+   "source": true
+  },
+  "user": {
+   "kind": "service",
+   "lang": "node",
+   "source": true
+  },
+  "cart": {
+   "kind": "service",
+   "lang": "node",
+   "source": true
+  },
+  "shipping": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "ratings": {
+   "kind": "service",
+   "lang": "php",
+   "source": true
+  },
+  "payment": {
+   "kind": "service",
+   "lang": "python",
+   "source": true
+  },
+  "dispatch": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "load": {
+   "kind": "service",
+   "lang": "python",
+   "source": true,
+   "optional": true
+  },
+  "mongodb": {
+   "kind": "infra",
+   "what": "mongodb"
+  },
+  "redis": {
+   "kind": "infra",
+   "what": "redis"
+  },
+  "mysql": {
+   "kind": "infra",
+   "what": "mysql"
+  },
+  "rabbitmq": {
+   "kind": "infra",
+   "what": "rabbitmq"
+  },
+  "paypal.com": {
+   "kind": "service",
+   "source": false
+  }
+ },
+ "edges": [
+  {
+   "from": "web",
+   "to": "catalogue",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "nginx proxy_pass http://${CATALOGUE_HOST}:8080/ (envsubst; Dockerfile default CATALOGUE_HOST=catalogue)",
+   "source": "web/default.conf.template:61; web/Dockerfile:28"
+  },
+  {
+   "from": "web",
+   "to": "user",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "nginx proxy_pass http://${USER_HOST}:8080/ (envsubst; Dockerfile default USER_HOST=user)",
+   "source": "web/default.conf.template:65; web/Dockerfile:29"
+  },
+  {
+   "from": "web",
+   "to": "cart",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "nginx proxy_pass http://${CART_HOST}:8080/ (envsubst; Dockerfile default CART_HOST=cart)",
+   "source": "web/default.conf.template:69; web/Dockerfile:30"
+  },
+  {
+   "from": "web",
+   "to": "shipping",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "nginx proxy_pass http://${SHIPPING_HOST}:8080/ (envsubst; Dockerfile default SHIPPING_HOST=shipping)",
+   "source": "web/default.conf.template:73; web/Dockerfile:31"
+  },
+  {
+   "from": "web",
+   "to": "payment",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "nginx proxy_pass http://${PAYMENT_HOST}:8080/ (envsubst; Dockerfile default PAYMENT_HOST=payment)",
+   "source": "web/default.conf.template:77; web/Dockerfile:32"
+  },
+  {
+   "from": "web",
+   "to": "ratings",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "nginx proxy_pass http://${RATINGS_HOST}:80/ (envsubst; Dockerfile default RATINGS_HOST=ratings)",
+   "source": "web/default.conf.template:81; web/Dockerfile:33"
+  },
+  {
+   "from": "cart",
+   "to": "catalogue",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "node: request('http://' + catalogueHost + ':8080/product/' + sku), catalogueHost = process.env.CATALOGUE_HOST || 'catalogue'",
+   "source": "cart/server.js:30,362"
+  },
+  {
+   "from": "cart",
+   "to": "redis",
+   "proto": "redis",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "node: redis.createClient({host: process.env.REDIS_HOST || 'redis'})",
+   "source": "cart/server.js:29,390-391"
+  },
+  {
+   "from": "catalogue",
+   "to": "mongodb",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "node: MongoClient.connect(process.env.MONGO_URL || 'mongodb://mongodb:27017/catalogue')",
+   "source": "catalogue/server.js:157"
+  },
+  {
+   "from": "user",
+   "to": "mongodb",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "node: MongoClient.connect(process.env.MONGO_URL || 'mongodb://mongodb:27017/users')",
+   "source": "user/server.js:272"
+  },
+  {
+   "from": "user",
+   "to": "redis",
+   "proto": "redis",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "node: redis.createClient({host: process.env.REDIS_HOST || 'redis'})",
+   "source": "user/server.js:258-259"
+  },
+  {
+   "from": "shipping",
+   "to": "cart",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: CartHelper(String.format(\"http://%s/shipping/\", getenv(\"CART_ENDPOINT\", \"cart\"))); Dockerfile ENV CART_ENDPOINT=cart:8080",
+   "source": "shipping/src/main/java/com/instana/robotshop/shipping/Controller.java:24; shipping/Dockerfile:24"
+  },
+  {
+   "from": "shipping",
+   "to": "mysql",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "java: jdbc:mysql://${DB_HOST:-mysql}/cities via DataSourceBuilder; Dockerfile ENV DB_HOST=mysql",
+   "source": "shipping/src/main/java/com/instana/robotshop/shipping/JpaConfig.java:16; shipping/Dockerfile:25"
+  },
+  {
+   "from": "ratings",
+   "to": "catalogue",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "php: getenv('CATALOGUE_URL') ?: 'http://catalogue:8080' injected into CatalogueService",
+   "source": "ratings/html/src/Kernel.php:76"
+  },
+  {
+   "from": "ratings",
+   "to": "mysql",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "php: PDO getenv('PDO_URL') ?: 'mysql:host=mysql;dbname=ratings'",
+   "source": "ratings/html/src/Kernel.php:77"
+  },
+  {
+   "from": "payment",
+   "to": "user",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "python: requests to 'http://{user}:8080/check|order/{id}', USER = os.getenv('USER_HOST', 'user')",
+   "source": "payment/payment.py:25,64,106"
+  },
+  {
+   "from": "payment",
+   "to": "cart",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "python: requests.delete('http://{cart}:8080/cart/{id}'), CART = os.getenv('CART_HOST', 'cart')",
+   "source": "payment/payment.py:24,116"
+  },
+  {
+   "from": "payment",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "python: pika publisher, HOST = os.getenv('AMQP_HOST', 'rabbitmq')",
+   "source": "payment/rabbitmq.py:6; payment/payment.py:135"
+  },
+  {
+   "from": "payment",
+   "to": "paypal.com",
+   "proto": "https",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "python: requests.get(PAYMENT_GATEWAY), PAYMENT_GATEWAY = os.getenv('PAYMENT_GATEWAY', 'https://paypal.com/')",
+   "source": "payment/payment.py:26,84"
+  },
+  {
+   "from": "dispatch",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "go: amqp.Dial(fmt.Sprintf(\"amqp://guest:guest@%s:5672/\", AMQP_HOST default \"rabbitmq\")) consumer",
+   "source": "dispatch/main.go:179-183"
+  },
+  {
+   "from": "load",
+   "to": "web",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "locust load-gen against HOST=http://web:8080 (docker-compose-load.yaml)",
+   "source": "docker-compose-load.yaml:8"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "load-gen": "load",
+   "fluentd": "__optional__",
+   "mongo": "__optional__",
+   "mysql": "__optional__"
+  },
+  "hosts": {},
+  "workloads": {}
+ }
+}
