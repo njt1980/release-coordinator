@@ -25,6 +25,7 @@ from src.core.models import (
     ShapeFinding,
     UnresolvedEntity,
 )
+from src.discovery_engine import nodes as discovery_nodes
 from src.discovery_engine.graph import discovery_app
 from src.discovery_engine.state import DiscoveryGraphState
 from src.orchestration.narration import narrate_discovery
@@ -38,6 +39,7 @@ from src.tools.baseline_store import (
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.devops_catalog import DevOpsCatalog, DevOpsProjectInfo, DevOpsRepositoryInfo
+from src.tools.policy_store import PolicyInvalidError, PolicyMissingError
 from src.tools.telemetry_extractor import TelemetryExtractor
 from src.assistant_api import router as assistant_router
 from src.decision_api import router as decision_router
@@ -217,9 +219,18 @@ class KubernetesVerificationRequest(BaseModel):
 
 
 class TelemetryVerificationRequest(BaseModel):
-    """Log Analytics workspace whose query access should be checked."""
+    """Log Analytics workspace whose query access should be checked.
+
+    ``tenant`` and ``project_id`` select the release policy whose
+    ``telemetry_additional_workspaces`` are checked too, so an unreadable
+    workspace shows up at onboarding instead of as a later discovery gap.
+    """
 
     workspace_id: str = Field(min_length=1)
+    tenant: str = Field(default=config.DEFAULT_TENANT, pattern=PATH_SEGMENT_PATTERN)
+    project_id: str = Field(
+        default=config.DEFAULT_PROJECT_ID, pattern=PATH_SEGMENT_PATTERN
+    )
 
     @field_validator("workspace_id")
     @classmethod
@@ -265,13 +276,60 @@ def verify_kubernetes(namespaces: list[str]) -> SystemVerification:
         return SystemVerification(status=False, message=str(error))
 
 
-def verify_telemetry(workspace_id: str) -> SystemVerification:
-    """Run the telemetry read-only query check against one workspace."""
+def _policy_workspaces(scope: BaselineScope) -> tuple[list[str], str | None]:
+    """The policy's additional workspaces, or a reason they couldn't be read.
+
+    A missing policy has none; an invalid one is reported, because discovery
+    would read the workspaces it names once the policy is fixed.
+    """
     try:
-        extractor = TelemetryExtractor(workspace_id=workspace_id)
-        return _to_verification(extractor.verify_access())
+        policy = discovery_nodes.POLICY_STORE.load(scope).policy
+    except PolicyMissingError:
+        return [], None
+    except PolicyInvalidError as error:
+        return [], f"release policy unreadable, additional workspaces not checked: {error}"
+    return list(policy.telemetry_additional_workspaces), None
+
+
+def _verify_workspace(workspace_id: str) -> tuple[bool, str]:
+    try:
+        return TelemetryExtractor(workspace_id=workspace_id).verify_access()
     except Exception as error:
-        return SystemVerification(status=False, message=str(error))
+        return False, str(error)
+
+
+def verify_telemetry(payload: TelemetryVerificationRequest) -> SystemVerification:
+    """Run the read-only query check on the workspace and the policy's additional ones.
+
+    Every workspace a dependency query will read must answer; one that
+    does not fails the check and is named in the message.
+    """
+    ok, message = _verify_workspace(payload.workspace_id)
+    if not ok:
+        return SystemVerification(status=False, message=message)
+    scope = BaselineScope(tenant=payload.tenant, project_id=payload.project_id)
+    additional, policy_problem = _policy_workspaces(scope)
+    primary = payload.workspace_id.lower()
+    failures: list[str] = []
+    checked = 0
+    for workspace in additional:
+        if workspace == primary:
+            continue
+        checked += 1
+        workspace_ok, workspace_message = _verify_workspace(workspace)
+        if not workspace_ok:
+            failures.append(f"additional workspace {workspace}: {workspace_message}")
+    if failures:
+        return SystemVerification(status=False, message="; ".join(failures))
+    if policy_problem:
+        return SystemVerification(status=True, message=f"{message} ({policy_problem})")
+    if checked:
+        plural = "s" if checked != 1 else ""
+        return SystemVerification(
+            status=True,
+            message=f"{message}: workspace and {checked} additional workspace{plural} readable",
+        )
+    return SystemVerification(status=True, message=message)
 
 
 def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
@@ -538,7 +596,7 @@ def verify_telemetry_endpoint(
     payload: TelemetryVerificationRequest,
 ) -> SystemVerification:
     """Run the pre-flight read-only access check for telemetry."""
-    return verify_telemetry(payload.workspace_id)
+    return verify_telemetry(payload)
 
 
 @app.get("/healthz", include_in_schema=False)

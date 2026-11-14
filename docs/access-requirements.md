@@ -52,7 +52,9 @@ before falling back to the developer's `az login`.
   same role on each. Every telemetry query reads all of them at once, so a
   call whose caller and callee report to different workspaces is still
   joined. A baseline that read other workspaces than the policy lists is
-  `BASELINE_SCOPE_MISMATCH`.
+  `BASELINE_SCOPE_MISMATCH`. The onboarding telemetry access test checks
+  every listed workspace too (for the tenant/project entered), so a missing
+  role shows up there instead of later as a `DISCOVERY_GAP`.
 - Sampling: a sampled row stands for `ItemCount` calls and is counted so.
   When a radius service is unseen and the telemetry is sampled, the
   explanation says so: a service called rarely may have no row in the

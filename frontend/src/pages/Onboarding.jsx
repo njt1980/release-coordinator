@@ -549,6 +549,11 @@ export default function Onboarding() {
       testGenerations.current[system] += 1;
       setTest(system, IDLE_TEST);
     }
+    if (field === "tenant" || field === "projectId") {
+      // Another project's policy may name other additional workspaces.
+      testGenerations.current.telemetry += 1;
+      setTest("telemetry", IDLE_TEST);
+    }
     if (TARGET_FIELDS.includes(field)) {
       // A baseline shown for another tenant/project would be misleading.
       baselineGeneration.current += 1;
@@ -633,7 +638,13 @@ export default function Onboarding() {
       if (!workspaceId) {
         throw new Error("Enter the Log Analytics workspace ID to test.");
       }
-      return postJson("/api/verify/telemetry", { workspace_id: workspaceId });
+      // The project's policy may name additional workspaces; those are checked too.
+      const { tenant, project_id: projectId } = buildTarget(config);
+      return postJson("/api/verify/telemetry", {
+        workspace_id: workspaceId,
+        tenant,
+        project_id: projectId,
+      });
     });
 
   const finishCrawl = (banner) => {
@@ -850,7 +861,7 @@ export default function Onboarding() {
               onTest={testTelemetry}
               testState={tests.telemetry}
               testDisabled={isCrawling}
-              description="Application dependency telemetry used to confirm which service-to-service calls are actually active."
+              description="Application dependency telemetry used to confirm which service-to-service calls are actually active. The test also checks the additional workspaces named in the project's policy (telemetry_additional_workspaces)."
               requiredRole="Log Analytics Reader"
               securityJustification="Runs read-only KQL queries against the AppDependencies table for a bounded lookback window. Cannot modify workspace settings, data, or alerts."
             >
