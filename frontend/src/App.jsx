@@ -4,6 +4,7 @@ import HowItWorks from "./pages/HowItWorks.jsx";
 import Onboarding from "./pages/Onboarding.jsx";
 import Runs from "./pages/Runs.jsx";
 import Assessments from "./pages/Assessments.jsx";
+import Review from "./pages/Review.jsx";
 import AskPanel from "./components/AskPanel.jsx";
 import { FocusContext } from "./lib/focus.js";
 import { ROUTES, useRoute } from "./lib/router.js";
@@ -14,6 +15,7 @@ const PAGES = {
   [ROUTES.onboard]: { component: Onboarding, title: "Onboarding · Release Coordinator", name: "onboarding" },
   [ROUTES.runs]: { component: Runs, title: "Runs · Release Coordinator", name: "runs" },
   [ROUTES.assessments]: { component: Assessments, title: "Assessments · Release Coordinator", name: "assessments" },
+  [ROUTES.review]: { component: Review, title: "Dependency review · Release Coordinator", name: "dependency review" },
 };
 
 export default function App() {

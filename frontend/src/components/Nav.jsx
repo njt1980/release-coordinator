@@ -18,6 +18,7 @@ const LINKS = [
   // landing page links to How it works.
   { path: ROUTES.home, label: "Overview", wide: true },
   { path: ROUTES.howItWorks, label: "How it works", wide: true },
+  { path: ROUTES.review, label: "Review" },
   { path: ROUTES.assessments, label: "Assessments" },
   { path: ROUTES.runs, label: "Runs" },
 ];

@@ -85,7 +85,12 @@ from src.tools.policy_store import (
     default_policy_store,
 )
 from src.core.review import RepositoryChanges
-from src.orchestration.review import answers_in_force, confirmed_map, split_accepted
+from src.orchestration.review import (
+    ReviewInForce,
+    answers_in_force,
+    confirmed_map,
+    split_accepted,
+)
 from src.tools.devops_extractor import CommitComparison, DevOpsExtractor
 from src.tools.review_store import ReviewStoreCorruptError, default_review_store
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
@@ -680,33 +685,31 @@ def verify_revision_node(state: ReleaseGraphState) -> dict[str, object]:
     }
 
 
-def load_review_node(state: ReleaseGraphState) -> dict[str, object]:
-    """Decide which of the project's dependency review answers count.
+def review_in_force(
+    scope: BaselineScope,
+    baseline: StoredBaseline,
+    policy: ProjectPolicy | None,
+    graph: KnowledgeGraph,
+    pending: Mapping[str, list[str]] | None = None,
+) -> ReviewInForce | None:
+    """The project's dependency review answers that count against
+    ``graph`` (None when the project has none).
 
-    Each answer is checked against the baseline's scanned commits: source
+    Each answer is checked against ``baseline``'s scanned commits: source
     control (the policy's ``source_control``) reports what changed since
-    the commit the answer was given at, and the pull request's own changed
-    files count as changes too (see ``answers_in_force``). An answer that
-    can't be checked doesn't count. A review store that can't be read is
-    REVIEW_UNAVAILABLE: declared dependencies may be missing from the order.
+    the commit it was given at; ``pending`` (repository -> files a pull
+    request changes) count as changes too. An answer that can't be checked
+    doesn't count (see ``answers_in_force``).
+
+    Raises:
+        ReviewStoreCorruptError, sqlite3.Error, OSError: the store can't be read.
     """
-    baseline, _ = load_baseline(_scope(state), state.get("baseline_snapshot_id"))
-    if baseline is None:
-        return {"review_in_force": None}
-    try:
-        answers = REVIEW_STORE.answers(_scope(state))
-    except (ReviewStoreCorruptError, sqlite3.Error, OSError) as error:
-        logger.warning("Dependency review unreadable: %s", error)
-        return {
-            "review_in_force": None,
-            "discovery_issues": [*state.get("discovery_issues", []), review_unavailable(str(error))],
-        }
+    answers = REVIEW_STORE.answers(scope)
     if not answers:
-        return {"review_in_force": None}
+        return None
     scan = baseline.graph.scan
     current = {r.repository: r.commit_sha for r in scan.scanned_revisions} if scan else {}
     needed = needed_comparisons(answers, current)
-    policy = _policy(state)
     changes: list[RepositoryChanges] = []
     if needed and policy is not None and policy.source_control is not None:
         source = policy.source_control
@@ -720,16 +723,62 @@ def load_review_node(state: ReleaseGraphState) -> dict[str, object]:
             if compared.errors:
                 logger.warning("Review anchors in %s unchecked: %s", repository, compared.errors)
             changes.extend(to_changes(comparison) for comparison in compared.items)
+    return answers_in_force(graph, answers, current, changes, pending, utc_now())
+
+
+def load_review_node(state: ReleaseGraphState) -> dict[str, object]:
+    """Decide which of the project's dependency review answers count for
+    this release (see ``review_in_force``); the pull request's changed
+    files count as changes. A review store that can't be read is
+    REVIEW_UNAVAILABLE: declared dependencies may be missing from the order.
+    """
+    scope = _scope(state)
+    baseline, _ = load_baseline(scope, state.get("baseline_snapshot_id"))
+    if baseline is None:
+        return {"review_in_force": None}
     pull_request: PullRequestPayload = state["pull_request"]
-    in_force = answers_in_force(
-        state.get("assessed_graph") or baseline.graph,
-        answers,
-        current,
-        changes,
-        pending_changes(pull_request.repository, pull_request.changed_files, current),
-        utc_now(),
-    )
+    scan = baseline.graph.scan
+    current = {r.repository: r.commit_sha for r in scan.scanned_revisions} if scan else {}
+    try:
+        in_force = review_in_force(
+            scope,
+            baseline,
+            _policy(state),
+            state.get("assessed_graph") or baseline.graph,
+            pending_changes(pull_request.repository, pull_request.changed_files, current),
+        )
+    except (ReviewStoreCorruptError, sqlite3.Error, OSError) as error:
+        logger.warning("Dependency review unreadable: %s", error)
+        return {
+            "review_in_force": None,
+            "discovery_issues": [*state.get("discovery_issues", []), review_unavailable(str(error))],
+        }
     return {"review_in_force": in_force}
+
+
+def project_questions(
+    policy: ProjectPolicy | None, baseline: StoredBaseline
+) -> list[EvidenceIssue]:
+    """Every gap an assessment of any service in ``baseline`` would raise
+    that a coordinator can answer: unresolved dependencies the policy
+    doesn't exempt, source-only identities, and unread source files."""
+    graph = baseline.graph
+    services = [service.service_id for service in graph.services]
+    radius = traverse_blast_radius(graph, services)
+    unset_kind = {
+        entity.entity_id
+        for entity in graph.unresolved_entities
+        if entity.kind is UnresolvedEntityKind.ENVIRONMENT_VARIABLE_UNSET
+    }
+    gaps, _ = unresolved_gaps(
+        policy,
+        [
+            explain_unset(reach) if reach.node in unset_kind else explain_pipeline(reach, graph)
+            for reach in radius.unresolved
+        ],
+    )
+    coverage, _ = static_coverage_issues(policy, graph, baseline.snapshot_id)
+    return [*gaps, *identity_issues(graph, services), *coverage]
 
 
 def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
