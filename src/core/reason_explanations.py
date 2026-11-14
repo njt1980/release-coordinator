@@ -68,18 +68,21 @@ REASON_EXPLANATIONS: Final[dict[ReasonCode, tuple[str, str]]] = {
     ),
     ReasonCode.COMPATIBILITY_UNVERIFIED: (
         "No contract evidence proves the change compatible, so the deployment order rests on "
-        "the declared change type alone. Only .proto contracts are read; under the default "
-        "strict contract scope, only a pull request changing nothing but .proto files can be "
-        "verified.",
+        "the declared change type alone. Only .proto contracts, OpenAPI documents and message "
+        "payload types are read; under the default strict contract scope, only a pull request "
+        "changing nothing but .proto files and OpenAPI documents can be verified.",
         "Read the contract check in the briefing. Split contract changes into their own pull "
         "request, or set contract_scope: interfaces in the policy so code changes count when "
-        "every caller reaches the service through a shared .proto contract.",
+        "every caller reaches the service through a shared contract (.proto, or an OpenAPI document its build generates a client from).",
     ),
     ReasonCode.CONTRACT_BREAKING: (
-        "A changed .proto contract breaks compatibility: a service built against the old "
-        "version and one built against the new can't talk while a rolling deployment runs.",
-        "Make the change additive (new fields and RPCs, keep old ones and their numbers), or "
-        "plan a coordinated release and record your decision against the tool's verdict.",
+        "A changed contract (a .proto file, an OpenAPI document or a message payload type) "
+        "breaks compatibility: a service built against the old version and one built against "
+        "the new can't talk while a rolling deployment runs, and queued messages may no longer "
+        "be read.",
+        "Make the change additive (new fields, operations and RPCs; keep old ones, their numbers "
+        "and their types; don't make new request fields required), or plan a coordinated "
+        "release and record your decision against the tool's verdict.",
     ),
     ReasonCode.DEMO_EVIDENCE: (
         "The evidence includes mock fixture data.",

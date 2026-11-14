@@ -28,10 +28,21 @@ the safe side).
 from __future__ import annotations
 
 import re
-from enum import Enum
 from typing import Final, Iterator
 
 from pydantic import BaseModel, Field
+
+from src.core.contract_findings import BREAKING_CHANGES, ContractChangeKind, ContractFinding
+
+__all__ = [
+    "BREAKING_CHANGES",
+    "ContractChangeKind",
+    "ContractFinding",
+    "ProtoFile",
+    "ProtoParseError",
+    "diff_protos",
+    "parse_proto",
+]
 
 
 class ProtoParseError(ValueError):
@@ -80,75 +91,6 @@ class ProtoFile(BaseModel):
     messages: dict[str, ProtoMessage] = Field(default_factory=dict)
     enums: dict[str, ProtoEnum] = Field(default_factory=dict)
     services: dict[str, ProtoService] = Field(default_factory=dict)
-
-
-class ContractChangeKind(str, Enum):
-    """One kind of difference between two versions of a contract."""
-
-    FILE_ADDED = "FILE_ADDED"
-    FILE_REMOVED = "FILE_REMOVED"
-    PACKAGE_CHANGED = "PACKAGE_CHANGED"
-    SERVICE_ADDED = "SERVICE_ADDED"
-    SERVICE_REMOVED = "SERVICE_REMOVED"
-    RPC_ADDED = "RPC_ADDED"
-    RPC_REMOVED = "RPC_REMOVED"
-    RPC_TYPES_CHANGED = "RPC_TYPES_CHANGED"
-    RPC_STREAMING_CHANGED = "RPC_STREAMING_CHANGED"
-    MESSAGE_ADDED = "MESSAGE_ADDED"
-    MESSAGE_REMOVED = "MESSAGE_REMOVED"
-    FIELD_ADDED = "FIELD_ADDED"
-    FIELD_REQUIRED_ADDED = "FIELD_REQUIRED_ADDED"
-    FIELD_REMOVED = "FIELD_REMOVED"
-    FIELD_TYPE_CHANGED = "FIELD_TYPE_CHANGED"
-    FIELD_RENAMED = "FIELD_RENAMED"
-    FIELD_CARDINALITY_CHANGED = "FIELD_CARDINALITY_CHANGED"
-    FIELD_PRESENCE_CHANGED = "FIELD_PRESENCE_CHANGED"
-    FIELD_ONEOF_CHANGED = "FIELD_ONEOF_CHANGED"
-    ENUM_ADDED = "ENUM_ADDED"
-    ENUM_REMOVED = "ENUM_REMOVED"
-    ENUM_VALUE_ADDED = "ENUM_VALUE_ADDED"
-    ENUM_VALUE_REMOVED = "ENUM_VALUE_REMOVED"
-    ENUM_VALUE_RENAMED = "ENUM_VALUE_RENAMED"
-
-
-BREAKING_CHANGES: Final[frozenset[ContractChangeKind]] = frozenset(
-    {
-        ContractChangeKind.FILE_REMOVED,
-        ContractChangeKind.PACKAGE_CHANGED,
-        ContractChangeKind.SERVICE_REMOVED,
-        ContractChangeKind.RPC_REMOVED,
-        ContractChangeKind.RPC_TYPES_CHANGED,
-        ContractChangeKind.RPC_STREAMING_CHANGED,
-        ContractChangeKind.MESSAGE_REMOVED,
-        ContractChangeKind.FIELD_REQUIRED_ADDED,
-        ContractChangeKind.FIELD_REMOVED,
-        ContractChangeKind.FIELD_TYPE_CHANGED,
-        ContractChangeKind.FIELD_RENAMED,
-        ContractChangeKind.FIELD_CARDINALITY_CHANGED,
-        ContractChangeKind.FIELD_ONEOF_CHANGED,
-        ContractChangeKind.ENUM_REMOVED,
-        ContractChangeKind.ENUM_VALUE_REMOVED,
-        ContractChangeKind.ENUM_VALUE_RENAMED,
-    }
-)
-
-
-class ContractFinding(BaseModel):
-    """One difference between the base and head of a contract file.
-
-    ``path`` is the repository-relative file, ``symbol`` what changed
-    (``Message.field``, ``Service.Rpc``...), ``detail`` the sentence a
-    person reads.
-    """
-
-    path: str = Field(min_length=1)
-    symbol: str = ""
-    change: ContractChangeKind
-    detail: str = Field(min_length=1)
-
-    @property
-    def breaking(self) -> bool:
-        return self.change in BREAKING_CHANGES
 
 
 # --- Reading ---------------------------------------------------------------

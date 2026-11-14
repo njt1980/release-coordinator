@@ -38,6 +38,7 @@ from src.core.models import (
     ServiceCoverage,
     ServiceStaticConfig,
     ContractLink,
+    ContractRole,
     SharedFile,
     SharedLibrary,
     UnscannedFile,
@@ -51,6 +52,7 @@ from src.core.env_names import (
     is_loopback_endpoint,
     names_host,
 )
+from src.core.openapi_contract import is_openapi_file
 from src.core.service_ids import env_var_reference, host_of, is_private_dns_host
 from src.tools.build_projects import (
     BuildProject,
@@ -1889,6 +1891,10 @@ class DevOpsExtractor:
                 for root in layout.owner(build_project.file_path).services:
                     if root in services:
                         services[root].add_contracts(build_project.contracts)
+            for path in sorted(p for p in file_paths if is_openapi_file(p)):
+                for root in layout.owner(path).services:
+                    if root in services:
+                        services[root].add_served_document(path.strip("/"))
 
             scans = [services[b.root].finish(repo_name, commit_sha) for b in selected]
             declared = self._identity_declarations(
@@ -2246,6 +2252,12 @@ class _ServiceAccumulator:
             if (link.path, link.role) not in known:
                 self.coverage.contracts.append(link)
                 known.add((link.path, link.role))
+
+    def add_served_document(self, path: str) -> None:
+        """Record an OpenAPI document in the service's directory as the API
+        it serves, unless its build generates a client from it."""
+        if not any(link.path == path for link in self.coverage.contracts):
+            self.coverage.contracts.append(ContractLink(path=path, role=ContractRole.SERVER))
 
     def add_sites(self, path: str, sites: list[OpaqueReferenceSite]) -> None:
         """Record references in ``path`` that weren't understood."""
