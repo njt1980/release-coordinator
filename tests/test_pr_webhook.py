@@ -360,6 +360,11 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         self.assertEqual(record.status, "completed")
         self.assertEqual(record.assessment, assessment)
         self.assertEqual(record.evidence_report, "## report")
+        # The briefing is derived from the assessment and listed.
+        briefing = webhooks.get_pr_briefing("job-1")
+        self.assertEqual(briefing.headline, "No-go: risk found (MODEL_REJECTED).")
+        (summary,) = [s for s in webhooks.list_pr_assessments() if s.job_id == "job-1"]
+        self.assertEqual((summary.pr_id, summary.headline), ("PR-2048", briefing.headline))
 
     def test_job_records_failure_and_unknown_job_is_404(self) -> None:
         coordinator = MagicMock()
@@ -371,6 +376,9 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         record = webhooks.get_pr_assessment("job-2")
         self.assertEqual(record.status, "failed")
         self.assertEqual(record.error_message, "anthropic down")
+        with self.assertRaises(HTTPException) as no_briefing:
+            webhooks.get_pr_briefing("job-2")
+        self.assertEqual(no_briefing.exception.status_code, 409)
         with self.assertRaises(HTTPException) as raised:
             webhooks.get_pr_assessment("missing")
         self.assertEqual(raised.exception.status_code, 404)

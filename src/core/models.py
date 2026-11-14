@@ -1351,8 +1351,9 @@ class IssueSubjectKind(str, Enum):
 
 
 class IssueSubject(BaseModel, frozen=True):
-    """One thing an evidence issue concerns: a service FQURI, an unresolved
-    entity ID, or a repository file (``<repository>:<path>``)."""
+    """One thing an evidence issue concerns: a service (its FQURI, or its
+    name where only the name is known), an unresolved entity ID, or a
+    repository file (``<repository>:<path>``)."""
 
     kind: IssueSubjectKind
     id: str = Field(min_length=1)

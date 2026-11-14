@@ -14,15 +14,18 @@ export function LogoMark({ className = "" }) {
 }
 
 const LINKS = [
-  { path: ROUTES.home, label: "Overview" },
-  { path: ROUTES.howItWorks, label: "How it works" },
+  // Narrow screens keep the working pages; the logo links home, and the
+  // landing page links to How it works.
+  { path: ROUTES.home, label: "Overview", wide: true },
+  { path: ROUTES.howItWorks, label: "How it works", wide: true },
+  { path: ROUTES.assessments, label: "Assessments" },
   { path: ROUTES.runs, label: "Runs" },
 ];
 
 export default function Nav({ path, tone = "dark" }) {
   const dark = tone === "dark";
   const linkClass = (active) =>
-    `rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+    `whitespace-nowrap rounded-md px-2 py-2 text-sm font-medium transition-colors sm:px-3 ${
       dark
         ? active
           ? "text-white"
@@ -58,7 +61,7 @@ export default function Nav({ path, tone = "dark" }) {
               key={link.path}
               href={href(link.path)}
               aria-current={path === link.path ? "page" : undefined}
-              className={linkClass(path === link.path)}
+              className={`${linkClass(path === link.path)} ${link.wide ? "hidden sm:inline-block" : ""}`}
             >
               {link.label}
             </a>
@@ -66,7 +69,7 @@ export default function Nav({ path, tone = "dark" }) {
           <a
             href={href(ROUTES.onboard)}
             aria-current={path === ROUTES.onboard ? "page" : undefined}
-            className="ml-1 rounded-md bg-brand-600 px-3 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-brand-500"
+            className="ml-1 shrink-0 rounded-md bg-brand-600 px-3 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-brand-500"
           >
             Onboard
           </a>

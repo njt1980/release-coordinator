@@ -3,6 +3,7 @@ import Landing from "./pages/Landing.jsx";
 import HowItWorks from "./pages/HowItWorks.jsx";
 import Onboarding from "./pages/Onboarding.jsx";
 import Runs from "./pages/Runs.jsx";
+import Assessments from "./pages/Assessments.jsx";
 import AskPanel from "./components/AskPanel.jsx";
 import { FocusContext } from "./lib/focus.js";
 import { ROUTES, useRoute } from "./lib/router.js";
@@ -12,6 +13,7 @@ const PAGES = {
   [ROUTES.howItWorks]: { component: HowItWorks, title: "How it works · Release Coordinator", name: "how it works" },
   [ROUTES.onboard]: { component: Onboarding, title: "Onboarding · Release Coordinator", name: "onboarding" },
   [ROUTES.runs]: { component: Runs, title: "Runs · Release Coordinator", name: "runs" },
+  [ROUTES.assessments]: { component: Assessments, title: "Assessments · Release Coordinator", name: "assessments" },
 };
 
 export default function App() {

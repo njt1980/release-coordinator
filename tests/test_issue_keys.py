@@ -63,7 +63,7 @@ class CoverageIssueTests(unittest.TestCase):
         self.assertEqual(len({i.root_key for i in issues}), 1)
         self.assertEqual(
             [(s.kind, s.id) for s in issues[0].subjects],
-            [(IssueSubjectKind.FILE, "eShop:src/EventBus/Bus.cs")],
+            [(IssueSubjectKind.SERVICE, "basket-api"), (IssueSubjectKind.FILE, "eShop:src/EventBus/Bus.cs")],
         )
 
 

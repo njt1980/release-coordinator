@@ -25,6 +25,7 @@ from src.core.models import (
     PullRequestPayload,
     ReleaseAssessment,
 )
+from src.orchestration.briefing import ReleaseBriefing, build_briefing
 from src.orchestration.narration import narrate_assessment
 from src.orchestration.run_log import DEFAULT_RUN_LOGS, run_graph
 from src.tools.baseline_store import PATH_SEGMENT_PATTERN, BaselineScope, default_store
@@ -109,6 +110,18 @@ class PrAssessmentJob(BaseModel):
     error_message: str | None = None
     assessment: ReleaseAssessment | None = None
     evidence_report: str | None = None
+    briefing: ReleaseBriefing | None = None
+
+
+class PrAssessmentSummary(BaseModel):
+    """One PR assessment in a list: enough to choose which to open."""
+
+    job_id: str
+    pr_id: str
+    status: AssessmentJobStatus
+    headline: str = ""
+    decisions_needed: int = 0
+    evidence_fixes: int = 0
 
 
 # In-memory job registry; records are lost when the server restarts. Only
@@ -211,6 +224,7 @@ async def run_assessment_job(
             status="completed",
             assessment=assessment,
             evidence_report=final_state.get("evidence_report"),
+            briefing=build_briefing(assessment),
         )
 
 
@@ -284,6 +298,36 @@ def pr_assessment_webhook(
         unmapped_files=unmapped,
         exempted_files=exempted,
     )
+
+
+@router.get("/pr-assessments", response_model=list[PrAssessmentSummary])
+def list_pr_assessments() -> list[PrAssessmentSummary]:
+    """PR assessments of this server session, newest first."""
+    return [
+        PrAssessmentSummary(
+            job_id=record.job_id,
+            pr_id=record.pr_id,
+            status=record.status,
+            headline=record.briefing.headline if record.briefing else "",
+            decisions_needed=record.briefing.decisions_needed if record.briefing else 0,
+            evidence_fixes=record.briefing.evidence_fixes if record.briefing else 0,
+        )
+        for record in reversed(list(_assessment_jobs.values()))
+    ]
+
+
+@router.get("/pr-assessment/{job_id}/briefing", response_model=ReleaseBriefing)
+def get_pr_briefing(job_id: str) -> ReleaseBriefing:
+    """The release briefing of a completed PR assessment."""
+    record = _assessment_jobs.get(job_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown job ID")
+    if record.briefing is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Assessment {job_id} is {record.status}; no briefing yet.",
+        )
+    return record.briefing
 
 
 @router.get("/pr-assessment/{job_id}", response_model=PrAssessmentJob)
