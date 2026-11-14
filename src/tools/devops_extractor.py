@@ -28,6 +28,7 @@ from src.core.models import (
     ConfigBinding,
     ConfigFramework,
     DiscoveryResult,
+    IdentityDeclaration,
     OpaqueReferenceKind,
     OpaqueReferenceSite,
     PipelineVariables,
@@ -62,6 +63,12 @@ from src.tools.build_projects import (
     unresolved_sites,
 )
 from src.tools.client_libraries import client_libraries, manifest_ecosystem
+from src.tools.declared_identity import (
+    BuildDeclaration,
+    attribute_declarations,
+    declaration_file_kind,
+    read_declarations,
+)
 from src.tools.docker_copies import copied_files
 from src.tools.spring_cloud import (
     ServedFile,
@@ -317,6 +324,9 @@ class ServiceScan(BaseModel):
     references: list[EndpointReference] = Field(default_factory=list)
     coverage: ServiceCoverage | None = None
     config: ServiceStaticConfig | None = None
+    # Names and images build files declare for the service (identity only;
+    # see ``declared_identity``).
+    identity_declarations: list[IdentityDeclaration] = Field(default_factory=list)
 
 
 class RepositoryScan(BaseModel):
@@ -1819,6 +1829,12 @@ class DevOpsExtractor:
                         services[root].add_contracts(build_project.contracts)
 
             scans = [services[b.root].finish(repo_name, commit_sha) for b in selected]
+            declared = self._identity_declarations(
+                git_client, repository.id, project, commit_sha, file_paths, projects,
+                [b.root for b in boundaries], build_contents,
+            )
+            for scan in scans:
+                scan.identity_declarations = declared.get(scan.service.root, [])
             self._flag_clients_without_address(
                 git_client, repository.id, project, commit_sha, file_paths, layout, scans, build_contents
             )
@@ -1843,6 +1859,39 @@ class DevOpsExtractor:
             return DiscoveryResult[RepositoryScan].failed(
                 f"{repo_name}: repository scan failed: {error}"
             )
+
+    def _identity_declarations(
+        self,
+        git_client: Any,
+        repository_id: str,
+        project: str,
+        commit_sha: str,
+        file_paths: list[str],
+        projects: list[BuildProject],
+        service_roots: list[str],
+        build_contents: dict[str, str],
+    ) -> dict[str, list[IdentityDeclaration]]:
+        """Service root -> names and images build files declare for it.
+
+        Reads Compose, skaffold, pipeline and Aspire AppHost files (see
+        ``declared_identity``). Identity only: a file that can't be read
+        is skipped with a warning, which can only leave a service unlinked.
+        """
+        apphost_roots = {p.root for p in projects if p.kind is ProjectKind.APPHOST}
+        found: list[BuildDeclaration] = []
+        for path in file_paths:
+            kind = declaration_file_kind(path, apphost_roots)
+            if kind is None:
+                continue
+            try:
+                content = build_contents.get(path) or self._read_item_content(
+                    git_client, repository_id, path, project, commit_sha
+                )
+            except Exception as error:
+                logger.warning("Cannot read identity declaration file %s: %s", path, error)
+                continue
+            found.extend(read_declarations(path, content, kind, file_paths))
+        return attribute_declarations(found, service_roots, _TOOLING_DIRECTORY_NAMES)
 
     def _flag_clients_without_address(
         self,

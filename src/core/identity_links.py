@@ -10,6 +10,15 @@ Links are made only on evidence that preserves meaning:
 - ``CANONICAL_EQUAL``: the names are equal after folding case and the
   separators ``-``, ``_`` and ``.`` (``fold``), and the folded name is
   unique on both sides (one source name, one runtime name).
+- Declared facts (``IdentityFacts``), for a source name left unlinked:
+  ``IMAGE_REPOSITORY`` (an image built from the source directory, per a
+  Compose, skaffold or pipeline file, is what the runtime service runs),
+  ``DECLARED_NAME`` (a Compose service or Aspire resource built from the
+  source directory has the runtime service's name, or a name the runtime
+  service declares) and ``RUNTIME_DECLARED_NAME`` (the runtime service's
+  identity label or ``OTEL_SERVICE_NAME`` is the source name). A link needs
+  exactly one runtime candidate across all of them, claimed by no other
+  source name. Facts tie identities only; they never create an edge.
 
 Anything weaker (a near name, a shared token) is a ``suggestion`` only:
 shown to the coordinator as a question, never used as evidence. A
@@ -20,7 +29,7 @@ needs no linking: the names are already equal.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from enum import Enum
 from typing import Final
 
@@ -36,6 +45,30 @@ class LinkEvidenceKind(str, Enum):
     """Why a source name and a runtime name are the same service."""
 
     CANONICAL_EQUAL = "CANONICAL_EQUAL"
+    IMAGE_REPOSITORY = "IMAGE_REPOSITORY"
+    DECLARED_NAME = "DECLARED_NAME"
+    RUNTIME_DECLARED_NAME = "RUNTIME_DECLARED_NAME"
+
+
+# Strongest first: the evidence a link made from several facts reports.
+_DECLARED_EVIDENCE_ORDER: Final[tuple[LinkEvidenceKind, ...]] = (
+    LinkEvidenceKind.IMAGE_REPOSITORY,
+    LinkEvidenceKind.DECLARED_NAME,
+    LinkEvidenceKind.RUNTIME_DECLARED_NAME,
+)
+
+
+class IdentityFacts(BaseModel, frozen=True):
+    """Declared names and image repositories of one service (identity only).
+
+    For a source service: names and images its build files declare. For a
+    runtime service: names its workloads declare (identity labels,
+    ``OTEL_SERVICE_NAME``) and the repositories of the images it runs.
+    ``image_repositories`` are normalized (see ``image_repository``).
+    """
+
+    names: frozenset[str] = frozenset()
+    image_repositories: frozenset[str] = frozenset()
 
 
 class IdentityLink(BaseModel, frozen=True):
@@ -44,9 +77,12 @@ class IdentityLink(BaseModel, frozen=True):
     source_name: str = Field(min_length=1)
     runtime_name: str = Field(min_length=1)
     evidence: LinkEvidenceKind
+    # The declared value that made the link (a name or image repository).
+    detail: str | None = None
 
     def describe(self) -> str:
-        return f"{self.evidence.value}: {self.source_name} = {self.runtime_name}"
+        text = f"{self.evidence.value}: {self.source_name} = {self.runtime_name}"
+        return f"{text} (via {self.detail})" if self.detail else text
 
 
 class LinkResult(BaseModel):
@@ -101,13 +137,77 @@ def suggestions(source_name: str, runtime_names: Iterable[str]) -> list[str]:
     return [name for _, name in sorted(scored)][:_MAX_SUGGESTIONS]
 
 
-def link_identities(source_names: Iterable[str], runtime_names: Iterable[str]) -> LinkResult:
+def image_repository(reference: str) -> str | None:
+    """An image reference's repository path, without registry, tag or digest.
+
+    ``myacr.azurecr.io/team/orders:1.2`` -> ``team/orders``. Leading path
+    components holding an unexpanded variable (``${REGISTRY}/orders``) are
+    dropped; None when nothing literal is left.
+    """
+    value = reference.strip().split("@", 1)[0]
+    head, slash, last = value.rpartition("/")
+    last = last.split(":", 1)[0]
+    parts = [*(head.split("/") if slash else []), last]
+    if len(parts) > 1 and ("." in parts[0] or ":" in parts[0] or parts[0] == "localhost"):
+        parts = parts[1:]
+    while parts and ("$" in parts[0] or "{" in parts[0]):
+        parts = parts[1:]
+    if not parts or any(not part or "$" in part or "{" in part for part in parts):
+        return None
+    return "/".join(parts).lower()
+
+
+def _same_repository(first: str, second: str) -> bool:
+    """Equal repository paths, or one a path suffix of the other
+    (``orders`` / ``team/orders``: registries add namespaces)."""
+    return first == second or first.endswith("/" + second) or second.endswith("/" + first)
+
+
+def _declared_candidates(
+    source_name: str,
+    facts: IdentityFacts,
+    runtimes: Mapping[str, IdentityFacts],
+) -> dict[str, tuple[LinkEvidenceKind, str]]:
+    """Runtime name -> strongest declared evidence tying it to ``source_name``."""
+    found: dict[str, list[tuple[LinkEvidenceKind, str]]] = {}
+    source_key = fold(source_name)
+    declared = {fold(name): name for name in facts.names if fold(name)}
+    for runtime_name, runtime in runtimes.items():
+        hits = found.setdefault(runtime_name, [])
+        for repository in sorted(facts.image_repositories):
+            if any(_same_repository(repository, other) for other in runtime.image_repositories):
+                hits.append((LinkEvidenceKind.IMAGE_REPOSITORY, repository))
+        for key in sorted({fold(runtime_name), *(fold(n) for n in runtime.names)} & declared.keys()):
+            hits.append((LinkEvidenceKind.DECLARED_NAME, declared[key]))
+        for name in sorted(runtime.names):
+            if source_key and fold(name) == source_key:
+                hits.append((LinkEvidenceKind.RUNTIME_DECLARED_NAME, name))
+    return {
+        name: min(hits, key=lambda hit: _DECLARED_EVIDENCE_ORDER.index(hit[0]))
+        for name, hits in found.items()
+        if hits
+    }
+
+
+def link_identities(
+    source_names: Iterable[str],
+    runtime_names: Iterable[str],
+    *,
+    source_facts: Mapping[str, IdentityFacts] | None = None,
+    runtime_facts: Mapping[str, IdentityFacts] | None = None,
+) -> LinkResult:
     """Link source names to runtime names by canonical equality.
 
     ``source_names`` are code services with no exact runtime match;
     ``runtime_names`` the runtime services no source name matches exactly.
     A folded key shared by two source names, or by two runtime names, links
     nothing: equality must be unique on both sides.
+
+    A source name canonical equality leaves unlinked is then linked by its
+    declared facts (``source_facts``, against ``runtime_facts`` of the
+    runtime names not already linked) when they point at exactly one
+    runtime name that no other source name's facts point at. Conflicting
+    or shared candidates link nothing and are offered as suggestions.
     """
     sources = sorted(set(source_names))
     runtimes = sorted(set(runtime_names))
@@ -131,4 +231,44 @@ def link_identities(source_names: Iterable[str], runtime_names: Iterable[str]) -
             )
         else:
             result.unlinked[name] = suggestions(name, runtimes)
+    if source_facts:
+        _link_declared(result, runtimes, source_facts, runtime_facts or {})
     return result
+
+
+def _link_declared(
+    result: LinkResult,
+    runtimes: list[str],
+    source_facts: Mapping[str, IdentityFacts],
+    runtime_facts: Mapping[str, IdentityFacts],
+) -> None:
+    """Link ``result``'s unlinked source names by declared facts, in place."""
+    taken = {link.runtime_name for link in result.links}
+    open_runtimes = {
+        name: runtime_facts.get(name, IdentityFacts()) for name in runtimes if name not in taken
+    }
+    candidates = {
+        name: _declared_candidates(name, source_facts.get(name, IdentityFacts()), open_runtimes)
+        for name in sorted(result.unlinked)
+    }
+    claims: dict[str, int] = {}
+    for found in candidates.values():
+        for runtime_name in found:
+            claims[runtime_name] = claims.get(runtime_name, 0) + 1
+    for name, found in candidates.items():
+        if len(found) == 1:
+            runtime_name, (evidence, detail) = next(iter(found.items()))
+            if claims[runtime_name] == 1:
+                result.links.append(
+                    IdentityLink(
+                        source_name=name,
+                        runtime_name=runtime_name,
+                        evidence=evidence,
+                        detail=detail,
+                    )
+                )
+                del result.unlinked[name]
+                continue
+        if found:
+            ordered = [*sorted(found), *result.unlinked[name]]
+            result.unlinked[name] = list(dict.fromkeys(ordered))[:_MAX_SUGGESTIONS]
