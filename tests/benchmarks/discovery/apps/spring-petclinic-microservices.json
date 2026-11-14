@@ -1,0 +1,252 @@
+{
+ "app": "spring-petclinic-microservices",
+ "upstream": "https://github.com/spring-petclinic/spring-petclinic-microservices",
+ "gt_source": "README architecture diagram; docker-compose.yml; api-gateway application.yml routes; Java clients",
+ "repos": [
+  {
+   "name": "spring-petclinic-microservices",
+   "url": "https://github.com/spring-petclinic/spring-petclinic-microservices.git",
+   "sha": "e8b747ab522721076cacb5cf688eb8a54ba8c5c9"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "compose",
+   "paths": [
+    "spring-petclinic-microservices/docker-compose.yml"
+   ]
+  }
+ ],
+ "observability": [
+  "tracing-server",
+  "prometheus-server",
+  "grafana-server",
+  "zipkin"
+ ],
+ "services": {
+  "customers-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "vets-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "visits-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "genai-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "api-gateway": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "admin-server": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "config-server": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "discovery-server": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  }
+ },
+ "edges": [
+  {
+   "from": "api-gateway",
+   "to": "vets-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-gateway route uri: lb://<name> (Eureka)",
+   "source": "spring-petclinic-api-gateway/src/main/resources/application.yml:22"
+  },
+  {
+   "from": "api-gateway",
+   "to": "visits-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-gateway route uri: lb://<name> (Eureka)",
+   "source": "spring-petclinic-api-gateway/src/main/resources/application.yml:28"
+  },
+  {
+   "from": "api-gateway",
+   "to": "customers-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-gateway route uri: lb://<name> (Eureka)",
+   "source": "spring-petclinic-api-gateway/src/main/resources/application.yml:34"
+  },
+  {
+   "from": "api-gateway",
+   "to": "genai-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring-cloud-gateway route uri: lb://<name> (Eureka)",
+   "source": "spring-petclinic-api-gateway/src/main/resources/application.yml:40"
+  },
+  {
+   "from": "genai-service",
+   "to": "vets-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: literal http://vets-service/ via @LoadBalanced WebClient",
+   "source": "spring-petclinic-genai-service/.../VectorStoreController.java:66"
+  },
+  {
+   "from": "api-gateway",
+   "to": "config-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring.config.import=configserver:http://config-server:8888 (docker profile)",
+   "source": "spring-petclinic-api-gateway/src/main/resources/application.yml"
+  },
+  {
+   "from": "customers-service",
+   "to": "config-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring.config.import=configserver:http://config-server:8888 (docker profile)",
+   "source": "spring-petclinic-customers-service/src/main/resources/application.yml"
+  },
+  {
+   "from": "vets-service",
+   "to": "config-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring.config.import=configserver:http://config-server:8888 (docker profile)",
+   "source": "spring-petclinic-vets-service/src/main/resources/application.yml"
+  },
+  {
+   "from": "visits-service",
+   "to": "config-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring.config.import=configserver:http://config-server:8888 (docker profile)",
+   "source": "spring-petclinic-visits-service/src/main/resources/application.yml"
+  },
+  {
+   "from": "genai-service",
+   "to": "config-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring.config.import=configserver:http://config-server:8888 (docker profile)",
+   "source": "spring-petclinic-genai-service/src/main/resources/application.yml"
+  },
+  {
+   "from": "admin-server",
+   "to": "config-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring.config.import=configserver:http://config-server:8888 (docker profile)",
+   "source": "spring-petclinic-admin-server/src/main/resources/application.yml"
+  },
+  {
+   "from": "discovery-server",
+   "to": "config-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring.config.import=configserver:http://config-server:8888 (docker profile)",
+   "source": "spring-petclinic-discovery-server/src/main/resources/application.yml"
+  },
+  {
+   "from": "api-gateway",
+   "to": "discovery-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Eureka client: eureka.client.serviceUrl.defaultZone lives in the EXTERNAL config repo spring-petclinic-microservices-config",
+   "source": "README architecture; docker-compose.yml depends_on"
+  },
+  {
+   "from": "customers-service",
+   "to": "discovery-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Eureka client: eureka.client.serviceUrl.defaultZone lives in the EXTERNAL config repo spring-petclinic-microservices-config",
+   "source": "README architecture; docker-compose.yml depends_on"
+  },
+  {
+   "from": "vets-service",
+   "to": "discovery-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Eureka client: eureka.client.serviceUrl.defaultZone lives in the EXTERNAL config repo spring-petclinic-microservices-config",
+   "source": "README architecture; docker-compose.yml depends_on"
+  },
+  {
+   "from": "visits-service",
+   "to": "discovery-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Eureka client: eureka.client.serviceUrl.defaultZone lives in the EXTERNAL config repo spring-petclinic-microservices-config",
+   "source": "README architecture; docker-compose.yml depends_on"
+  },
+  {
+   "from": "genai-service",
+   "to": "discovery-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Eureka client: eureka.client.serviceUrl.defaultZone lives in the EXTERNAL config repo spring-petclinic-microservices-config",
+   "source": "README architecture; docker-compose.yml depends_on"
+  },
+  {
+   "from": "admin-server",
+   "to": "discovery-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Eureka client: eureka.client.serviceUrl.defaultZone lives in the EXTERNAL config repo spring-petclinic-microservices-config",
+   "source": "README architecture; docker-compose.yml depends_on"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "spring-petclinic-customers-service": "customers-service",
+   "spring-petclinic-vets-service": "vets-service",
+   "spring-petclinic-visits-service": "visits-service",
+   "spring-petclinic-genai-service": "genai-service",
+   "spring-petclinic-api-gateway": "api-gateway",
+   "spring-petclinic-admin-server": "admin-server",
+   "spring-petclinic-config-server": "config-server",
+   "spring-petclinic-discovery-server": "discovery-server",
+   "docker": null
+  },
+  "hosts": {
+   "customers-service": "customers-service",
+   "visits-service": "visits-service",
+   "vets-service": "vets-service",
+   "genai-service": "genai-service"
+  },
+  "workloads": {}
+ }
+}

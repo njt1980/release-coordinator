@@ -1,0 +1,380 @@
+{
+ "app": "eShop",
+ "upstream": "https://github.com/dotnet/eShop",
+ "gt_source": "Aspire AppHost references (src/eShop.AppHost/AppHost.cs). Env emulation uses the project's own lab manifests deploy/lab/eshop in this repository (hand-written by us: circular, see caveats)",
+ "repos": [
+  {
+   "name": "eShop",
+   "url": "https://github.com/dotnet/eShop.git",
+   "sha": "913acea66708a59595351174cee9b29f37179d29"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "k8s",
+   "paths": [
+    "@project/deploy/lab/eshop"
+   ]
+  }
+ ],
+ "observability": [],
+ "services": {
+  "identity-api": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "basket-api": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "catalog-api": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "ordering-api": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "order-processor": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "payment-processor": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "webhooks-api": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "webhooksclient": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "webapp": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "mobile-bff": {
+   "kind": "service",
+   "lang": "yarp-container",
+   "source": false
+  },
+  "redis": {
+   "kind": "infra",
+   "what": "redis"
+  },
+  "eventbus": {
+   "kind": "infra",
+   "what": "rabbitmq"
+  },
+  "postgres": {
+   "kind": "infra",
+   "what": "postgres (catalogdb, identitydb, orderingdb, webhooksdb)"
+  }
+ },
+ "edges": [
+  {
+   "from": "basket-api",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "csharp: IConfiguration section 'Identity' bound in shared library (GetSection/GetRequiredValue)",
+   "source": "src/eShop.AppHost/AppHost.cs:35"
+  },
+  {
+   "from": "ordering-api",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "csharp: IConfiguration section 'Identity' bound in shared library (GetSection/GetRequiredValue)",
+   "source": "src/eShop.AppHost/AppHost.cs:46"
+  },
+  {
+   "from": "webhooks-api",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "csharp: IConfiguration section 'Identity' bound in shared library (GetSection/GetRequiredValue)",
+   "source": "src/eShop.AppHost/AppHost.cs:59"
+  },
+  {
+   "from": "webhooksclient",
+   "to": "webhooks-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "csharp: literal BaseAddress = new(\"http://webhooks-api\") (Aspire service discovery name)",
+   "source": "src/eShop.AppHost/AppHost.cs:68"
+  },
+  {
+   "from": "webhooksclient",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "csharp: custom extension configuration.GetRequiredValue(\"IdentityUrl\")",
+   "source": "src/eShop.AppHost/AppHost.cs:69"
+  },
+  {
+   "from": "webapp",
+   "to": "basket-api",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "csharp: literal o.Address = new(\"http://basket-api\")",
+   "source": "src/eShop.AppHost/AppHost.cs:74"
+  },
+  {
+   "from": "webapp",
+   "to": "catalog-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "csharp: literal https+http://catalog-api (Aspire service discovery)",
+   "source": "src/eShop.AppHost/AppHost.cs:75"
+  },
+  {
+   "from": "webapp",
+   "to": "ordering-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "csharp: literal https+http://ordering-api (Aspire service discovery)",
+   "source": "src/eShop.AppHost/AppHost.cs:76"
+  },
+  {
+   "from": "webapp",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "csharp: custom extension configuration.GetRequiredValue(\"IdentityUrl\")",
+   "source": "src/eShop.AppHost/AppHost.cs:79"
+  },
+  {
+   "from": "order-processor",
+   "to": "ordering-api",
+   "proto": "startup-order",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "WaitFor only (EF migrations), not a call",
+   "source": "src/eShop.AppHost/AppHost.cs:51"
+  },
+  {
+   "from": "identity-api",
+   "to": "basket-api",
+   "proto": "oauth-redirect",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "callback URL config, not a runtime call",
+   "source": "src/eShop.AppHost/AppHost.cs:99-103"
+  },
+  {
+   "from": "identity-api",
+   "to": "ordering-api",
+   "proto": "oauth-redirect",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "callback URL config, not a runtime call",
+   "source": "src/eShop.AppHost/AppHost.cs:99-103"
+  },
+  {
+   "from": "identity-api",
+   "to": "webhooks-api",
+   "proto": "oauth-redirect",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "callback URL config, not a runtime call",
+   "source": "src/eShop.AppHost/AppHost.cs:99-103"
+  },
+  {
+   "from": "identity-api",
+   "to": "webhooksclient",
+   "proto": "oauth-redirect",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "callback URL config, not a runtime call",
+   "source": "src/eShop.AppHost/AppHost.cs:99-103"
+  },
+  {
+   "from": "identity-api",
+   "to": "webapp",
+   "proto": "oauth-redirect",
+   "kind": "svc",
+   "status": "ambiguous",
+   "mechanism": "callback URL config, not a runtime call",
+   "source": "src/eShop.AppHost/AppHost.cs:99-103"
+  },
+  {
+   "from": "mobile-bff",
+   "to": "catalog-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "YARP route config generated by AppHost",
+   "source": "src/eShop.AppHost/AppHost.cs:62-64"
+  },
+  {
+   "from": "mobile-bff",
+   "to": "ordering-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "YARP route config generated by AppHost",
+   "source": "src/eShop.AppHost/AppHost.cs:62-64"
+  },
+  {
+   "from": "mobile-bff",
+   "to": "identity-api",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "YARP route config generated by AppHost",
+   "source": "src/eShop.AppHost/AppHost.cs:62-64"
+  },
+  {
+   "from": "identity-api",
+   "to": "postgres",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: ConnectionStrings via Aspire AddNpgsqlDbContext(\"identitydb\")",
+   "source": "src/eShop.AppHost/AppHost.cs:27"
+  },
+  {
+   "from": "basket-api",
+   "to": "redis",
+   "proto": "cache",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddRedisClient(\"redis\") -> ConnectionStrings:redis",
+   "source": "src/eShop.AppHost/AppHost.cs:33"
+  },
+  {
+   "from": "basket-api",
+   "to": "eventbus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddRabbitMQClient(\"eventbus\") -> ConnectionStrings:eventbus",
+   "source": "src/eShop.AppHost/AppHost.cs:34"
+  },
+  {
+   "from": "catalog-api",
+   "to": "eventbus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddRabbitMQClient(\"eventbus\") -> ConnectionStrings:eventbus",
+   "source": "src/eShop.AppHost/AppHost.cs:39"
+  },
+  {
+   "from": "ordering-api",
+   "to": "eventbus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddRabbitMQClient(\"eventbus\") -> ConnectionStrings:eventbus",
+   "source": "src/eShop.AppHost/AppHost.cs:43"
+  },
+  {
+   "from": "order-processor",
+   "to": "eventbus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddRabbitMQClient(\"eventbus\") -> ConnectionStrings:eventbus",
+   "source": "src/eShop.AppHost/AppHost.cs:49"
+  },
+  {
+   "from": "payment-processor",
+   "to": "eventbus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddRabbitMQClient(\"eventbus\") -> ConnectionStrings:eventbus",
+   "source": "src/eShop.AppHost/AppHost.cs:54"
+  },
+  {
+   "from": "webhooks-api",
+   "to": "eventbus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddRabbitMQClient(\"eventbus\") -> ConnectionStrings:eventbus",
+   "source": "src/eShop.AppHost/AppHost.cs:57"
+  },
+  {
+   "from": "webapp",
+   "to": "eventbus",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddRabbitMQClient(\"eventbus\") -> ConnectionStrings:eventbus",
+   "source": "src/eShop.AppHost/AppHost.cs:77"
+  },
+  {
+   "from": "catalog-api",
+   "to": "postgres",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddNpgsqlDbContext/DataSource(\"<db>\") -> ConnectionStrings:<db>",
+   "source": "src/eShop.AppHost/AppHost.cs:40"
+  },
+  {
+   "from": "ordering-api",
+   "to": "postgres",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddNpgsqlDbContext/DataSource(\"<db>\") -> ConnectionStrings:<db>",
+   "source": "src/eShop.AppHost/AppHost.cs:44"
+  },
+  {
+   "from": "order-processor",
+   "to": "postgres",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddNpgsqlDbContext/DataSource(\"<db>\") -> ConnectionStrings:<db>",
+   "source": "src/eShop.AppHost/AppHost.cs:50"
+  },
+  {
+   "from": "webhooks-api",
+   "to": "postgres",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Aspire AddNpgsqlDbContext/DataSource(\"<db>\") -> ConnectionStrings:<db>",
+   "source": "src/eShop.AppHost/AppHost.cs:58"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "eshop": null,
+   "webhookclient": "webhooksclient",
+   "orderprocessor": "order-processor",
+   "paymentprocessor": "payment-processor"
+  },
+  "hosts": {
+   "identity": "identity-api",
+   "10.0.2.2": "__noise__",
+   "eshopxamarin": "__noise__"
+  },
+  "workloads": {}
+ }
+}

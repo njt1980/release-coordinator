@@ -1,0 +1,615 @@
+{
+ "app": "otel-demo",
+ "upstream": "https://github.com/open-telemetry/opentelemetry-demo",
+ "gt_source": "https://opentelemetry.io/docs/demo/architecture/ + compose.yaml/compose.full.yaml env (.env values); agent layer compose.agent.yaml = optional",
+ "repos": [
+  {
+   "name": "otel-demo",
+   "url": "https://github.com/open-telemetry/opentelemetry-demo.git",
+   "sha": "1c11c25a73c1038a93b81fd2967be40b4d85e32e"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "compose",
+   "paths": [
+    "otel-demo/compose.yaml",
+    "otel-demo/compose.full.yaml",
+    "otel-demo/compose.agent.yaml"
+   ],
+   "dotenv": "otel-demo/.env"
+  }
+ ],
+ "observability": [
+  "otel-collector",
+  "jaeger",
+  "prometheus",
+  "grafana",
+  "opensearch",
+  "telemetry-docs"
+ ],
+ "services": {
+  "accounting": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "ad": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "cart": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "checkout": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "currency": {
+   "kind": "service",
+   "lang": "cpp",
+   "source": true
+  },
+  "email": {
+   "kind": "service",
+   "lang": "ruby",
+   "source": true
+  },
+  "fraud-detection": {
+   "kind": "service",
+   "lang": "kotlin",
+   "source": true
+  },
+  "frontend": {
+   "kind": "service",
+   "lang": "typescript",
+   "source": true
+  },
+  "frontend-proxy": {
+   "kind": "service",
+   "lang": "envoy",
+   "source": true
+  },
+  "image-provider": {
+   "kind": "service",
+   "lang": "nginx",
+   "source": true
+  },
+  "load-generator": {
+   "kind": "service",
+   "lang": "python",
+   "source": true
+  },
+  "payment": {
+   "kind": "service",
+   "lang": "node",
+   "source": true
+  },
+  "product-catalog": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "quote": {
+   "kind": "service",
+   "lang": "php",
+   "source": true
+  },
+  "recommendation": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "shipping": {
+   "kind": "service",
+   "lang": "rust",
+   "source": true
+  },
+  "flagd-ui": {
+   "kind": "service",
+   "lang": "elixir",
+   "source": true
+  },
+  "agent": {
+   "kind": "service",
+   "lang": "python",
+   "source": true,
+   "optional": true
+  },
+  "mcp": {
+   "kind": "service",
+   "lang": "python",
+   "source": true,
+   "optional": true
+  },
+  "chatbot": {
+   "kind": "service",
+   "lang": "python",
+   "source": true,
+   "optional": true
+  },
+  "opamp-server": {
+   "kind": "service",
+   "lang": "go",
+   "source": true,
+   "optional": true
+  },
+  "kafka": {
+   "kind": "infra",
+   "what": "kafka"
+  },
+  "valkey-cart": {
+   "kind": "infra",
+   "what": "valkey"
+  },
+  "astronomy-db": {
+   "kind": "infra",
+   "what": "postgres"
+  },
+  "flagd": {
+   "kind": "infra",
+   "what": "feature flags"
+  }
+ },
+ "edges": [
+  {
+   "from": "frontend",
+   "to": "ad",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "ts: destructured `const { X_ADDR = '' } = process.env`",
+   "source": "compose.yaml frontend env AD_ADDR; src/frontend/gateways"
+  },
+  {
+   "from": "frontend",
+   "to": "cart",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "ts: destructured `const { X_ADDR = '' } = process.env`",
+   "source": "compose.yaml frontend env CART_ADDR; src/frontend/gateways"
+  },
+  {
+   "from": "frontend",
+   "to": "checkout",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "ts: destructured `const { X_ADDR = '' } = process.env`",
+   "source": "compose.yaml frontend env CHECKOUT_ADDR; src/frontend/gateways"
+  },
+  {
+   "from": "frontend",
+   "to": "currency",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "ts: destructured `const { X_ADDR = '' } = process.env`",
+   "source": "compose.yaml frontend env CURRENCY_ADDR; src/frontend/gateways"
+  },
+  {
+   "from": "frontend",
+   "to": "product-catalog",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "ts: destructured `const { X_ADDR = '' } = process.env`",
+   "source": "compose.yaml frontend env PRODUCT_CATALOG_ADDR; src/frontend/gateways"
+  },
+  {
+   "from": "frontend",
+   "to": "recommendation",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "ts: destructured `const { X_ADDR = '' } = process.env`",
+   "source": "compose.yaml frontend env RECOMMENDATION_ADDR; src/frontend/gateways"
+  },
+  {
+   "from": "frontend",
+   "to": "shipping",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "ts: destructured `const { X_ADDR = '' } = process.env`",
+   "source": "compose.yaml frontend env SHIPPING_ADDR; src/frontend/gateways"
+  },
+  {
+   "from": "checkout",
+   "to": "cart",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv",
+   "source": "compose.yaml checkout env CART_ADDR; src/checkout/main.go"
+  },
+  {
+   "from": "checkout",
+   "to": "currency",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv",
+   "source": "compose.yaml checkout env CURRENCY_ADDR; src/checkout/main.go"
+  },
+  {
+   "from": "checkout",
+   "to": "email",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv",
+   "source": "compose.yaml checkout env EMAIL_ADDR; src/checkout/main.go"
+  },
+  {
+   "from": "checkout",
+   "to": "payment",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv",
+   "source": "compose.yaml checkout env PAYMENT_ADDR; src/checkout/main.go"
+  },
+  {
+   "from": "checkout",
+   "to": "product-catalog",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv",
+   "source": "compose.yaml checkout env PRODUCT_CATALOG_ADDR; src/checkout/main.go"
+  },
+  {
+   "from": "checkout",
+   "to": "shipping",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv",
+   "source": "compose.yaml checkout env SHIPPING_ADDR; src/checkout/main.go"
+  },
+  {
+   "from": "checkout",
+   "to": "kafka",
+   "proto": "kafka",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "go: os.Getenv(\"KAFKA_ADDR\")",
+   "source": "compose.full.yaml checkout env KAFKA_ADDR"
+  },
+  {
+   "from": "recommendation",
+   "to": "product-catalog",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "spring: spring.grpc.client.channel.product-catalog.target=${PRODUCT_CATALOG_ADDR}",
+   "source": "compose.yaml recommendation env PRODUCT_CATALOG_ADDR"
+  },
+  {
+   "from": "shipping",
+   "to": "quote",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "rust: env::var(\"QUOTE_ADDR\") (unsupported language)",
+   "source": "compose.yaml shipping env QUOTE_ADDR; src/shipping/src/shipping_service/quote.rs:52"
+  },
+  {
+   "from": "frontend-proxy",
+   "to": "frontend",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy.tmpl.yaml ${X_HOST} substituted at container start",
+   "source": "compose.yaml frontend-proxy env"
+  },
+  {
+   "from": "frontend-proxy",
+   "to": "image-provider",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy.tmpl.yaml ${X_HOST} substituted at container start",
+   "source": "compose.yaml frontend-proxy env"
+  },
+  {
+   "from": "frontend-proxy",
+   "to": "flagd-ui",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy.tmpl.yaml ${X_HOST} substituted at container start",
+   "source": "compose.yaml frontend-proxy env"
+  },
+  {
+   "from": "frontend-proxy",
+   "to": "load-generator",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "envoy.tmpl.yaml ${X_HOST} substituted at container start",
+   "source": "compose.yaml frontend-proxy env"
+  },
+  {
+   "from": "frontend-proxy",
+   "to": "flagd",
+   "proto": "http",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "envoy.tmpl.yaml ${FLAGD_HOST}",
+   "source": "compose.yaml frontend-proxy env FLAGD_HOST"
+  },
+  {
+   "from": "frontend-proxy",
+   "to": "chatbot",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "envoy template",
+   "source": "compose.agent.yaml"
+  },
+  {
+   "from": "frontend-proxy",
+   "to": "opamp-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "envoy template ${OPAMP_SERVER_HOST}",
+   "source": "compose.yaml frontend-proxy env OPAMP_SERVER_HOST"
+  },
+  {
+   "from": "load-generator",
+   "to": "frontend-proxy",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "locust reads LOCUST_HOST implicitly",
+   "source": "compose.yaml load-generator env LOCUST_HOST"
+  },
+  {
+   "from": "cart",
+   "to": "valkey-cart",
+   "proto": "cache",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: configuration[\"VALKEY_ADDR\"]",
+   "source": "compose.yaml cart env VALKEY_ADDR"
+  },
+  {
+   "from": "product-catalog",
+   "to": "astronomy-db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "go: os.Getenv(\"DB_CONNECTION_STRING\")",
+   "source": "compose.yaml product-catalog env DB_CONNECTION_STRING"
+  },
+  {
+   "from": "accounting",
+   "to": "kafka",
+   "proto": "kafka",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Environment.GetEnvironmentVariable(\"KAFKA_ADDR\")",
+   "source": "compose.full.yaml accounting env KAFKA_ADDR"
+  },
+  {
+   "from": "accounting",
+   "to": "astronomy-db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Environment.GetEnvironmentVariable(\"DB_CONNECTION_STRING\")",
+   "source": "compose.full.yaml accounting env DB_CONNECTION_STRING"
+  },
+  {
+   "from": "fraud-detection",
+   "to": "kafka",
+   "proto": "kafka",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "kotlin: System.getenv(\"KAFKA_ADDR\") (unsupported language)",
+   "source": "compose.full.yaml fraud-detection env KAFKA_ADDR"
+  },
+  {
+   "from": "ad",
+   "to": "flagd",
+   "proto": "grpc",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "OpenFeature flagd provider reads FLAGD_HOST implicitly (SDK default), no read in app code",
+   "source": "compose.yaml ad env FLAGD_HOST"
+  },
+  {
+   "from": "cart",
+   "to": "flagd",
+   "proto": "grpc",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "OpenFeature flagd provider reads FLAGD_HOST implicitly (SDK default), no read in app code",
+   "source": "compose.yaml cart env FLAGD_HOST"
+  },
+  {
+   "from": "checkout",
+   "to": "flagd",
+   "proto": "grpc",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "OpenFeature flagd provider reads FLAGD_HOST implicitly (SDK default), no read in app code",
+   "source": "compose.yaml checkout env FLAGD_HOST"
+  },
+  {
+   "from": "frontend",
+   "to": "flagd",
+   "proto": "grpc",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "OpenFeature flagd provider reads FLAGD_HOST implicitly (SDK default), no read in app code",
+   "source": "compose.yaml frontend env FLAGD_HOST"
+  },
+  {
+   "from": "payment",
+   "to": "flagd",
+   "proto": "grpc",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "OpenFeature flagd provider reads FLAGD_HOST implicitly (SDK default), no read in app code",
+   "source": "compose.yaml payment env FLAGD_HOST"
+  },
+  {
+   "from": "product-catalog",
+   "to": "flagd",
+   "proto": "grpc",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "OpenFeature flagd provider reads FLAGD_HOST implicitly (SDK default), no read in app code",
+   "source": "compose.yaml product-catalog env FLAGD_HOST"
+  },
+  {
+   "from": "recommendation",
+   "to": "flagd",
+   "proto": "grpc",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "OpenFeature flagd provider reads FLAGD_HOST implicitly (SDK default), no read in app code",
+   "source": "compose.yaml recommendation env FLAGD_HOST"
+  },
+  {
+   "from": "shipping",
+   "to": "flagd",
+   "proto": "grpc",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "OpenFeature flagd provider reads FLAGD_HOST implicitly (SDK default), no read in app code",
+   "source": "compose.yaml shipping env FLAGD_HOST"
+  },
+  {
+   "from": "fraud-detection",
+   "to": "flagd",
+   "proto": "grpc",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "OpenFeature flagd provider reads FLAGD_HOST implicitly (SDK default), no read in app code",
+   "source": "compose.yaml fraud-detection env FLAGD_HOST"
+  },
+  {
+   "from": "email",
+   "to": "flagd",
+   "proto": "http",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "ruby: ENV['FLAGD_HOST']",
+   "source": "compose.yaml email env FLAGD_HOST"
+  },
+  {
+   "from": "load-generator",
+   "to": "flagd",
+   "proto": "http",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "python: os.environ.get('FLAGD_HOST')",
+   "source": "compose.yaml load-generator env FLAGD_HOST"
+  },
+  {
+   "from": "flagd-ui",
+   "to": "flagd",
+   "proto": "http",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "elixir (unsupported language)",
+   "source": "compose.yaml flagd-ui depends_on flagd"
+  },
+  {
+   "from": "agent",
+   "to": "mcp",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "python env MCP_ENDPOINT",
+   "source": "compose.agent.yaml"
+  },
+  {
+   "from": "mcp",
+   "to": "frontend",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "python env APPLICATION_ENDPOINT",
+   "source": "compose.agent.yaml"
+  },
+  {
+   "from": "chatbot",
+   "to": "agent",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "python env AGENT_ENDPOINT",
+   "source": "compose.agent.yaml"
+  },
+  {
+   "from": "load-generator",
+   "to": "agent",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "python env AGENT_ENDPOINT",
+   "source": "compose.agent.yaml"
+  },
+  {
+   "from": "agent",
+   "to": "frontend",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "python env APPLICATION_ENDPOINT",
+   "source": "compose.agent.yaml"
+  },
+  {
+   "from": "agent",
+   "to": "flagd",
+   "proto": "http",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "python env FLAGD_HOST",
+   "source": "compose.agent.yaml"
+  },
+  {
+   "from": "chatbot",
+   "to": "opamp-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "python env",
+   "source": "compose.agent.yaml"
+  },
+  {
+   "from": "cart",
+   "to": "opamp-server",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "csharp env OPAMP_SERVER_ENDPOINT",
+   "source": "compose.agent.yaml"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "otel-demo": null,
+   "react-native-app": null,
+   "src": "cart",
+   "kafka": "__optional__",
+   "opensearch": "__optional__",
+   "telemetry-docs": "__optional__"
+  },
+  "hosts": {
+   "frontend-proxy": "frontend-proxy"
+  },
+  "workloads": {}
+ }
+}
