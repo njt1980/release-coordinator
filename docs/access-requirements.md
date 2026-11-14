@@ -125,6 +125,29 @@ before falling back to the developer's `az login`.
   consumer isn't traced. Assessments add the radius services' gaps to the
   briefing as context; they never change the verdict. Same read access, no
   extra permission.
+- Which protocols the telemetry can see (LIVE_UNOBSERVABLE) is judged per
+  service from the stacks its own rows show (`src/core/telemetry_capability.py`,
+  `PROFILES`). An edge counts as observable when the profile of either end
+  sees its protocol; a service with no telemetry of its own sees nothing.
+  Only claims observed in the probe lab or stated in vendor documentation
+  count; unverified claims are listed but never clear a service.
+
+  | Profile | Observable (evidence) | Unverified |
+  |---|---|---|
+  | Beyla 3.x (`beyla-3`) | HTTP(S), gRPC, Redis, PostgreSQL, MySQL, SQL Server, MongoDB, Kafka, NATS, MQTT (docs) | — |
+  | Classic SDK 2.x for .NET | HTTP, SQL Server, Service Bus (lab); HTTPS (docs) | gRPC |
+  | Azure Monitor Distro for .NET | HTTP (lab); HTTPS, SQL Server (docs) | gRPC |
+  | … with `AZURE_EXPERIMENTAL_ENABLE_ACTIVITY_SOURCE=true` | as above + Service Bus (lab) | gRPC |
+  | Plain OpenTelemetry SDK | none | everything: depends on the instrumentation libraries |
+
+  The Distro variant with the activity source is picked when a role's rows
+  include `Microsoft.ServiceBus` dependencies or `ServiceBusProcessor.*`
+  requests. Collector rows (`otelc-…`) don't say what made the spans, so
+  the policy's `telemetry_collector_source` (`beyla` or `otel_sdk`, the
+  default) picks the profile. Service Bus addresses (`sb://`, or `amqps://`
+  to `*.servicebus.windows.net`) are the protocol `servicebus`, separate
+  from other AMQP-over-TLS brokers (`amqps`). When the role profiles can't
+  be read, the Beyla profile judges every edge, as before.
 - When a radius service is uncovered, assessments count the dropped rows by
   source name and say which uncovered service they look like
   (`LiveCoverage.unscoped_sources`); the rows still never count.

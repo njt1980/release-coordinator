@@ -1543,6 +1543,10 @@ class LiveCoverage(BaseModel):
     to those protocols; ``accepted_unobservable`` lists those an active
     ``exemptions.unobservable`` entry covers for each protocol. A silent
     allowance never applies to an unobservable service.
+    ``telemetry_profiles`` maps radius services to the capability profiles
+    (``telemetry_capability.TelemetryProfile``) their own telemetry shows;
+    empty when the role profiles weren't read, and then one default profile
+    judged every edge.
 
     ``sampled_sources`` maps telemetry sources whose rows were sampled to
     the largest number of calls one row stood for (``ItemCount``): with
@@ -1561,6 +1565,7 @@ class LiveCoverage(BaseModel):
     unscoped_services: Dict[str, List[str]] = Field(default_factory=dict)
     unobservable_services: Dict[str, List[str]] = Field(default_factory=dict)
     accepted_unobservable: Dict[str, List[str]] = Field(default_factory=dict)
+    telemetry_profiles: Dict[str, List[str]] = Field(default_factory=dict)
     sampled_sources: Dict[str, int] = Field(default_factory=dict)
 
 
@@ -1573,7 +1578,10 @@ class TelemetryRoleProfile(BaseModel):
     what they stand for (``sum(ItemCount)``), so ``max_item_count`` above 1
     means the role is sampled. ``stacks`` classify ``sdk_versions`` (see
     ``TelemetryStack``); ``components`` are Application Insights component
-    names its rows came from.
+    names its rows came from. ``service_bus_activity_rows`` count rows the
+    Azure Monitor Distro writes only with its experimental activity source
+    on (``Microsoft.ServiceBus`` dependencies, ``ServiceBusProcessor.*``
+    requests).
     """
 
     role: str
@@ -1587,6 +1595,7 @@ class TelemetryRoleProfile(BaseModel):
     sdk_versions: List[str] = Field(default_factory=list)
     components: List[str] = Field(default_factory=list)
     last_seen: Optional[datetime] = None
+    service_bus_activity_rows: int = Field(default=0, ge=0)
 
     @property
     def rows(self) -> int:

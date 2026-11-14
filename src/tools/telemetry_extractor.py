@@ -556,7 +556,8 @@ def build_role_profile_query(days_back: int, scope: TelemetryScope | None = None
     one): request and dependency rows, the calls they stand for
     (``sum(ItemCount)``) and the largest ``ItemCount``, how many rows carry
     a namespace and one such namespace, the ``SDKVersion`` values and the
-    Application Insights components seen, and the newest row.
+    Application Insights components seen, the newest row, and the rows
+    only the Distro's experimental Service Bus activity source writes.
     """
     if days_back <= 0:
         raise ValueError("days_back must be a positive integer")
@@ -573,7 +574,9 @@ def build_role_profile_query(days_back: int, scope: TelemetryScope | None = None
         "    RowsWithNamespace = countif(isnotempty(RoleNamespace)),\n"
         "    Namespace = take_anyif(RoleNamespace, isnotempty(RoleNamespace)),\n"
         "    SdkVersions = make_set(SDKVersion, 8), Components = make_set(_ResourceId, 8),\n"
-        "    LastSeen = max(TimeGenerated)\n"
+        "    LastSeen = max(TimeGenerated),\n"
+        '    ServiceBusActivityRows = countif(DependencyType == "Microsoft.ServiceBus"\n'
+        '        or (Type == "AppRequests" and Name startswith "ServiceBusProcessor."))\n'
         "    by Role\n"
         f"| top {ROLE_PROFILE_LIMIT} by Represented desc\n"
     )
@@ -622,6 +625,11 @@ def parse_role_profile_response(
                         {c.rsplit("/", 1)[-1] for c in _string_list(row[columns["Components"]])}
                     ),
                     last_seen=_parse_observed_at(last_seen) if last_seen else None,
+                    service_bus_activity_rows=(
+                        _count(row, columns["ServiceBusActivityRows"])
+                        if "ServiceBusActivityRows" in columns
+                        else 0
+                    ),
                 )
             )
     return profiles
