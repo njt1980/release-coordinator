@@ -31,6 +31,9 @@ function DecisionLine({ view }) {
         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ring-1 ${VERDICT_STYLE[record.verdict]}`}>
           {view.meaning}
         </span>
+        <span className="rounded-full bg-white px-2 py-0.5 text-xs font-medium text-slate-700 ring-1 ring-slate-300">
+          Human
+        </span>
         {view.superseded && <span className="text-xs text-slate-500">superseded by a later decision</span>}
         {record.corrects && <span className="text-xs text-slate-500">corrects an earlier decision</span>}
       </div>

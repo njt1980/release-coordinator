@@ -50,6 +50,7 @@ function Message({ message }) {
   }
   return (
     <div className="mr-4 rounded-2xl rounded-bl-sm bg-white px-4 py-3 text-sm leading-relaxed text-slate-800 ring-1 ring-slate-200">
+      <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-violet-700">AI-generated</p>
       <AnswerText text={message.text} />
       {message.tools?.length > 0 && (
         <p className="mt-2 border-t border-slate-100 pt-2 text-xs text-slate-500">

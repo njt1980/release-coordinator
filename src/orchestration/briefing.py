@@ -96,12 +96,36 @@ _RANK_ORDER: Final[dict[BriefingRank, int]] = {
 }
 
 
+class Origin(str, Enum):
+    """Where a piece of the briefing comes from (see docs/intended-use.md).
+
+    COMPUTED: derived by deterministic code from recorded evidence.
+    HUMAN: entered by a named person (review answers, the project policy).
+    AI_GENERATED: written by the external model; may be wrong, and never
+        part of a signed decision record.
+    """
+
+    COMPUTED = "computed"
+    HUMAN = "human"
+    AI_GENERATED = "ai_generated"
+
+
+class AdvisoryNote(BaseModel):
+    """The advisory model's opinion, shown apart from the computed evidence."""
+
+    origin: Origin = Origin.AI_GENERATED
+    approved: bool
+    risk_score: float = Field(ge=0.0, le=1.0)
+    justification: str = Field(min_length=1)
+
+
 class BriefingGroup(BaseModel):
     """Issues with one cause, and what a person does about them."""
 
     root_key: str = Field(min_length=1)
     rank: BriefingRank
     title: str = Field(min_length=1)
+    origin: Origin = Origin.COMPUTED
     why_it_matters: str = ""
     what_to_check: list[str] = Field(default_factory=list)
     how_to_close: list[str] = Field(default_factory=list)
@@ -134,6 +158,7 @@ class ReleaseBriefing(BaseModel):
     deployment: list[DeploymentStep]
     rollback_order: list[str]
     raw_issue_count: int = Field(ge=0)
+    advisory: AdvisoryNote | None = None
 
     @model_validator(mode="after")
     def _faithful(self) -> Self:
@@ -288,6 +313,7 @@ def _context_groups(assessment: ReleaseAssessment) -> list[BriefingGroup]:
             BriefingGroup(
                 root_key="info:accepted",
                 rank=BriefingRank.INFO,
+                origin=Origin.HUMAN,
                 title=f"{len(accepted)} item(s) accepted by the project policy",
                 why_it_matters="Reviewed exceptions; each still carries its reason.",
                 what_to_check=accepted,
@@ -349,6 +375,7 @@ def _review_groups(assessment: ReleaseAssessment) -> list[BriefingGroup]:
         BriefingGroup(
             root_key="info:review",
             rank=BriefingRank.INFO,
+            origin=Origin.HUMAN,
             title="Dependency review",
             why_it_matters=rests_on,
             what_to_check=[*answered[:_LISTED], *review.unapplied[:_LISTED]],
@@ -456,7 +483,23 @@ def build_briefing(assessment: ReleaseAssessment) -> ReleaseBriefing:
         deployment=_deployment(assessment),
         rollback_order=[short_name(s) for s in reversed(assessment.services_to_deploy)],
         raw_issue_count=len(assessment.issues),
+        advisory=(
+            AdvisoryNote(
+                approved=assessment.advisory_assessment.approved,
+                risk_score=assessment.advisory_assessment.risk_score,
+                justification=assessment.advisory_assessment.justification,
+            )
+            if assessment.advisory_assessment
+            else None
+        ),
     )
+
+
+_ORIGIN_LABELS: Final[dict[Origin, str]] = {
+    Origin.COMPUTED: "Computed",
+    Origin.HUMAN: "Human",
+    Origin.AI_GENERATED: "AI-generated",
+}
 
 
 def render_markdown(briefing: ReleaseBriefing) -> str:
@@ -480,11 +523,23 @@ def render_markdown(briefing: ReleaseBriefing) -> str:
         for group in groups:
             number += 1
             codes = ", ".join(c.value for c in group.reason_codes)
-            lines.append(f"{number}. **{group.title}**" + (f" ({codes})" if codes else ""))
+            lines.append(
+                f"{number}. **{group.title}**" + (f" ({codes})" if codes else "")
+                + f" [{_ORIGIN_LABELS[group.origin]}]"
+            )
             if group.why_it_matters:
                 lines.append(f"   {group.why_it_matters}")
             lines += [f"   - Check: {item}" for item in group.what_to_check]
             lines += [f"   - Close: {item}" for item in group.how_to_close]
+    if briefing.advisory:
+        note = briefing.advisory
+        lines += [
+            "",
+            f"### Advisory risk review [{_ORIGIN_LABELS[note.origin]}]",
+            f"Risk {note.risk_score:.2f}, would {'approve' if note.approved else 'reject'}: "
+            f"{note.justification}",
+            "(Written by the external model; may be wrong; not part of the signed decision.)",
+        ]
     if briefing.deployment:
         order = " → ".join(
             f"{s.service}{'*' if s.changed else ''}" for s in briefing.deployment

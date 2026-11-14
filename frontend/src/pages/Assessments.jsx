@@ -49,6 +49,43 @@ function Headline({ briefing }) {
   );
 }
 
+// Where each part of the briefing comes from (docs/intended-use.md).
+const ORIGINS = {
+  computed: { label: "Computed", className: "bg-white text-slate-600 ring-slate-300" },
+  human: { label: "Human", className: "bg-white text-slate-800 ring-slate-400" },
+  ai_generated: { label: "AI-generated", className: "bg-violet-50 text-violet-800 ring-violet-200" },
+};
+
+function OriginBadge({ origin }) {
+  const meta = ORIGINS[origin] ?? ORIGINS.computed;
+  return (
+    <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ${meta.className}`}>
+      {meta.label}
+    </span>
+  );
+}
+
+function Advisory({ advisory }) {
+  return (
+    <section aria-label="Advisory risk review" className="rounded-xl bg-violet-50/40 p-4 ring-1 ring-violet-200">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="text-sm font-semibold text-slate-900">Advisory risk review</h4>
+        <OriginBadge origin={advisory.origin} />
+      </div>
+      <p className="mt-1 text-xs text-slate-600">
+        Risk {advisory.risk_score.toFixed(2)}; the model would {advisory.approved ? "approve" : "reject"} this release.
+      </p>
+      <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-800 [overflow-wrap:anywhere]">
+        {advisory.justification}
+      </p>
+      <p className="mt-2 text-xs text-slate-500">
+        Written by an external model; it may be wrong and is not part of your signed decision. If you rely on it,
+        say so in your decision's reason.
+      </p>
+    </section>
+  );
+}
+
 function Group({ group, number }) {
   const rank = RANKS[group.rank] ?? RANKS.info;
   return (
@@ -57,9 +94,12 @@ function Group({ group, number }) {
         <h4 className="min-w-0 flex-1 text-sm font-semibold text-slate-900 [overflow-wrap:anywhere]">
           {number}. {group.title}
         </h4>
-        <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ${rank.className}`}>
-          {rank.badge}
-        </span>
+        <div className="flex shrink-0 gap-1">
+          <OriginBadge origin={group.origin} />
+          <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ${rank.className}`}>
+            {rank.badge}
+          </span>
+        </div>
       </div>
       {group.reason_codes.length > 0 && (
         <p className="mt-1 font-mono text-xs text-slate-500">{group.reason_codes.join(", ")}</p>
@@ -156,6 +196,7 @@ function Briefing({ jobId }) {
         )}
       </div>
       <Headline briefing={briefing} />
+      {briefing.advisory && <Advisory advisory={briefing.advisory} />}
       <DecisionPanel jobId={jobId} toolApproved={briefing.approved} />
       {Object.entries(RANKS).map(([rank, meta]) => {
         const groups = briefing.groups.filter((g) => g.rank === rank);
