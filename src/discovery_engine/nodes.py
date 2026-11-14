@@ -30,6 +30,7 @@ from src.core.models import (
     unresolved_entity_id,
 )
 from src.core.edge_resolution import (
+    environment_edges,
     pipeline_index,
     reference_protocol,
     resolve_endpoint,
@@ -605,7 +606,10 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
     ENVIRONMENT_VARIABLE entity, so release gating still sees it. Duplicate relationships
     are merged and self-referencing edges are dropped, as are uncertain
     telemetry sightings of a known edge reversed (see
-    ``drop_reversed_sightings``).
+    ``drop_reversed_sightings``). An endpoint-like variable a workload's
+    Kubernetes environment sets to a registered service is an edge too
+    (``environment_edges``, provenance ``kubernetes_env``), even when no
+    code read of it was found.
 
     A target's bare name resolves in its source's namespace, as in-cluster
     DNS does. Code edges of an ambiguous source-code service (see
@@ -671,6 +675,11 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
         merged_edges[edge_key] = (
             edge if existing_edge is None else _merge_edge(existing_edge, edge)
         )
+
+    for edge in environment_edges(environments, index, context, datetime.now(timezone.utc)):
+        edge_key = (edge.source_service_id, edge.target_service_id)
+        existing_edge = merged_edges.get(edge_key)
+        merged_edges[edge_key] = edge if existing_edge is None else _merge_edge(existing_edge, edge)
 
     # Zombie service identification will be added here.
     return {

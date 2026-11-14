@@ -84,6 +84,14 @@ Discovery records what it could not see instead of hiding it in `SUCCESS`:
   dependency (the live cluster's environment already reflects deploy-time
   substitution), but a variable a pipeline defines, or may define, could be
   baked into the image, so it is never treated as provably unset.
+- **Environment-declared dependencies.** An endpoint-like variable
+  (`*_URL`, `*_HOST`, `*_ADDR`, `ConnectionStrings__*`...) that a workload's
+  Kubernetes environment sets to a registered service is an edge (provenance
+  `kubernetes_env`), even when no code read of it was found: Go helpers
+  hiding the name, destructured `process.env`, SDKs that read their own
+  variables (`FLAGD_HOST`). It is weaker evidence than a read in code (the
+  variable may be unused) and corroborates a code edge to the same service.
+  Values naming nothing registered add nothing.
 - **Kubernetes shape.** Objects outside the shape are recorded and listed
   in the report when they concern a radius service: an unexposed workload
   (registered), a transient Job or Pod (not registered), pods from a

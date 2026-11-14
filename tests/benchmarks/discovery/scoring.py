@@ -5,7 +5,8 @@ Two edge modes:
 * ``static``: literal URL references only (no runtime environment).
 * ``manifest``: static plus every env-variable reference resolved through
   ``config_resolution.resolve_variable`` against env read from the app's
-  deployment files (an emulation of the Kubernetes source).
+  deployment files (an emulation of the Kubernetes source), plus edges the
+  env itself declares (``edge_resolution.environment_addresses``).
 
 A missed edge is *flagged* when its caller reports incomplete coverage
 (anything unscanned or not understood) and *silent* when the caller claims
@@ -18,6 +19,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from src.core.config_resolution import ResolutionOutcome, resolve_variable
+from src.core.edge_resolution import environment_addresses
 from src.core.env_names import endpoint_of_value
 from src.core.models import ServiceEnvironment
 from src.core.service_ids import host_of
@@ -152,6 +154,17 @@ class _Predictor:
             return None
         return normalize_host(resolution.endpoint), f" => {resolution.outcome.value}:{resolution.endpoint}"
 
+    def add_environment(self, service: MatchedService) -> None:
+        """Edges the workload's env declares (``environment_edges`` in discovery)."""
+        env = self.envs.get(service.truth_name or "")
+        if self.mode is not EdgeMode.MANIFEST or env is None or service.truth_name is None:
+            return
+        for variable, address in environment_addresses(env.variables):
+            callee = self.callee(normalize_host(address))
+            if callee and callee != NOISE and callee not in self.truth.observability:
+                if callee != service.truth_name:
+                    self.edges.setdefault((service.truth_name, callee), []).append(f"K8S_ENV:{variable}")
+
     def add_service(self, service: MatchedService) -> None:
         caller = service.truth_name or f"BOGUS:{service.key}"
         for ref in service.scan.references:
@@ -175,6 +188,7 @@ def predict_edges(
     predictor = _Predictor(truth, envs, mode)
     for service in match.services:
         predictor.add_service(service)
+        predictor.add_environment(service)
     return predictor.edges, predictor.unresolved
 
 
