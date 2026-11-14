@@ -26,6 +26,13 @@ from src.discovery_engine import nodes as discovery_nodes
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools import _timeout
 from src.tools._timeout import TIMEOUT_MESSAGE
+from src.tools.baseline_store import BaselineScope
+from src.tools.policy_store import (
+    LoadedPolicy,
+    PolicyInvalidError,
+    PolicyMissingError,
+    parse_policy,
+)
 from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.k8s_extractor import KubernetesExtractor
 from src.tools.policy_store import PolicyMissingError
@@ -42,6 +49,32 @@ def _hanging_call(module: object) -> Iterator[threading.Event]:
         finally:
             release.set()
 
+
+
+PRIMARY_WORKSPACE = "b430b9a6-1491-4b12-a744-49a5b9176580"
+OTHER_WORKSPACE = "4f04e987-de47-4c90-9e73-a57a60e39bfc"
+
+
+def _workspaces_policy(workspaces: list[str]) -> LoadedPolicy:
+    policy = parse_policy(
+        "policy_version: 1\ntenant: acme\nproject_id: shop\nenvironment: prod\n"
+        "cluster: aks-1\nrequired_sources: [RUNTIME_TELEMETRY]\nruntime_evidence: live\n"
+        "telemetry_cluster:\n  value: aks-1\n"
+        f"telemetry_additional_workspaces: [{', '.join(workspaces)}]\n",
+        BaselineScope(tenant="acme", project_id="shop"),
+    )
+    return LoadedPolicy(policy=policy, sha256="0" * 64)
+
+
+@contextmanager
+def _policy_store(result: LoadedPolicy | Exception) -> Iterator[MagicMock]:
+    store = MagicMock()
+    if isinstance(result, Exception):
+        store.load.side_effect = result
+    else:
+        store.load.return_value = result
+    with patch.object(discovery_nodes, "POLICY_STORE", store):
+        yield store
 
 class RunWithTimeoutTests(unittest.TestCase):
     def test_returns_result(self) -> None:
@@ -277,11 +310,76 @@ class VerifyEndpointTests(unittest.TestCase):
 
     def test_telemetry_endpoint_binds_workspace(self) -> None:
         payload = TelemetryVerificationRequest(workspace_id=" ws-1 ")
-        with patch.object(api, "TelemetryExtractor") as telemetry_cls:
+        with _policy_store(PolicyMissingError("none")), patch.object(
+            api, "TelemetryExtractor"
+        ) as telemetry_cls:
             telemetry_cls.return_value.verify_access.return_value = (True, "Success")
             response = api.verify_telemetry_endpoint(payload)
         self.assertTrue(response.status)
+        self.assertEqual(response.message, "Success")
         telemetry_cls.assert_called_once_with(workspace_id="ws-1")
+
+    def test_telemetry_checks_policy_additional_workspaces(self) -> None:
+        payload = TelemetryVerificationRequest(
+            workspace_id=PRIMARY_WORKSPACE, tenant="acme", project_id="shop"
+        )
+        policy = _workspaces_policy([OTHER_WORKSPACE, PRIMARY_WORKSPACE])
+        with _policy_store(policy) as store, patch.object(api, "TelemetryExtractor") as telemetry_cls:
+            telemetry_cls.return_value.verify_access.return_value = (True, "Success")
+            response = api.verify_telemetry_endpoint(payload)
+        self.assertTrue(response.status)
+        self.assertIn("1 additional workspace readable", response.message)
+        store.load.assert_called_once_with(BaselineScope(tenant="acme", project_id="shop"))
+        # The primary listed again in the policy is not checked twice.
+        self.assertEqual(
+            [call.kwargs["workspace_id"] for call in telemetry_cls.call_args_list],
+            [PRIMARY_WORKSPACE, OTHER_WORKSPACE],
+        )
+
+    def test_unreadable_additional_workspace_fails_the_check(self) -> None:
+        payload = TelemetryVerificationRequest(workspace_id=PRIMARY_WORKSPACE)
+        results = {
+            PRIMARY_WORKSPACE: (True, "Success"),
+            OTHER_WORKSPACE: (False, "AuthorizationFailed"),
+        }
+
+        def extractor(workspace_id: str) -> MagicMock:
+            mock = MagicMock()
+            mock.verify_access.return_value = results[workspace_id]
+            return mock
+
+        with _policy_store(_workspaces_policy([OTHER_WORKSPACE])), patch.object(
+            api, "TelemetryExtractor", side_effect=extractor
+        ):
+            response = api.verify_telemetry_endpoint(payload)
+        self.assertFalse(response.status)
+        self.assertEqual(
+            response.message, f"additional workspace {OTHER_WORKSPACE}: AuthorizationFailed"
+        )
+
+    def test_failed_primary_skips_additional_workspaces(self) -> None:
+        payload = TelemetryVerificationRequest(workspace_id=PRIMARY_WORKSPACE)
+        with _policy_store(_workspaces_policy([OTHER_WORKSPACE])) as store, patch.object(
+            api, "TelemetryExtractor"
+        ) as telemetry_cls:
+            telemetry_cls.return_value.verify_access.return_value = (False, "denied")
+            response = api.verify_telemetry_endpoint(payload)
+        self.assertEqual((response.status, response.message), (False, "denied"))
+        store.load.assert_not_called()
+
+    def test_invalid_policy_is_reported_without_failing(self) -> None:
+        payload = TelemetryVerificationRequest(workspace_id=PRIMARY_WORKSPACE)
+        with _policy_store(PolicyInvalidError("bad yaml")), patch.object(
+            api, "TelemetryExtractor"
+        ) as telemetry_cls:
+            telemetry_cls.return_value.verify_access.return_value = (True, "Success")
+            response = api.verify_telemetry_endpoint(payload)
+        self.assertTrue(response.status)
+        self.assertIn("additional workspaces not checked: bad yaml", response.message)
+
+    def test_telemetry_request_rejects_bad_scope(self) -> None:
+        with self.assertRaises(ValidationError):
+            TelemetryVerificationRequest(workspace_id="ws-1", tenant="../x")
 
     def test_telemetry_endpoint_rejects_blank_workspace(self) -> None:
         with self.assertRaises(ValidationError):
