@@ -18,7 +18,9 @@ from src.core.models import (
     RunEventStatus,
     RuntimeEvidenceState,
     ServiceIdentity,
+    ServiceStaticConfig,
     ShapeFinding,
+    StaticDefaultUse,
 )
 from src.orchestration.run_log import EventDraft
 
@@ -131,6 +133,51 @@ def _code_scan(before: State, update: State) -> list[EventDraft]:
         ),
         *_coverage_events(stage, list(update.get("static_coverage") or [])),
         *_pipeline_events(stage, list(update.get("pipeline_variables") or [])),
+        *_config_events(stage, list(update.get("static_config") or [])),
+    ]
+
+
+def _config_events(stage: str, configs: list[ServiceStaticConfig]) -> list[EventDraft]:
+    """Say which configuration keys the scan read as dependency addresses."""
+    bound = [config for config in configs if config.bindings or config.image_variables]
+    if not bound:
+        return []
+    keys = sum(len(config.bindings) for config in bound)
+    return [
+        _event(
+            stage,
+            RunEventStatus.INFO,
+            f"Read {_plural(keys, 'configuration key')} that hold addresses "
+            f"(framework settings, defaults in code, image ENV) in "
+            f"{_plural(len(bound), 'service')}. The cluster's values take precedence.",
+            [
+                f"{config.service_name}: "
+                + ", ".join(binding.key for binding in config.bindings[:8])
+                + (f" (+{len(config.bindings) - 8} more)" if len(config.bindings) > 8 else "")
+                for config in bound
+            ],
+        )
+    ]
+
+
+def _default_events(stage: str, uses: list[StaticDefaultUse]) -> list[EventDraft]:
+    """Say which dependencies were resolved from a static default."""
+    if not uses:
+        return []
+    return [
+        _event(
+            stage,
+            RunEventStatus.INFO,
+            f"{_plural(len(uses), 'dependency', 'dependencies')} resolved from a default in source "
+            "control: nothing in the cluster, the pipelines or the image sets the variable.",
+            [
+                f"{short_name(use.service_id)} {use.variable} -> {short_name(use.target)} "
+                f"({use.origin.value.lower()}: {use.file_path}"
+                + (f", profile {use.profile}" if use.profile else "")
+                + ")"
+                for use in uses
+            ],
+        )
     ]
 
 
@@ -321,6 +368,7 @@ def _reconcile(before: State, update: State) -> list[EventDraft]:
                 [f"{entity.entity_id} ({entity.kind.value})" for entity in unresolved],
             )
         )
+    events.extend(_default_events(stage, list(graph.get("static_defaults_used") or [])))
     return events
 
 

@@ -11,6 +11,7 @@ from src.core.models import (
     ShapeFinding,
     ServiceEnvironment,
     ServiceNode,
+    ServiceStaticConfig,
     TelemetryClusterFilter,
 )
 
@@ -33,7 +34,10 @@ class DiscoveryGraphState(TypedDict):
     ``static_coverage`` and ``pipeline_variables`` are recorded per scanned
     repository, ``kubernetes_shape`` per out-of-shape namespace object, and
     ``manifest_edges`` are dependencies the manifests declare (an
-    ExternalName Service's alias to its host).
+    ExternalName Service's alias to its host). ``static_config`` holds what
+    each scanned service's source declares as configuration defaults
+    (image ``ENV``, framework configuration files, defaults in code), used
+    when the runtime environment provably doesn't set a variable.
     """
 
     tenant: str
@@ -59,3 +63,4 @@ class DiscoveryGraphState(TypedDict):
     pipeline_variables: list[PipelineVariables]
     kubernetes_shape: list[ShapeFinding]
     manifest_edges: list[DependencyEdge]
+    static_config: list[ServiceStaticConfig]
