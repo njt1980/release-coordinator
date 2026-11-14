@@ -13,10 +13,15 @@ Links are made only on evidence that preserves meaning:
 - Declared facts (``IdentityFacts``), for a source name left unlinked:
   ``IMAGE_REPOSITORY`` (an image built from the source directory, per a
   Compose, skaffold or pipeline file, is what the runtime service runs),
-  ``DECLARED_NAME`` (a Compose service or Aspire resource built from the
-  source directory has the runtime service's name, or a name the runtime
-  service declares) and ``RUNTIME_DECLARED_NAME`` (the runtime service's
-  identity label or ``OTEL_SERVICE_NAME`` is the source name). A link needs
+  ``DECLARED_NAME`` (a Compose service, Aspire resource or Dockerfile OCI
+  title label built from the source directory has the runtime service's
+  name, or a name the runtime service declares), ``RUNTIME_DECLARED_NAME``
+  (the runtime service's identity label, ``OTEL_SERVICE_NAME`` or OCI
+  ``image.title`` annotation is the source name) and, weakest,
+  ``IMAGE_SOURCE_REPOSITORY`` (the runtime service's OCI ``image.source``
+  annotation names the repository the source service was scanned from,
+  compared by repository name; in a repository holding several services it
+  points at each of them, so the uniqueness rule links none). A link needs
   exactly one runtime candidate across all of them, claimed by no other
   source name. Facts tie identities only; they never create an edge.
 
@@ -48,6 +53,7 @@ class LinkEvidenceKind(str, Enum):
     IMAGE_REPOSITORY = "IMAGE_REPOSITORY"
     DECLARED_NAME = "DECLARED_NAME"
     RUNTIME_DECLARED_NAME = "RUNTIME_DECLARED_NAME"
+    IMAGE_SOURCE_REPOSITORY = "IMAGE_SOURCE_REPOSITORY"
 
 
 # Strongest first: the evidence a link made from several facts reports.
@@ -55,6 +61,7 @@ _DECLARED_EVIDENCE_ORDER: Final[tuple[LinkEvidenceKind, ...]] = (
     LinkEvidenceKind.IMAGE_REPOSITORY,
     LinkEvidenceKind.DECLARED_NAME,
     LinkEvidenceKind.RUNTIME_DECLARED_NAME,
+    LinkEvidenceKind.IMAGE_SOURCE_REPOSITORY,
 )
 
 
@@ -65,10 +72,14 @@ class IdentityFacts(BaseModel, frozen=True):
     runtime service: names its workloads declare (identity labels,
     ``OTEL_SERVICE_NAME``) and the repositories of the images it runs.
     ``image_repositories`` are normalized (see ``image_repository``).
+    ``source_repositories`` are repository names (see ``source_repository``):
+    for a source service, the repository it was scanned from; for a runtime
+    service, the ones its OCI ``image.source`` annotations name.
     """
 
     names: frozenset[str] = frozenset()
     image_repositories: frozenset[str] = frozenset()
+    source_repositories: frozenset[str] = frozenset()
 
 
 class IdentityLink(BaseModel, frozen=True):
@@ -157,6 +168,22 @@ def image_repository(reference: str) -> str | None:
     return "/".join(parts).lower()
 
 
+def source_repository(reference: str) -> str | None:
+    """A source repository URL's (or name's) repository name, lower-case.
+
+    ``https://github.com/acme/Orders.git`` -> ``orders``;
+    ``https://dev.azure.com/org/proj/_git/Orders`` -> ``orders``;
+    ``Orders`` -> ``orders``. None when nothing literal is left.
+    """
+    value = reference.strip().split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    name = value.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    if name.lower().endswith(".git"):
+        name = name[: -len(".git")]
+    if not name or "$" in name or "{" in name:
+        return None
+    return name.lower()
+
+
 def _same_repository(first: str, second: str) -> bool:
     """Equal repository paths, or one a path suffix of the other
     (``orders`` / ``team/orders``: registries add namespaces)."""
@@ -182,6 +209,8 @@ def _declared_candidates(
         for name in sorted(runtime.names):
             if source_key and fold(name) == source_key:
                 hits.append((LinkEvidenceKind.RUNTIME_DECLARED_NAME, name))
+        for repository in sorted(facts.source_repositories & runtime.source_repositories):
+            hits.append((LinkEvidenceKind.IMAGE_SOURCE_REPOSITORY, repository))
     return {
         name: min(hits, key=lambda hit: _DECLARED_EVIDENCE_ORDER.index(hit[0]))
         for name, hits in found.items()

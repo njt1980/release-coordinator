@@ -55,6 +55,12 @@ from src.core.models import (
 )
 from src.core.message_contract import PayloadType, diff_payload
 from src.core.openapi_contract import OpenApiParseError, diff_openapi, is_openapi_file, parse_openapi
+from src.core.operation_usage import (
+    ObservedOperation,
+    OperationAttribution,
+    attribute_operations,
+    broken_operations,
+)
 from src.core.proto_contract import ContractFinding, ProtoParseError, diff_protos, parse_proto
 
 CONTRACT_SUFFIXES: Final[tuple[str, ...]] = (".proto",)
@@ -65,6 +71,9 @@ _PAYLOAD_DIRECTORY: Final[re.Pattern[str]] = re.compile(r"(?:^|/)[^/]*(?:event|m
 FileReader = Callable[[str, str], str | None]
 # Reads the payload types a source file declares; None when it can't be analysed.
 PayloadReader = Callable[[str, str], dict[str, PayloadType] | None]
+# Reads the requests the named callee roles served (see core.operation_usage);
+# None when telemetry can't answer.
+UsageReader = Callable[[list[str]], list[ObservedOperation] | None]
 
 
 def is_contract_file(path: str) -> bool:
@@ -337,3 +346,71 @@ def evaluate_contracts(
         detail="-",
     )
     return check.model_copy(update={"detail": _describe(check)})
+
+
+def _role_services(graph: KnowledgeGraph) -> dict[str, str]:
+    """Lower-case service name -> service id, for names only one service has."""
+    by_name: dict[str, set[str]] = {}
+    for node in graph.services:
+        by_name.setdefault(node.name.strip().lower(), set()).add(node.service_id)
+    return {name: next(iter(ids)) for name, ids in by_name.items() if len(ids) == 1}
+
+
+def attribute_contract_operations(
+    check: ContractCheck,
+    links: dict[str, list[tuple[str, ContractLink]]],
+    graph: KnowledgeGraph,
+    repository: str,
+    read_usage: UsageReader,
+    lookback_days: int,
+) -> OperationAttribution | None:
+    """Which callers were seen using each broken OpenAPI operation (advisory).
+
+    Only a BREAKING check with breaking OpenAPI findings that name an
+    operation is attributed, per document: the services serving it are the
+    callees, its consumers and callers the candidates. None when nothing is
+    attributable or telemetry can't answer. Operations are labelled
+    ``METHOD /path``, prefixed with the document when several broke.
+    """
+    if check.status is not ContractCheckStatus.BREAKING:
+        return None
+    documents = [path for path in check.contract_files if is_openapi_file(path)]
+    broken = broken_operations(check.breaking_findings, documents)
+    if not broken:
+        return None
+    names = {node.service_id: node.name for node in graph.services}
+    servers: dict[str, list[str]] = {}
+    for service, service_links in links.items():
+        for link_repository, link in service_links:
+            if link_repository == repository.lower() and link.path in broken and link.role.serves:
+                servers.setdefault(link.path, []).append(service)
+    callee_names = sorted({names[s] for served in servers.values() for s in served if s in names})
+    if not callee_names:
+        return None
+    observed = read_usage(callee_names)
+    if observed is None:
+        return None
+    role_services = _role_services(graph)
+    merged = OperationAttribution(lookback_days=lookback_days)
+    seen: set[str] = set()
+    unattributed: set[str] = set()
+    for document, operations in broken.items():
+        callees = {names[s].strip().lower() for s in servers.get(document, []) if s in names}
+        candidates = {*check.callers.get(document, []), *check.consumers.get(document, [])}
+        if not callees or not candidates:
+            continue
+        rows = [row for row in observed if row.callee.strip().lower().rsplit("/", 1)[-1] in callees]
+        result = attribute_operations(operations, candidates, rows, role_services, lookback_days)
+        prefix = f"{document}: " if len(broken) > 1 else ""
+        for operation, services in result.operation_callers.items():
+            merged.operation_callers[prefix + operation] = services
+        seen.update(service for services in result.operation_callers.values() for service in services)
+        seen.update(result.other_operations_only)
+        unattributed.update(result.unattributed)
+        merged.unmatched_roles = sorted({*merged.unmatched_roles, *result.unmatched_roles})
+    if not merged.operation_callers:
+        return None
+    attributed = {s for services in merged.operation_callers.values() for s in services}
+    merged.other_operations_only = sorted(seen - attributed)
+    merged.unattributed = sorted(unattributed - seen)
+    return merged

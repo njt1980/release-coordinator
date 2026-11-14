@@ -28,6 +28,7 @@ from pydantic import (
 from src.core import config
 from src.core.models import (
     IDENTITY_SEGMENT_PATTERN,
+    ServiceBusNamespace,
     UNKNOWN_LABEL,
     UNRESOLVED_ID_PREFIX,
     ChannelBroker,
@@ -368,11 +369,16 @@ class MessagingPolicy(_StrictModel):
     CHANNEL_CONSUMERS_UNCONFIRMED, which keeps the assessment actionable
     but leaves the decision to a person. ``external_consumers`` names
     channels whose consumers are known to live elsewhere; they are
-    accepted with their reason in either mode.
+    accepted with their reason in either mode. ``service_bus_namespaces``
+    (opt-in) are Service Bus namespaces whose queues, topics and
+    subscriptions discovery lists, read-only: advisory context for the
+    channels the code declares (see ``core.messaging.broker_only_entities``);
+    they never add a producer, a consumer or an edge.
     """
 
     unknown_consumers: UnknownConsumersMode = UnknownConsumersMode.BLOCK
     external_consumers: list[ExternalConsumers] = Field(default_factory=list)
+    service_bus_namespaces: list[ServiceBusNamespace] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _channels_are_unique(self) -> Self:

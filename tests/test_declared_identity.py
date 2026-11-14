@@ -11,7 +11,13 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.core.identity_links import IdentityFacts, LinkEvidenceKind, image_repository, link_identities
+from src.core.identity_links import (
+    IdentityFacts,
+    LinkEvidenceKind,
+    image_repository,
+    link_identities,
+    source_repository,
+)
 from src.core.models import (
     IDENTITY_LINK_METADATA_KEY,
     IDENTITY_UNLINKED_METADATA_KEY,
@@ -352,6 +358,117 @@ class ReconcileDeclaredTests(unittest.TestCase):
         self.assertNotIn(IDENTITY_UNLINKED_METADATA_KEY, merged.metadata)
         self.assertEqual(merged.identity_declarations, source.identity_declarations)
         self.assertEqual(graph["edges"], [])
+
+
+class OciProvenanceTests(unittest.TestCase):
+    """OCI image provenance: Dockerfile title labels, workload annotations,
+    and the links they make (identity only)."""
+
+    def test_dockerfile_title_label(self) -> None:
+        content = (
+            "FROM mcr.microsoft.com/dotnet/aspnet:8.0\n"
+            "# LABEL org.opencontainers.image.title=commented\n"
+            'LABEL org.opencontainers.image.title="order-service" \\\n'
+            "      org.opencontainers.image.source=https://github.com/acme/shop\n"
+            "LABEL org.opencontainers.image.title=$NAME\n"
+            "LABEL org.opencontainers.image.title legacy-form\n"
+        )
+        self.assertEqual(declaration_file_kind("src/Orders/Dockerfile"), DeclarationFileKind.DOCKERFILE)
+        self.assertEqual(declaration_file_kind("src/Orders/api.Dockerfile"), DeclarationFileKind.DOCKERFILE)
+        self.assertIsNone(declaration_file_kind("src/Orders/docker/notes.txt"))
+        found = read_declarations("src/Orders/Dockerfile", content, DeclarationFileKind.DOCKERFILE)
+        self.assertEqual(
+            _values(found),
+            [
+                ("DOCKERFILE_OCI_TITLE", "order-service", "src/Orders"),
+                ("DOCKERFILE_OCI_TITLE", "legacy-form", "src/Orders"),
+            ],
+        )
+
+    def test_workload_annotations(self) -> None:
+        template = PodTemplate(
+            {}, "deployment/orders",
+            SimpleNamespace(containers=[SimpleNamespace(image="acr.io/orders:1", env=[])]),
+            annotations={
+                "org.opencontainers.image.title": "ordering",
+                "org.opencontainers.image.source": "https://dev.azure.com/o/p/_git/Ordering",
+                "org.opencontainers.image.revision": "abc123",
+                "unrelated": "x",
+            },
+        )
+        (workload,) = deployed_workloads([template]) or []
+        self.assertEqual(
+            workload.image_provenance,
+            {
+                "org.opencontainers.image.title": "ordering",
+                "org.opencontainers.image.source": "https://dev.azure.com/o/p/_git/Ordering",
+                "org.opencontainers.image.revision": "abc123",
+            },
+        )
+
+    def test_source_repository_names(self) -> None:
+        self.assertEqual(source_repository("https://github.com/acme/Orders.git"), "orders")
+        self.assertEqual(source_repository("https://dev.azure.com/o/p/_git/Orders"), "orders")
+        self.assertEqual(source_repository("git@github.com:acme/orders.git"), "orders")
+        self.assertEqual(source_repository("Orders"), "orders")
+        self.assertIsNone(source_repository("https://github.com/acme/${REPO}"))
+
+    def test_source_repository_links_only_when_unique(self) -> None:
+        result = link_identities(
+            ["ordering"],
+            ["orders-svc", "basket"],
+            source_facts={"ordering": IdentityFacts(source_repositories=frozenset({"ordering"}))},
+            runtime_facts={"orders-svc": IdentityFacts(source_repositories=frozenset({"ordering"}))},
+        )
+        self.assertEqual(
+            [(l.runtime_name, l.evidence) for l in result.links],
+            [("orders-svc", LinkEvidenceKind.IMAGE_SOURCE_REPOSITORY)],
+        )
+        # A repository holding two unlinked services points at the runtime from both.
+        result = link_identities(
+            ["a", "b"],
+            ["demo"],
+            source_facts={n: IdentityFacts(source_repositories=frozenset({"mono"})) for n in ("a", "b")},
+            runtime_facts={"demo": IdentityFacts(source_repositories=frozenset({"mono"}))},
+        )
+        self.assertEqual(result.links, [])
+
+    def test_reconcile_links_by_annotation_without_edges(self) -> None:
+        source = _static("ordering", "Ordering", "src/Ordering.API")
+        runtime = _k8s("shop", "orders").model_copy(
+            update={
+                "deployed_workloads": [
+                    DeployedWorkload(
+                        workload="deployment/orders",
+                        images=["acr.io/orders:42"],
+                        image_provenance={"org.opencontainers.image.source": "https://github.com/acme/Ordering"},
+                    )
+                ]
+            }
+        )
+        graph = _reconcile([source, runtime])
+        merged = {s.service_id: s for s in graph["services"]}[f"{URN}:shop:orders"]
+        self.assertEqual(
+            merged.metadata[IDENTITY_LINK_METADATA_KEY],
+            "IMAGE_SOURCE_REPOSITORY: ordering = orders (via ordering)",
+        )
+        self.assertEqual(graph["edges"], [])
+        title = _k8s("shop", "orders").model_copy(
+            update={
+                "deployed_workloads": [
+                    DeployedWorkload(
+                        workload="deployment/orders", images=["acr.io/x:1"],
+                        image_provenance={"org.opencontainers.image.title": "ordering"},
+                    )
+                ]
+            }
+        )
+        graph = _reconcile([_static("ordering", "Shop", "src/Ordering.API"), title, _k8s("shop", "basket")])
+        merged = {s.service_id: s for s in graph["services"]}[f"{URN}:shop:orders"]
+        self.assertEqual(
+            merged.metadata[IDENTITY_LINK_METADATA_KEY],
+            "RUNTIME_DECLARED_NAME: ordering = orders (via ordering)",
+        )
 
 
 class ScanRepositoryTests(unittest.TestCase):

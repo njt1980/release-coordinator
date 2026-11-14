@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from src.core.models import (
     ChangeFlagKind,
+    ContractCheck,
     TestScopeTier,
     EvidenceIssue,
     IssueSubjectKind,
@@ -507,6 +508,36 @@ def _regulatory_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
     ]
 
 
+def _attribution_lines(check: ContractCheck) -> list[str]:
+    """Which callers live telemetry saw using each broken operation (advisory)."""
+    attribution = check.operation_attribution
+    if attribution is None:
+        return []
+    window = f"in the last {attribution.lookback_days} day(s)"
+    lines = [
+        f"{operation} was used by {', '.join(short_name(s) for s in services)} {window} (live telemetry)"
+        if services
+        else f"{operation} was not seen used by any caller {window} (live telemetry; sampled or rare calls may be missing)"
+        for operation, services in attribution.operation_callers.items()
+    ]
+    if attribution.other_operations_only:
+        lines.append(
+            "Seen calling only other operations (may still use a broken one rarely): "
+            + ", ".join(short_name(s) for s in attribution.other_operations_only)
+        )
+    if attribution.unattributed:
+        lines.append(
+            "No requests seen, so the operations they use are unknown: "
+            + ", ".join(short_name(s) for s in attribution.unattributed)
+        )
+    if attribution.unmatched_roles:
+        lines.append(
+            "Telemetry roles using a broken operation that match no known service: "
+            + ", ".join(attribution.unmatched_roles)
+        )
+    return lines
+
+
 def _contract_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
     """The contract check: a decision when a contract breaks or compatibility is
     unverified, context when it is verified."""
@@ -535,6 +566,7 @@ def _contract_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
             else f"Message type {name} has no scanned consumer."
             for name, services in check.message_consumers.items()
         ),
+        *_attribution_lines(check),
     ]
     return [
         BriefingGroup(

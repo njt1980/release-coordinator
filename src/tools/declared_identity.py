@@ -16,6 +16,9 @@ Sources, each read from the repository at the scanned commit:
   under a pipelines directory): ``Docker@2`` tasks with a ``repository``
   and a literal ``Dockerfile`` or ``buildContext`` (``PIPELINE_DOCKER_TASK``).
   ``$(name)`` is expanded from the file's own top-level ``variables``.
+- Dockerfiles (``Dockerfile``, ``Dockerfile.*``, ``*.Dockerfile``): a
+  literal ``org.opencontainers.image.title`` ``LABEL`` names the image built
+  from the Dockerfile's directory (``DOCKERFILE_OCI_TITLE``).
 - .NET Aspire AppHost projects (``*.cs`` beside the AppHost ``*.csproj``):
   ``AddProject<Projects.X>("name")``, ``AddProject("name", "path.csproj")``
   and ``AddDockerfile``/``AddNpmApp``/``AddPythonApp``-style resources with
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+import shlex
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from enum import Enum
 from typing import Any, Final
@@ -37,7 +41,7 @@ import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field
 
 from src.core.identity_links import image_repository
-from src.core.models import IdentityDeclaration, IdentityDeclarationKind
+from src.core.models import OCI_TITLE, IdentityDeclaration, IdentityDeclarationKind
 
 _COMPOSE_FILE: Final[re.Pattern[str]] = re.compile(
     r"^(?:docker-)?compose(?:[.-][^/]*)?\.ya?ml$", re.IGNORECASE
@@ -68,6 +72,8 @@ _ASPIRE_DIRECTORY_RESOURCE: Final[re.Pattern[str]] = re.compile(
     r"\bAdd(?:Dockerfile|NpmApp|JavaScriptApp|ViteApp|PythonApp|UvicornApp)\s*\(\s*\"([^\"]+)\"\s*,\s*@?\"([^\"]+)\""
 )
 _LINE_COMMENT: Final[re.Pattern[str]] = re.compile(r"^\s*//.*$", re.MULTILINE)
+_DOCKERFILE: Final[re.Pattern[str]] = re.compile(r"^(?:dockerfile(?:\.[^/]+)?|[^/]+\.dockerfile)$", re.IGNORECASE)
+_LABEL_INSTRUCTION: Final[re.Pattern[str]] = re.compile(r"^\s*LABEL\s+(.+)$", re.IGNORECASE)
 
 
 class DeclarationFileKind(str, Enum):
@@ -77,6 +83,7 @@ class DeclarationFileKind(str, Enum):
     SKAFFOLD = "SKAFFOLD"
     PIPELINE = "PIPELINE"
     ASPIRE = "ASPIRE"
+    DOCKERFILE = "DOCKERFILE"
 
 
 class BuildDeclaration(IdentityDeclaration, frozen=True):
@@ -133,6 +140,8 @@ def declaration_file_kind(path: str, apphost_roots: Collection[str] = ()) -> Dec
         return DeclarationFileKind.PIPELINE
     if filename.lower().endswith(".cs") and "/".join(segments[:-1]) in apphost_roots:
         return DeclarationFileKind.ASPIRE
+    if _DOCKERFILE.match(filename):
+        return DeclarationFileKind.DOCKERFILE
     return None
 
 
@@ -314,6 +323,53 @@ def _aspire(path: str, content: str, file_paths: Collection[str]) -> Iterator[Bu
             )
 
 
+def _instructions(content: str) -> Iterator[str]:
+    """A Dockerfile's instructions, line continuations (``\\``) joined and
+    comment lines dropped."""
+    pending = ""
+    for line in content.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        if line.rstrip().endswith("\\"):
+            pending += line.rstrip()[:-1] + " "
+            continue
+        yield pending + line
+        pending = ""
+    if pending:
+        yield pending
+
+
+def _label_pairs(arguments: str) -> Iterator[tuple[str, str]]:
+    """``key=value`` pairs of a ``LABEL`` instruction (values may be quoted);
+    the legacy ``LABEL key value`` form is one pair."""
+    try:
+        tokens = shlex.split(arguments, posix=True)
+    except ValueError:
+        return
+    if tokens and all("=" in token for token in tokens):
+        for token in tokens:
+            key, _, value = token.partition("=")
+            yield key.strip(), value.strip()
+    elif len(tokens) >= 2 and "=" not in tokens[0]:
+        yield tokens[0], " ".join(tokens[1:]).strip()
+
+
+def _dockerfile(path: str, content: str) -> Iterator[BuildDeclaration]:
+    """The OCI title label (a literal, without ``$`` expansion) of any stage."""
+    for instruction in _instructions(content):
+        match = _LABEL_INSTRUCTION.match(instruction)
+        if match is None:
+            continue
+        for key, value in _label_pairs(match.group(1)):
+            if key == OCI_TITLE and value and "$" not in value:
+                yield BuildDeclaration(
+                    kind=IdentityDeclarationKind.DOCKERFILE_OCI_TITLE,
+                    value=value,
+                    file_path=_relative(path),
+                    build_directory=_directory(path),
+                )
+
+
 def read_declarations(
     path: str, content: str, kind: DeclarationFileKind, file_paths: Collection[str] = ()
 ) -> list[BuildDeclaration]:
@@ -328,6 +384,8 @@ def read_declarations(
         found = list(_skaffold(path, content))
     elif kind is DeclarationFileKind.PIPELINE:
         found = list(_pipeline(path, content))
+    elif kind is DeclarationFileKind.DOCKERFILE:
+        found = list(_dockerfile(path, content))
     else:
         found = list(_aspire(path, content, [_relative(p) for p in file_paths]))
     return list(dict.fromkeys(found))

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from src.coordinator.change_flags import config_format, evaluate_change_flags, migration_stack
 from src.coordinator.contracts import (
     FileReader,
+    attribute_contract_operations,
     contract_callers,
     contract_consumers,
     contract_links,
@@ -72,7 +73,9 @@ from src.core.models import (
     REPOSITORY_METADATA_KEY,
     SERVICE_ROOT_METADATA_KEY,
     AssessmentEvidence,
+    ContractCheck,
     ContractCheckStatus,
+    ContractLink,
     ContractScope,
     DependencyEdge,
     DiscoveryIncompleteError,
@@ -120,6 +123,7 @@ from src.coordinator.observability import (
     service_capabilities,
     service_profiles,
 )
+from src.core.operation_usage import OperationAttribution
 from src.core.telemetry_capability import CollectorSource
 from src.coordinator.test_scope import suggested_test_scope
 from src.tools.telemetry_extractor import TelemetryExtractor
@@ -916,7 +920,7 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         messaging.unknown_consumers,
         external,
     )
-    issues.extend(unknown_consumer_issues(channels))
+    issues.extend(unknown_consumer_issues(channels, graph.broker_inventory))
     if channels is not None:
         exempted.extend(
             Exemption(
@@ -1279,7 +1283,42 @@ def check_contracts_node(state: ReleaseGraphState) -> dict[str, object]:
         callers=contract_callers(links, graph.edges, pull_request.repository, contract_files) if graph is not None else {},
         message_consumers=compared,
     )
+    if graph is not None and check.status is ContractCheckStatus.BREAKING:
+        attribution = _operation_attribution(state, check, links, graph, pull_request.repository)
+        if attribution is not None:
+            check = check.model_copy(update={"operation_attribution": attribution})
     return {"contract_check": check}
+
+
+def _operation_attribution(
+    state: ReleaseGraphState,
+    check: ContractCheck,
+    links: dict[str, list[tuple[str, ContractLink]]],
+    graph: KnowledgeGraph,
+    repository: str,
+) -> OperationAttribution | None:
+    """Which callers live telemetry saw using each broken OpenAPI operation.
+
+    Advisory (see ``core.operation_usage``): only with a workspace and real
+    (non-mock) telemetry; a failed query attributes nothing.
+    """
+    workspace_id = (state.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return None
+    policy = _policy(state)
+    days = policy.runtime_lookback_days if policy else config.DEFAULT_RUNTIME_LOOKBACK_DAYS
+    extractor = TelemetryExtractor(
+        workspace_id=workspace_id,
+        additional_workspaces=policy.telemetry_additional_workspaces if policy else (),
+    )
+    if extractor.is_mock:
+        return None
+    scope = policy.telemetry_scope if policy else None
+    return attribute_contract_operations(
+        check, links, graph, repository,
+        lambda callees: extractor.get_operation_usage(days, callees, scope),
+        days,
+    )
 
 
 def check_change_flags_node(state: ReleaseGraphState) -> dict[str, object]:

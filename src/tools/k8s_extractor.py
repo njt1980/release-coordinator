@@ -17,6 +17,7 @@ from src.core.models import (
     DeployingPipeline,
     DiscoveryMethod,
     DiscoveryResult,
+    OCI_PROVENANCE_ANNOTATIONS,
     RUNTIME_IDENTITY_LABELS,
     ServiceEnvironment,
     ServiceNode,
@@ -502,9 +503,19 @@ def _otel_service_names(template: PodTemplate) -> set[str]:
     return names
 
 
+def _image_provenance(annotations: Mapping[str, str]) -> dict[str, str]:
+    """The OCI image annotations (title, source, revision) a template carries."""
+    return {
+        key: annotations[key].strip()
+        for key in OCI_PROVENANCE_ANNOTATIONS
+        if annotations.get(key, "").strip()
+    }
+
+
 def deployed_workloads(templates: Iterable[PodTemplate]) -> list[DeployedWorkload] | None:
     """What each workload among ``templates`` runs: images, deploying pipeline
-    and the names it declares for itself (identity labels, OTel service name).
+    and the names it declares for itself (identity labels, OTel service name,
+    OCI image provenance annotations).
 
     A workload read from several pods (an unread controller) unions their
     images and names; the first template carrying pipeline annotations
@@ -514,12 +525,16 @@ def deployed_workloads(templates: Iterable[PodTemplate]) -> list[DeployedWorkloa
     pipelines: dict[str, DeployingPipeline] = {}
     labels: dict[str, dict[str, str]] = {}
     otel_names: dict[str, set[str]] = {}
+    provenance: dict[str, dict[str, str]] = {}
     for template in templates:
         images.setdefault(template.workload, set()).update(_container_images(template.spec))
         otel_names.setdefault(template.workload, set()).update(_otel_service_names(template))
         identity = _identity_labels(template.labels)
         if identity:
             labels.setdefault(template.workload, identity)
+        oci = _image_provenance(template.annotations)
+        if oci:
+            provenance.setdefault(template.workload, oci)
         pipeline = _deploying_pipeline(template.annotations)
         if pipeline is not None:
             pipelines.setdefault(template.workload, pipeline)
@@ -530,6 +545,7 @@ def deployed_workloads(templates: Iterable[PodTemplate]) -> list[DeployedWorkloa
             pipeline=pipelines.get(workload),
             identity_labels=labels.get(workload, {}),
             otel_service_names=sorted(otel_names[workload]),
+            image_provenance=provenance.get(workload, {}),
         )
         for workload in sorted(images)
     ] or None

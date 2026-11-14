@@ -171,6 +171,28 @@ before falling back to the developer's `az login`.
   source name and say which uncovered service they look like
   (`LiveCoverage.unscoped_sources`); the rows still never count.
 - Role assignments can take a few minutes to take effect.
+- Consumer attribution (advisory): when a pull request breaks an OpenAPI
+  operation, the assessment asks the same workspaces which callers' requests
+  the serving service handled, by request name (the route), joining each
+  request to its caller's dependency span. Same read permission; nothing
+  extra. It only says who was seen using which operation in the lookback
+  window (sampled or rare calls can be missing) and never changes the
+  contract check's result.
+
+## Azure Service Bus (broker inventory, optional)
+
+- Only when the project policy lists `messaging.service_bus_namespaces`
+  (subscription ID, resource group, namespace). Discovery then lists each
+  namespace's queues, topics and topic subscriptions through the Azure
+  Resource Manager REST API (GET only; `azure-core` with
+  `DefaultAzureCredential`, no extra package).
+- Needs the built-in **Reader** role on each namespace (or its resource
+  group). Never reads messages, keys or connection strings.
+- Advisory: entities no scanned code declares are listed in the inventory
+  (`broker_only`), and a channel with unknown consumers says whether the
+  broker lists subscriptions on it. A failed read is recorded
+  (`broker_errors`), never fails discovery, and nothing here adds a
+  producer, a consumer or an edge.
 
 ## Kubernetes (manifest scan)
 
@@ -182,6 +204,13 @@ before falling back to the developer's `az login`.
 - From the same objects, discovery records each workload's container images
   and, when the Azure DevOps `KubernetesManifest` task deployed it, the
   pipeline run from its `azure-pipelines/*` annotations. No extra permission.
+- OCI image provenance annotations on a workload or its pod template
+  (`org.opencontainers.image.title`, `.source`, `.revision`) are recorded
+  too and used for identity only: the title as a name the workload declares,
+  the source repository's name to tie it to the source service scanned from
+  that repository (only when exactly one unlinked source service points at
+  it). A Dockerfile's literal `org.opencontainers.image.title` `LABEL` names
+  the image built from its directory. Never an edge.
 - Locally the backend uses the current kubeconfig context; on Azure it uses
   the in-cluster service account or the cluster's Entra integration.
 - Whichever it uses, discovery records the API server it actually read. The

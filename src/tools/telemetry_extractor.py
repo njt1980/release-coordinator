@@ -34,7 +34,8 @@ from src.core.models import (
     normalize_workspace_ids,
 )
 from src.core.telemetry_capability import telemetry_stack
-from src.core.telemetry_roles import TelemetryRoleAllowList
+from src.core.operation_usage import ObservedOperation
+from src.core.telemetry_roles import ROLE_NAME_PATTERN, TelemetryRoleAllowList
 from src.tools.telemetry_normalization import DropReason, normalize_edges, parse_target
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
@@ -241,6 +242,28 @@ class TelemetryExtractor:
             )
         except Exception as error:
             logger.warning("Telemetry role profile query failed: %s", error)
+            return None
+
+    def get_operation_usage(
+        self, days_back: int, callees: Sequence[str], scope: TelemetryScope | None
+    ) -> list[ObservedOperation] | None:
+        """Requests ``callees`` served, by caller and operation (see
+        ``build_operation_usage_query``).
+
+        Advisory: never raises, and returns None for the mock fixture, when
+        no callee name is usable, or when the query fails.
+        """
+        if self._source != "azure" or self._client is None:
+            return None
+        try:
+            query = build_operation_usage_query(days_back, callees, scope)
+        except ValueError as error:
+            logger.info("Operation usage not queried: %s", error)
+            return None
+        try:
+            return parse_operation_usage_response(self._query(query, days_back))
+        except Exception as error:
+            logger.warning("Telemetry operation usage query failed: %s", error)
             return None
 
     @property
@@ -572,6 +595,85 @@ def build_dependency_query(
         f"LastObservedAt, {_CALLS_COLUMN}, {_FAILURES_COLUMN}, {_MAX_ITEM_COUNT_COLUMN},\n"
         f"    {_CALLEE_COLUMN}, {_CALLEE_NAMESPACE_COLUMN}, {_RESOLVED_CALLS_COLUMN}, {_WINDOW_CALLS_COLUMN}\n"
     )
+
+
+# How many (caller, callee, operation) rows the operation usage query returns at most.
+OPERATION_USAGE_LIMIT = 5000
+_OPERATION_USAGE_COLUMNS = frozenset({"Caller", "Callee", "Operation", "Calls"})
+
+
+def build_operation_usage_query(
+    days_back: int, callees: Sequence[str], scope: TelemetryScope | None = None
+) -> str:
+    """Return the KQL naming the operations each caller used on ``callees``.
+
+    A request (``AppRequests``) of a callee role is named after the route it
+    handled; its parent is the caller's dependency span in the same
+    operation, whose role is the caller. Calls are ``sum(ItemCount)``.
+    Callee names are role names (``ROLE_NAME_PATTERN``, compared without a
+    ``<namespace>/`` prefix, case-insensitively); names failing the pattern
+    are left out so they can't break out of the quoted strings.
+
+    Raises:
+        ValueError: if days_back isn't positive or no callee name is usable.
+    """
+    if days_back <= 0:
+        raise ValueError("days_back must be a positive integer")
+    names = sorted(
+        {name.strip().lower() for name in callees if ROLE_NAME_PATTERN.match(name.strip().lower())}
+    )
+    if not names:
+        raise ValueError("no usable callee role name")
+    quoted = ", ".join(f'"{name}"' for name in names)
+    scope_clauses = f"{_component_clause(scope)}{_cluster_clause(scope)}"
+    return (
+        "let served = AppRequests\n"
+        f"| where TimeGenerated >= ago({days_back}d)\n"
+        f"{scope_clauses}"
+        f"{_role_columns('Callee')}"
+        f'| where extract(@"[^/]*$", 0, CalleeName) in~ ({quoted})\n'
+        "| where isnotempty(ParentId) and isnotempty(Name)\n"
+        "| project OperationId, ParentId, CalleeName, Name, ItemCount;\n"
+        "AppDependencies\n"
+        f"| where TimeGenerated >= ago({days_back}d)\n"
+        f"{scope_clauses}"
+        f"{_role_columns('Source')}"
+        "| where isnotempty(SourceName)\n"
+        "| project OperationId, Id, SourceName\n"
+        "| join kind=inner hint.strategy=shuffle (served)\n"
+        "    on $left.OperationId == $right.OperationId, $left.Id == $right.ParentId\n"
+        "| summarize Calls = sum(ItemCount) by Caller = SourceName, Callee = CalleeName, Operation = Name\n"
+        f"| top {OPERATION_USAGE_LIMIT} by Calls desc\n"
+    )
+
+
+def parse_operation_usage_response(
+    response: LogsQueryResult | LogsQueryPartialResult,
+) -> list[ObservedOperation]:
+    """Read ``build_operation_usage_query`` rows; blank rows are skipped.
+
+    Raises:
+        ValueError: if the response isn't complete or lacks the columns.
+    """
+    if getattr(response, "status", None) != LogsQueryStatus.SUCCESS:
+        raise ValueError(f"operation usage query status {getattr(response, 'status', None)!r}")
+    found: list[ObservedOperation] = []
+    for table in list(getattr(response, "tables", None) or []):
+        columns = {column: index for index, column in enumerate(table.columns)}
+        missing = _OPERATION_USAGE_COLUMNS.difference(columns)
+        if missing:
+            raise ValueError(f"table {table.name!r} lacks columns {sorted(missing)}")
+        for row in table.rows:
+            caller, callee = _text(row, columns["Caller"]), _text(row, columns["Callee"])
+            operation = _text(row, columns["Operation"])
+            if caller and callee and operation:
+                found.append(
+                    ObservedOperation(
+                        caller=caller, callee=callee, operation=operation,
+                        calls=_count(row, columns["Calls"]),
+                    )
+                )
+    return found
 
 
 # How many roles the profile query returns at most (busiest first).
