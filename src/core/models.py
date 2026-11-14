@@ -234,10 +234,50 @@ IDENTITY_UNLINKED_METADATA_KEY: Final[str] = "identity_unlinked"
 IDENTITY_SUGGESTIONS_METADATA_KEY: Final[str] = "identity_suggestions"
 
 
+class DeployingPipeline(BaseModel):
+    """The Azure Pipelines run that last applied a workload.
+
+    Read from the ``azure-pipelines/*`` annotations the KubernetesManifest
+    task stamps on the objects it deploys; any field the cluster doesn't
+    carry is None.
+    """
+
+    organization: str | None = None
+    project: str | None = None
+    pipeline: str | None = None
+    pipeline_id: str | None = None
+    run_id: str | None = None
+    run_url: str | None = None
+    job: str | None = None
+
+
+class DeployedWorkload(BaseModel):
+    """What one Kubernetes workload of a service runs, as the cluster says.
+
+    ``workload`` is ``<kind>/<name>``; ``images`` its containers' images
+    (sorted, unique); ``pipeline`` the run that deployed it, when annotated.
+    """
+
+    workload: str = Field(min_length=1)
+    images: List[str] = Field(default_factory=list)
+    pipeline: DeployingPipeline | None = None
+
+
+def merge_deployed_workloads(
+    first: List[DeployedWorkload] | None, second: List[DeployedWorkload] | None
+) -> List[DeployedWorkload] | None:
+    """Union two nodes' deployed workloads by workload (first wins); None if neither has any."""
+    merged = {workload.workload: workload for workload in [*(second or []), *(first or [])]}
+    return [merged[name] for name in sorted(merged)] or None
+
+
 class ServiceNode(BaseModel):
     """A microservice node and its identifying metadata in the dependency graph.
 
     ``service_id`` is the service's FQURI (see ``ServiceIdentity``).
+    ``deployed_workloads`` is what the cluster runs for it (images, and the
+    pipeline run that deployed it); None when discovery didn't read the
+    cluster for this service, or the snapshot predates it.
     """
 
     service_id: str
@@ -245,6 +285,7 @@ class ServiceNode(BaseModel):
     repository_url: Optional[str] = None
     criticality_tier: int = 3
     metadata: Dict[str, str] = Field(default_factory=dict)
+    deployed_workloads: List[DeployedWorkload] | None = None
 
     @field_validator("service_id")
     @classmethod
