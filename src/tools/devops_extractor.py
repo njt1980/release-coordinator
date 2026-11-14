@@ -24,6 +24,7 @@ from src.core.models import (
     ConfigBinding,
     ConfigFramework,
     DiscoveryResult,
+    OpaqueReferenceKind,
     OpaqueReferenceSite,
     PipelineVariables,
     RepositoryCoverage,
@@ -53,6 +54,7 @@ from src.tools.build_projects import (
     read_projects,
     unresolved_sites,
 )
+from src.tools.client_libraries import client_libraries, manifest_ecosystem
 from src.tools.config_readers import (
     ConfigFileKind,
     ConfigParseError,
@@ -74,6 +76,7 @@ from src.tools.config_readers import (
 from src.tools.reference_sites import (
     BoundSection,
     bound_sections,
+    external_config_sites,
     opaque_reference_sites,
     unbound_section_sites,
 )
@@ -801,6 +804,7 @@ def read_source_file(content: str, service_name: str, path: str) -> FileRead:
     if kind is not None and kind.kind is ConfigFileKind.SPRING_CONFIG:
         return FileRead(
             bindings=spring_config_bindings(content, relative, kind.profile),
+            sites=external_config_sites(content),
             config_keys={
                 ConfigFramework.SPRING: [
                     key
@@ -1508,6 +1512,9 @@ class DevOpsExtractor:
                         services[root].add_sites(path, sites)
 
             scans = [services[b.root].finish(repo_name, commit_sha) for b in selected]
+            self._flag_clients_without_address(
+                git_client, repository.id, project, commit_sha, file_paths, layout, scans, build_contents
+            )
             return DiscoveryResult[RepositoryScan].from_items(
                 [
                     RepositoryScan(
@@ -1524,6 +1531,62 @@ class DevOpsExtractor:
             return DiscoveryResult[RepositoryScan].failed(
                 f"{repo_name}: repository scan failed: {error}"
             )
+
+    def _flag_clients_without_address(
+        self,
+        git_client: Any,
+        repository_id: str,
+        project: str,
+        commit_sha: str,
+        file_paths: list[str],
+        layout: RepositoryLayout,
+        scans: list[ServiceScan],
+        build_contents: dict[str, str],
+    ) -> None:
+        """Flag services that declare a network client but reference nothing.
+
+        Only services whose scan found no reference and no configuration
+        binding are checked, so manifests are read for those alone. Each
+        client library a manifest they own declares becomes a
+        ``CLIENT_WITHOUT_ADDRESS`` site on that manifest. A manifest that
+        can't be read is skipped (the guard only adds flags).
+        """
+        silent = {
+            scan.service.root: scan
+            for scan in scans
+            if scan.coverage is not None
+            and not scan.references
+            and not (scan.config and scan.config.bindings)
+        }
+        if not silent:
+            return
+        dotnet_roots = dotnet_project_roots(file_paths)
+        for path in file_paths:
+            if manifest_ecosystem(path) is None:
+                continue
+            if classify_path(path, dotnet_roots) is FileClass.EXCLUDED:
+                continue
+            ownership = layout.owner(path)
+            owners = [silent[root] for root in ownership.services if root in silent]
+            if ownership.excluded or not owners:
+                continue
+            try:
+                content = build_contents.get(path) or self._read_item_content(
+                    git_client, repository_id, path, project, commit_sha
+                )
+            except Exception as error:
+                logger.warning("Cannot read manifest %s: %s", path, error)
+                continue
+            sites = [
+                OpaqueReferenceSite(
+                    line=library.line,
+                    kind=OpaqueReferenceKind.CLIENT_WITHOUT_ADDRESS,
+                    detail=library.name,
+                )
+                for library in client_libraries(content, path)
+            ]
+            for scan in owners:
+                _add_unscanned_sites(scan, path.lstrip("/"), sites)
 
     def _read_owned_files(
         self,
@@ -1593,6 +1656,19 @@ class DevOpsExtractor:
             for owner in owners:
                 owner.add_read(path, read, from_library=ownership.library is not None)
         return unowned
+
+
+def _add_unscanned_sites(scan: ServiceScan, path: str, sites: list[OpaqueReferenceSite]) -> None:
+    """Record not-understood ``sites`` in ``path`` on a finished scan."""
+    if not sites or scan.coverage is None:
+        return
+    for unscanned in scan.coverage.unscanned:
+        if unscanned.path == path and unscanned.reason is UnscannedReason.REFERENCES_NOT_UNDERSTOOD:
+            unscanned.sites.extend(sites)
+            return
+    scan.coverage.unscanned.append(
+        UnscannedFile(path=path, reason=UnscannedReason.REFERENCES_NOT_UNDERSTOOD, sites=list(sites))
+    )
 
 
 class _ServiceAccumulator:

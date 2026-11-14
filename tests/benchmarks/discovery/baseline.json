@@ -27,8 +27,8 @@
    "static_recall": 0.0,
    "manifest_precision": 1.0,
    "manifest_recall": 0.125,
-   "missed_silent": 1,
-   "missed_flagged": 13
+   "missed_silent": 0,
+   "missed_flagged": 14
   },
   "otel-demo": {
    "inventory_precision": 0.944,
@@ -37,8 +37,8 @@
    "static_recall": 0.0,
    "manifest_precision": 0.8,
    "manifest_recall": 0.205,
-   "missed_silent": 18,
-   "missed_flagged": 13
+   "missed_silent": 8,
+   "missed_flagged": 23
   },
   "sock-shop": {
    "inventory_precision": 0.667,
@@ -47,8 +47,8 @@
    "static_recall": 0.0,
    "manifest_precision": 1.0,
    "manifest_recall": 0.133,
-   "missed_silent": 12,
-   "missed_flagged": 0
+   "missed_silent": 7,
+   "missed_flagged": 5
   },
   "spring-petclinic-microservices": {
    "inventory_precision": 1.0,
@@ -57,8 +57,8 @@
    "static_recall": 0.211,
    "manifest_precision": 1.0,
    "manifest_recall": 0.316,
-   "missed_silent": 11,
-   "missed_flagged": 2
+   "missed_silent": 0,
+   "missed_flagged": 13
   },
   "teastore": {
    "inventory_precision": 1.0,
@@ -67,8 +67,8 @@
    "static_recall": 0.0,
    "manifest_precision": null,
    "manifest_recall": 0.0,
-   "missed_silent": 13,
-   "missed_flagged": 0
+   "missed_silent": 0,
+   "missed_flagged": 13
   }
  },
  "pooled": {
@@ -78,7 +78,7 @@
   "static_recall": 0.095,
   "manifest_precision": 0.955,
   "manifest_recall": 0.307,
-  "missed_silent": 55,
-  "missed_flagged": 36
+  "missed_silent": 15,
+  "missed_flagged": 76
  }
 }
