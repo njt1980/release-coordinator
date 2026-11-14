@@ -224,6 +224,7 @@ policy (G19) is required before anyone else's data goes through it.
 | `BASELINE_DRIFT` | Live telemetry shows an edge in the radius that the baseline lacks |
 | `REVISION_UNVERIFIED` | The PR's commits can't be verified: missing, base not an ancestor of head, changed files that don't match the commits, no `source_control` in the policy, or the head couldn't be scanned |
 | `BASELINE_REVISION_MISMATCH` | Commits between the baseline's scanned revision and the PR's base change the release, the two have diverged, or the baseline predates recorded container environments |
+| `IDENTITY_UNLINKED` | A service in the radius exists in source code but matches no running service by name (or by name up to case and `-_.` separators, unique on both sides); near names are offered as a question, never applied |
 | `DEPENDENCY_CYCLE` | No safe deployment order exists |
 | `COMPATIBILITY_UNVERIFIED` | No evidence that the contract change is compatible |
 | `DEMO_EVIDENCE`, `MODEL_REJECTED` | Mock data, or the risk model rejected the release |

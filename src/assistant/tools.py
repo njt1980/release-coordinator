@@ -96,6 +96,12 @@ _REASONS: Final[dict[ReasonCode, tuple[str, str]]] = {
         "Changed files belong to no registered service and aren't exempt.",
         "Declare the service in release-coord.yaml, or exempt the path in the policy.",
     ),
+    ReasonCode.IDENTITY_UNLINKED: (
+        "A service in the radius exists in source code but matches no running service, so "
+        "its runtime calls and callers are unknown.",
+        "Declare its deployed name in the repository's release-coord.yaml (a near name is "
+        "suggested, never applied), or confirm it isn't deployed.",
+    ),
     ReasonCode.DISCOVERY_GAP: (
         "An endpoint in the release radius matches no single service (IP, external host, "
         "unregistered or ambiguous service, unresolved variable), or a telemetry query failed.",

@@ -41,7 +41,10 @@ from src.coordinator.sequencing import DeploymentPlan, sequence_deployment
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
 from src.core.models import (
+    IDENTITY_SUGGESTIONS_METADATA_KEY,
+    IDENTITY_UNLINKED_METADATA_KEY,
     REPOSITORY_METADATA_KEY,
+    SERVICE_ROOT_METADATA_KEY,
     AssessmentEvidence,
     DependencyEdge,
     DiscoveryIncompleteError,
@@ -304,6 +307,39 @@ def unresolved_gaps(
         else:
             exempted.append(exemption)
     return issues, exempted
+
+
+def identity_issues(graph: KnowledgeGraph, services: Iterable[str]) -> list[EvidenceIssue]:
+    """IDENTITY_UNLINKED for each service in ``services`` that exists in
+    source code but matches no running service (see ``_link_by_name`` in
+    discovery): its runtime calls and callers are unknown. Near names are
+    offered as questions, never applied."""
+    nodes = {node.service_id: node for node in graph.services}
+    issues: list[EvidenceIssue] = []
+    for service_id in dict.fromkeys(services):
+        node = nodes.get(service_id)
+        if node is None or node.metadata.get(IDENTITY_UNLINKED_METADATA_KEY) != "true":
+            continue
+        location = "/".join(
+            part
+            for part in (node.metadata.get(REPOSITORY_METADATA_KEY), node.metadata.get(SERVICE_ROOT_METADATA_KEY))
+            if part
+        )
+        suggested = [s for s in node.metadata.get(IDENTITY_SUGGESTIONS_METADATA_KEY, "").split(",") if s]
+        hint = (
+            f" Is it deployed as {' or '.join(suggested)}?" if suggested else ""
+        )
+        issues.append(
+            EvidenceIssue(
+                code=ReasonCode.IDENTITY_UNLINKED,
+                detail=(
+                    f"{node.name} (source {location or 'unknown'}) matches no running service, "
+                    f"so its runtime calls and callers are unknown.{hint} Declare its deployed "
+                    "name in release-coord.yaml, or deploy it."
+                ),
+            )
+        )
+    return issues
 
 
 def explain_unset(reach: UnresolvedReach) -> UnresolvedReach:
@@ -624,8 +660,9 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     the policy's environment and cluster, a baseline older than the policy
     allows, a required evidence source that did not succeed, commits
     between the baseline and the base that change the release (see
-    ``RevisionLag``), or source files the static scan couldn't read (see
-    ``static_coverage_issues``). The radius is walked over ``assessed_graph`` (the
+    ``RevisionLag``), source files the static scan couldn't read (see
+    ``static_coverage_issues``), or a service in the radius known only from
+    source code (see ``identity_issues``). The radius is walked over ``assessed_graph`` (the
     head's dependencies) when the head was scanned, the baseline otherwise.
     """
     scope = _scope(state)
@@ -667,6 +704,7 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     issues.extend(_gap(issue) for issue in target_issues)
     issues.extend(gaps)
     issues.extend(policy_baseline_issues(policy, baseline, utc_now()))
+    issues.extend(identity_issues(baseline.graph, [*targets, *radius.upstream, *radius.downstream]))
     coverage_issues, unscanned_exempted = static_coverage_issues(
         policy, baseline.graph, baseline.snapshot_id, state.get("head_coverage") or []
     )
