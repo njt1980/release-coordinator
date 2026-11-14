@@ -250,7 +250,10 @@ class ServiceEnvironment(BaseModel):
 
     ``opaque_variables`` are names that are set but whose value can't be
     read (Secret or field references, missing config maps, conflicting
-    values). ``has_opaque_sources`` is true when a workload imports a whole
+    values, or a config map value a later ``envFrom`` Secret may override),
+    and a name any container sets opaquely is never in ``variables``.
+    ``variable_sources`` records where each readable value came from, as
+    ``<kind>/<workload>/<container>:<source>`` entries. ``has_opaque_sources`` is true when a workload imports a whole
     Secret or a config map that couldn't be read (``envFrom``), so any name
     may be set. Together they let a variable be proven unset: absent from
     all three.
@@ -258,6 +261,7 @@ class ServiceEnvironment(BaseModel):
 
     service_id: str
     variables: Dict[str, str] = Field(default_factory=dict)
+    variable_sources: Dict[str, List[str]] = Field(default_factory=dict)
     opaque_variables: List[str] = Field(default_factory=list)
     has_opaque_sources: bool = False
 
@@ -506,6 +510,12 @@ class DependencyEdge(BaseModel):
     edges carry comma-separated labels. Both default to ``unknown`` so
     snapshots written before they existed still load. Mock fixture evidence
     is demo data, never real evidence, so it must carry zero confidence.
+
+    ``dependency_type`` is the telemetry's dependency type (``HTTP``,
+    ``Queue Message | rabbitmq``...), when known. ``direction_uncertain``
+    marks a telemetry edge whose target port is in the ephemeral range: it
+    may be a call to a server listening high, or a reply reported in
+    reverse. A merged edge is uncertain only if all its evidence is.
     """
 
     source_service_id: str
@@ -515,6 +525,8 @@ class DependencyEdge(BaseModel):
     last_observed_at: datetime
     provenance: str = Field(default=UNKNOWN_LABEL, min_length=1)
     environment: str = Field(default=UNKNOWN_LABEL, min_length=1)
+    dependency_type: str | None = None
+    direction_uncertain: bool = False
 
     @model_validator(mode="after")
     def _mock_fixtures_carry_no_confidence(self) -> Self:
@@ -697,11 +709,14 @@ class ObservedEdge(BaseModel):
     """A dependency live telemetry observed, resolved against the baseline.
 
     Endpoints are registered service FQURIs or unresolved entity IDs.
+    ``direction_uncertain`` is true when every sighting reported a target
+    port in the ephemeral range (see ``DependencyEdge``).
     """
 
     source_id: str = Field(min_length=1)
     target_id: str = Field(min_length=1)
     last_observed_at: datetime
+    direction_uncertain: bool = False
 
 
 class UnresolvedReach(BaseModel):

@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
-from typing import Any
+from typing import Any, Final, NamedTuple
 
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
@@ -188,7 +188,7 @@ class KubernetesExtractor:
             )
             or []
         )
-        templates: list[tuple[dict[str, str], Any]] = []
+        templates: list[PodTemplate] = []
         workload_listers: list[tuple[str, Callable[[], Any]]] = [
             ("deployments", lambda: apps_v1_api.list_namespaced_deployment(namespace)),
             (
@@ -200,9 +200,19 @@ class KubernetesExtractor:
             for item in _list_items(request, namespace, kind, errors) or []:
                 if item.spec and item.spec.template:
                     template = item.spec.template
-                    templates.append((_labels(template.metadata), template.spec))
+                    templates.append(
+                        PodTemplate(
+                            labels=_labels(template.metadata),
+                            workload=_workload_name(kind, item),
+                            spec=template.spec,
+                        )
+                    )
         templates.extend(
-            (_labels(pod.metadata), pod.spec)
+            PodTemplate(
+                labels=_labels(pod.metadata),
+                workload=_workload_name("pods", pod),
+                spec=pod.spec,
+            )
             for pod in _list_items(
                 lambda: core_v1_api.list_namespaced_pod(namespace),
                 namespace, "pods", errors,
@@ -264,44 +274,73 @@ def _env_value(
 
 
 class _ContainerEnv:
-    """What one pod spec's containers set: readable values, opaque names,
-    and whether some source may set names we can't see."""
+    """What one pod spec's containers set.
+
+    ``pairs`` are (variable, value, provenance) for readable values, where
+    provenance is ``<container>:<source>``; ``opaque`` names are set but
+    unreadable in at least one container; ``has_opaque_sources`` is true
+    when some container imports names we can't see.
+    """
 
     def __init__(self) -> None:
-        self.pairs: list[tuple[str, str]] = []
+        self.pairs: list[tuple[str, str, str]] = []
         self.opaque: set[str] = set()
         self.has_opaque_sources = False
+
+
+def _env_origin(env_var: Any) -> str:
+    """Name where an explicit, readable ``env`` entry's value comes from."""
+    ref = getattr(getattr(env_var, "value_from", None), "config_map_key_ref", None)
+    if getattr(env_var, "value", None) is None and ref is not None:
+        return f"configMapKeyRef/{ref.name}"
+    return "env"
+
+
+def _env_from_source(source: Any, config_maps: Mapping[str, Mapping[str, str]]) -> str | None:
+    """Return the config map an ``envFrom`` entry reads, or None if opaque.
+
+    A Secret, or a config map that is unnamed or couldn't be read, may set
+    any name with a value we can't see.
+    """
+    ref = getattr(source, "config_map_ref", None)
+    if getattr(source, "secret_ref", None) is not None or ref is None:
+        return None
+    if not ref.name or ref.name not in config_maps:
+        return None
+    return str(ref.name)
 
 
 def _container_env(
     pod_spec: Any, config_maps: Mapping[str, Mapping[str, str]]
 ) -> _ContainerEnv:
-    """Return the environment every container in a pod spec receives.
+    """Return the environment the containers in a pod spec receive.
 
-    Follows Kubernetes precedence: later ``envFrom`` config maps override
+    Follows Kubernetes precedence: later ``envFrom`` sources override
     earlier ones, and explicit ``env`` entries override ``envFrom``. An
-    explicit entry whose value cannot be read (a Secret or field ref, a
-    missing config map key) is an opaque name and still shadows any
-    ``envFrom`` value of the same name. An ``envFrom`` Secret, or a config
-    map that couldn't be read, may set any name, so it marks the spec as
-    having opaque sources.
+    ``envFrom`` Secret, or a config map that couldn't be read, may set any
+    name, so it marks the spec as having opaque sources, and every config
+    map value imported before it in the same container becomes opaque: the
+    later source may override it. An explicit entry whose value cannot be
+    read (a Secret or field ref, a missing config map key) is opaque and
+    still shadows any ``envFrom`` value of the same name.
     """
     env = _ContainerEnv()
     for container in getattr(pod_spec, "containers", None) or []:
-        resolved: dict[str, str] = {}
+        container_name = getattr(container, "name", None) or "?"
+        resolved: dict[str, tuple[str, str]] = {}
         opaque: set[str] = set()
         for source in getattr(container, "env_from", None) or []:
-            if getattr(source, "secret_ref", None) is not None:
+            map_name = _env_from_source(source, config_maps)
+            if map_name is None:
                 env.has_opaque_sources = True
-            ref = getattr(source, "config_map_ref", None)
-            if ref is None:
-                continue
-            if not ref.name or ref.name not in config_maps:
-                env.has_opaque_sources = True
+                opaque.update(resolved)
+                resolved.clear()
                 continue
             prefix = getattr(source, "prefix", None) or ""
-            for key, map_value in config_maps[ref.name].items():
-                resolved[f"{prefix}{key}"] = map_value
+            for key, map_value in config_maps[map_name].items():
+                name = f"{prefix}{key}"
+                resolved[name] = (map_value, f"configMap/{map_name}")
+                opaque.discard(name)
         for env_var in container.env or []:
             if not env_var.name:
                 continue
@@ -310,9 +349,12 @@ def _container_env(
                 resolved.pop(env_var.name, None)
                 opaque.add(env_var.name)
             else:
-                resolved[env_var.name] = value
+                resolved[env_var.name] = (value, _env_origin(env_var))
                 opaque.discard(env_var.name)
-        env.pairs.extend(resolved.items())
+        env.pairs.extend(
+            (name, value, f"{container_name}:{origin}")
+            for name, (value, origin) in resolved.items()
+        )
         env.opaque.update(opaque)
     return env
 
@@ -322,9 +364,33 @@ def _selects(selector: Mapping[str, str], labels: Mapping[str, str]) -> bool:
     return bool(selector) and all(labels.get(k) == v for k, v in selector.items())
 
 
+class PodTemplate(NamedTuple):
+    """A pod spec some workload runs, with its labels and owner.
+
+    ``workload`` is ``<kind>/<name>`` (for example ``deployment/orders``).
+    """
+
+    labels: dict[str, str]
+    workload: str
+    spec: Any
+
+
+_WORKLOAD_KINDS: Final[dict[str, str]] = {
+    "deployments": "deployment",
+    "stateful sets": "statefulset",
+    "pods": "pod",
+}
+
+
+def _workload_name(kind: str, item: Any) -> str:
+    """Return ``<kind>/<name>`` for a listed workload."""
+    name = getattr(getattr(item, "metadata", None), "name", None) or "?"
+    return f"{_WORKLOAD_KINDS.get(kind, kind)}/{name}"
+
+
 def _service_environments(
     services: Iterable[Any],
-    templates: list[tuple[dict[str, str], Any]],
+    templates: list[PodTemplate],
     config_maps: Mapping[str, Mapping[str, str]],
     namespace: str,
     context: IdentityContext,
@@ -333,24 +399,31 @@ def _service_environments(
 
     Every service that selects at least one workload gets an entry, even
     with no variables, so a variable can be proven unset. A variable with
-    conflicting values across the service's containers is opaque: set, but
-    not to one value.
+    conflicting values across the service's containers, or set opaquely by
+    any of them, is opaque: set, but not to one readable value. Each
+    readable value records the workload and container it came from.
     """
     environments: list[ServiceEnvironment] = []
     for service in services:
         if not (service.metadata and service.metadata.name):
             continue
         selector = dict(getattr(service.spec, "selector", None) or {})
-        selected = [spec for labels, spec in templates if _selects(selector, labels)]
+        selected = [
+            (template.workload, template.spec)
+            for template in templates
+            if _selects(selector, template.labels)
+        ]
         if not selected:
             continue
         values: dict[str, set[str]] = {}
+        sources: dict[str, set[str]] = {}
         opaque: set[str] = set()
         has_opaque_sources = False
-        for pod_spec in selected:
+        for workload, pod_spec in selected:
             env = _container_env(pod_spec, config_maps)
-            for name, value in env.pairs:
+            for name, value, origin in env.pairs:
                 values.setdefault(name, set()).add(value)
+                sources.setdefault(name, set()).add(f"{workload}/{origin}")
             opaque.update(env.opaque)
             has_opaque_sources = has_opaque_sources or env.has_opaque_sources
         conflicting = sorted(name for name, found in values.items() if len(found) > 1)
@@ -359,17 +432,19 @@ def _service_environments(
                 "Ignoring env vars with conflicting values for service %s/%s: %s",
                 namespace, service.metadata.name, conflicting,
             )
+        # A name is definite only when every container that sets it sets the
+        # same readable value; one opaque setting anywhere makes it opaque.
+        definite = {
+            name: next(iter(found))
+            for name, found in values.items()
+            if len(found) == 1 and name not in opaque
+        }
         environments.append(
             ServiceEnvironment(
                 service_id=context.identity(service.metadata.name, namespace).uri,
-                variables={
-                    name: next(iter(found))
-                    for name, found in values.items()
-                    if len(found) == 1
-                },
-                opaque_variables=sorted((opaque | set(conflicting)) - {
-                    name for name, found in values.items() if len(found) == 1
-                }),
+                variables=definite,
+                variable_sources={name: sorted(sources[name]) for name in definite},
+                opaque_variables=sorted((opaque | set(conflicting)) - set(definite)),
                 has_opaque_sources=has_opaque_sources,
             )
         )

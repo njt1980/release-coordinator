@@ -501,7 +501,8 @@ def _merge_edge(existing_edge: DependencyEdge, edge: DependencyEdge) -> Dependen
     """Combine the evidence of two edges between the same services.
 
     Provenance and environment labels are unioned so mock fixture evidence
-    stays visible on an edge that real evidence also supports.
+    stays visible on an edge that real evidence also supports. The merged
+    edge's direction is uncertain only if both edges' directions are.
     """
     discovery_methods = list(existing_edge.discovery_methods)
     for method in edge.discovery_methods:
@@ -521,7 +522,30 @@ def _merge_edge(existing_edge: DependencyEdge, edge: DependencyEdge) -> Dependen
         last_observed_at=max(existing_observed_at, edge_observed_at),
         provenance=_merge_labels(existing_edge.provenance, edge.provenance),
         environment=_merge_labels(existing_edge.environment, edge.environment),
+        dependency_type=existing_edge.dependency_type or edge.dependency_type,
+        direction_uncertain=existing_edge.direction_uncertain and edge.direction_uncertain,
     )
+
+
+def drop_reversed_sightings(
+    edges: dict[tuple[str, str], DependencyEdge],
+) -> list[DependencyEdge]:
+    """Return the edges without uncertain sightings of a known edge reversed.
+
+    An edge whose direction is uncertain (see ``DependencyEdge``) is a
+    reply reported in reverse when the opposite edge is known with a
+    certain direction; it is then dropped. Any other uncertain edge is
+    kept, still marked uncertain, so the dependency is not lost.
+    """
+    return [
+        edge
+        for (source, target), edge in edges.items()
+        if not (
+            edge.direction_uncertain
+            and (reverse := edges.get((target, source))) is not None
+            and not reverse.direction_uncertain
+        )
+    ]
 
 
 def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
@@ -535,7 +559,9 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
     resolved through the variable's value in ``service_environments``; if
     it cannot be mapped to exactly one registered service it stays an
     ENVIRONMENT_VARIABLE entity, so release gating still sees it. Duplicate relationships
-    are merged and self-referencing edges are dropped.
+    are merged and self-referencing edges are dropped, as are uncertain
+    telemetry sightings of a known edge reversed (see
+    ``drop_reversed_sightings``).
 
     A target's bare name resolves in its source's namespace, as in-cluster
     DNS does. Code edges of an ambiguous source-code service (see
@@ -586,7 +612,7 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
     return {
         "reconciled_graph": {
             "services": services,
-            "edges": list(merged_edges.values()),
+            "edges": drop_reversed_sightings(merged_edges),
             "unresolved_entities": list(unresolved.values()),
         }
     }

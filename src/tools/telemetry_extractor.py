@@ -40,6 +40,7 @@ _REQUIRED_COLUMNS = frozenset({"Source", "Target", "LastObservedAt"})
 _NAMESPACE_COLUMN = "SourceNamespace"
 _CALLS_COLUMN = "Calls"
 _FAILURES_COLUMN = "Failures"
+_TYPE_COLUMN = "DependencyType"
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 # OpenTelemetry resource attributes, as Application Insights stores them in
 # Properties: the workload's own name, and the Kubernetes namespace it runs
@@ -58,6 +59,7 @@ class _MockDependencyRecord(BaseModel):
     target: str = Field(alias="Target", min_length=1)
     time_generated: datetime = Field(alias="TimeGenerated")
     success: bool = Field(alias="Success")
+    dependency_type: str | None = Field(default=None, alias="DependencyType")
 
 
 class TelemetryExtractor:
@@ -217,11 +219,11 @@ class TelemetryExtractor:
                 continue
             records.append(record)
 
-        latest_observations: dict[tuple[str, str], datetime] = {}
+        latest_observations: dict[tuple[str, str, str | None], datetime] = {}
         request_counts: dict[str, int] = defaultdict(int)
         failure_counts: dict[str, int] = defaultdict(int)
         for record in records:
-            edge_key = (record.source, record.target)
+            edge_key = (record.source, record.target, record.dependency_type)
             latest_observations[edge_key] = max(
                 latest_observations.get(edge_key, record.time_generated),
                 record.time_generated,
@@ -239,8 +241,9 @@ class TelemetryExtractor:
                 last_observed_at=observed_at,
                 provenance=MOCK_FIXTURE_PROVENANCE,
                 environment=MOCK_ENVIRONMENT,
+                dependency_type=dependency_type,
             )
-            for (source, target), observed_at in latest_observations.items()
+            for (source, target, dependency_type), observed_at in latest_observations.items()
         ]
         self._runtime_metrics = {
             service: {
@@ -283,7 +286,9 @@ def build_dependency_query(
 
     The source is the row's ``service.name`` resource attribute, falling
     back to ``AppRoleName`` (which some exporters prefix with
-    ``service.namespace``), with its Kubernetes namespace alongside. A
+    ``service.namespace``), with its Kubernetes namespace alongside, and
+    rows are kept apart by ``DependencyType`` so normalization can tell a
+    messaging delivery from a call (see ``telemetry_normalization``). A
     cluster filter keeps only rows whose attribute equals the value; its
     attribute and value are pattern-restricted by ``TelemetryClusterFilter``
     so they cannot break out of the quoted strings.
@@ -305,9 +310,9 @@ def build_dependency_query(
         "| where isnotempty(SourceName) and isnotempty(Target)\n"
         f"| summarize LastObservedAt=max(TimeGenerated), {_CALLS_COLUMN}=count(),\n"
         f"    {_FAILURES_COLUMN}=countif(Success == false)\n"
-        f"    by Source=SourceName, {_NAMESPACE_COLUMN}, Target\n"
-        f"| project Source, {_NAMESPACE_COLUMN}, Target, LastObservedAt, "
-        f"{_CALLS_COLUMN}, {_FAILURES_COLUMN}\n"
+        f"    by Source=SourceName, {_NAMESPACE_COLUMN}, Target, {_TYPE_COLUMN}\n"
+        f"| project Source, {_NAMESPACE_COLUMN}, Target, {_TYPE_COLUMN}, "
+        f"LastObservedAt, {_CALLS_COLUMN}, {_FAILURES_COLUMN}\n"
     )
 
 
@@ -325,9 +330,12 @@ def source_reference(name: str, namespace: str | None) -> str:
     return name
 
 
-def _runtime_edge(source: str, target: str, observed_at: datetime) -> DependencyEdge:
+def _runtime_edge(
+    source: str, target: str, observed_at: datetime, dependency_type: str | None = None
+) -> DependencyEdge:
     """Build an edge from live Azure Monitor telemetry."""
     return DependencyEdge(
+        dependency_type=dependency_type,
         source_service_id=source,
         target_service_id=target,
         discovery_methods=[DiscoveryMethod.RUNTIME_TELEMETRY],
@@ -371,7 +379,8 @@ def _parse_dependency_table(
     ``LogsTable.columns`` is a list of column-name strings in
     azure-monitor-query; row values are read by the matching index. The
     ``SourceNamespace`` column is optional; when present it qualifies the
-    source (see ``source_reference``). The optional ``Calls`` and
+    source (see ``source_reference``); the optional ``DependencyType``
+    column is carried on the edge. The optional ``Calls`` and
     ``Failures`` columns are summed per source into ``calls``.
 
     Raises:
@@ -392,6 +401,7 @@ def _parse_dependency_table(
     namespace_index = column_indexes.get(_NAMESPACE_COLUMN)
     calls_index = column_indexes.get(_CALLS_COLUMN)
     failures_index = column_indexes.get(_FAILURES_COLUMN)
+    type_index = column_indexes.get(_TYPE_COLUMN)
     edges: list[DependencyEdge] = []
     bad_rows = 0
     for row in table.rows:
@@ -405,7 +415,12 @@ def _parse_dependency_table(
             reference = source_reference(str(source), str(namespace or ""))
             row_calls = _count(row, calls_index)
             row_failures = _count(row, failures_index)
-            edges.append(_runtime_edge(reference, str(target), observed_at))
+            dependency_type = row[type_index] if type_index is not None else None
+            edges.append(
+                _runtime_edge(
+                    reference, str(target), observed_at, str(dependency_type or "") or None
+                )
+            )
             if calls is not None:
                 total, failed = calls.get(reference, (0, 0))
                 calls[reference] = (total + row_calls, failed + row_failures)

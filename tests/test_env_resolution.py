@@ -151,6 +151,12 @@ class KubernetesEnvironmentExtractionTests(unittest.TestCase):
                         "ORDER_QUEUE_HOST": "rabbitmq.default.svc.cluster.local",
                         "ORDER_QUEUE_PORT": "5672",
                     },
+                    variable_sources={
+                        "ORDER_QUEUE_HOST": [
+                            "deployment/order-service/app:configMapKeyRef/order-config"
+                        ],
+                        "ORDER_QUEUE_PORT": ["deployment/order-service/app:env"],
+                    },
                 ),
                 # A service whose workloads set nothing still gets an entry,
                 # so its variables can be proven unset.
@@ -230,12 +236,14 @@ class KubernetesEnvironmentExtractionTests(unittest.TestCase):
         container = SimpleNamespace(
             name="app",
             env=[_env("QUEUE_PORT", "5673"), secret_env],
+            # An unreadable source imported last could override everything
+            # before it, so the opaque sources come first here.
             env_from=[
-                source(config_map="base"),
+                source(config_map="missing"),
                 source(secret="creds"),
+                source(config_map="base"),
                 source(config_map="override"),
                 source(config_map="base", prefix="LEGACY_"),
-                source(config_map="missing"),
             ],
         )
         template = SimpleNamespace(

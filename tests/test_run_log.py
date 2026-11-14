@@ -244,12 +244,11 @@ class AssessmentNarrationTests(unittest.TestCase):
                 "target_services": [f"{URN}:order"],
                 "upstream_services": [f"{URN}:front"],
                 "downstream_services": [],
-                "unset_env_reaches": [UnresolvedReach(node="unresolved:env:order/db", detail="d")],
             },
         )
-        self.assertEqual([e.status for e in events], [S.PASSED, S.INFO, S.BLOCKED])
+        self.assertEqual([e.status for e in events], [S.PASSED, S.BLOCKED])
         self.assertIn("shop/order changes; 1 caller and 0 dependencies", events[0].message)
-        self.assertEqual(events[2].message, "DISCOVERY_GAP: new")
+        self.assertEqual(events[1].message, "DISCOVERY_GAP: new")
 
     def test_live_check_states(self) -> None:
         coverage = LiveCoverage(edge_count=3, observed_services=[f"{URN}:order"], uncovered_services=[f"{URN}:admin"])
@@ -267,20 +266,16 @@ class AssessmentNarrationTests(unittest.TestCase):
 
         live = narrate_assessment(
             "validate_runtime_telemetry_node",
-            {"exempted_dependencies": []},
+            {},
             {
                 "telemetry_status": TelemetryStatus(
                     source="live",
                     runtime_evidence=RuntimeEvidenceState.LIVE,
                     coverage=coverage.model_copy(update={"uncovered_services": []}),
                 ),
-                "exempted_dependencies": [
-                    Exemption(subject="unresolved:env:order/db", rule="r", reason="x")
-                ],
             },
         )
-        self.assertEqual([e.status for e in live], [S.PASSED, S.PASSED])
-        self.assertIn("Accepted 1 unset environment variable", live[1].message)
+        self.assertEqual([e.status for e in live], [S.PASSED])
 
     def test_order_risk_and_verdict(self) -> None:
         plan = DeploymentPlan(change_type=ContractChange.ADDITIVE, sequence=[f"{URN}:db", f"{URN}:order"])

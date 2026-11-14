@@ -293,6 +293,26 @@ def unresolved_gaps(
     return issues, exempted
 
 
+def explain_unset(reach: UnresolvedReach) -> UnresolvedReach:
+    """Say why an unset environment variable is still a gap.
+
+    Kubernetes not setting a variable doesn't say where the code connects:
+    a default in the code or the container image (which discovery doesn't
+    inspect) is used, and live traffic needn't exercise that path. Only a
+    reviewed policy exemption accepts it.
+    """
+    return reach.model_copy(
+        update={
+            "detail": (
+                f"{reach.detail}. Kubernetes doesn't set this variable, so a default "
+                "in the code or the container image decides where it points, and "
+                "discovery doesn't read those; exempt it in the project policy "
+                "(exemptions.dependencies) once reviewed"
+            )
+        }
+    )
+
+
 def policy_baseline_issues(
     policy: ProjectPolicy | None, baseline: StoredBaseline, now: datetime
 ) -> list[EvidenceIssue]:
@@ -417,13 +437,12 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         for entity in baseline.graph.unresolved_entities
         if entity.kind is UnresolvedEntityKind.ENVIRONMENT_VARIABLE_UNSET
     }
-    deferred = [
-        reach
-        for reach in radius.unresolved
-        if reach.node in unset_kind and dependency_exemption(policy, reach.node) is None
-    ]
     gaps, exempted = unresolved_gaps(
-        policy, [reach for reach in radius.unresolved if reach not in deferred]
+        policy,
+        [
+            explain_unset(reach) if reach.node in unset_kind else reach
+            for reach in radius.unresolved
+        ],
     )
     issues.extend(_gap(issue) for issue in target_issues)
     issues.extend(gaps)
@@ -445,7 +464,6 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         "matched_edges": radius.matched_edges,
         "discovery_issues": issues,
         "exempted_dependencies": exempted,
-        "unset_env_reaches": deferred,
         "baseline_snapshot_id": baseline.snapshot_id,
         "baseline_created_at": baseline.created_at,
         "baseline_demo_mode": baseline.demo_mode,
@@ -624,43 +642,19 @@ def _apply_runtime_policy(
     issues: list[EvidenceIssue],
     why: str = "",
 ) -> dict[str, object]:
-    """Return the node update with the runtime evidence decisions applied.
+    """Return the node update with the policy's runtime evidence issue added.
 
-    Adds the policy's runtime evidence issue, and settles deferred unset
-    environment variables: accepted (and recorded as exempt) only with LIVE
-    evidence, since live telemetry then shows where each default points;
-    a DISCOVERY_GAP otherwise.
+    Live evidence never settles an unset environment variable: it shows
+    which services are active, not that the code path reading the variable
+    ran, so those stay gaps unless the policy exempts them (see
+    ``explain_unset``).
     """
     policy = _policy(state)
     if policy is not None:
         issue = runtime_evidence_issue(policy, status.runtime_evidence, why)
         if issue is not None:
             issues.append(issue)
-    exempted = list(state.get("exempted_dependencies", []))
-    for reach in state.get("unset_env_reaches", []):
-        if status.runtime_evidence is RuntimeEvidenceState.LIVE:
-            exempted.append(
-                Exemption(
-                    subject=reach.node,
-                    rule="unset environment variable with live runtime evidence",
-                    reason=(
-                        "Kubernetes doesn't set it, so the code's default is used; live "
-                        "telemetry covers the radius and any unknown edge is drift."
-                    ),
-                )
-            )
-        else:
-            issues.append(
-                _gap(
-                    f"{reach.detail}. An unset variable is accepted only with live "
-                    f"runtime evidence; this assessment has {status.runtime_evidence.value}."
-                )
-            )
-    return {
-        "telemetry_status": status,
-        "discovery_issues": issues,
-        "exempted_dependencies": exempted,
-    }
+    return {"telemetry_status": status, "discovery_issues": issues}
 
 
 def sequence_deployment_node(state: ReleaseGraphState) -> dict[str, object]:
