@@ -1,0 +1,32 @@
+name: discovery-benchmark
+
+# Scores the static scanner against public apps' documented dependency
+# graphs and fails on a ratchet regression (see tests/benchmarks/discovery).
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/tools/**"
+      - "src/core/**"
+      - "tests/benchmarks/discovery/**"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    env:
+      RC_BENCH_CACHE: ${{ github.workspace }}/.rc-bench
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/cache@v4
+        with:
+          path: .rc-bench
+          key: rc-bench-${{ hashFiles('tests/benchmarks/discovery/apps/*.json') }}
+      - run: pip install -r requirements.txt
+      - run: python -m tests.benchmarks.discovery.run_bench

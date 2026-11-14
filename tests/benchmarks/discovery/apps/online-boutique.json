@@ -1,0 +1,252 @@
+{
+ "app": "online-boutique",
+ "upstream": "https://github.com/GoogleCloudPlatform/microservices-demo",
+ "gt_source": "README service table + architecture diagram; kubernetes-manifests/*.yaml env *_SERVICE_ADDR",
+ "repos": [
+  {
+   "name": "online-boutique",
+   "url": "https://github.com/GoogleCloudPlatform/microservices-demo.git",
+   "sha": "c7cb6d5bfd6ea3aed768634ebbcb98cb7a523712"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "k8s",
+   "paths": [
+    "online-boutique/kubernetes-manifests"
+   ]
+  }
+ ],
+ "observability": [
+  "opentelemetrycollector"
+ ],
+ "services": {
+  "frontend": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "cartservice": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true
+  },
+  "productcatalogservice": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "currencyservice": {
+   "kind": "service",
+   "lang": "node",
+   "source": true
+  },
+  "paymentservice": {
+   "kind": "service",
+   "lang": "node",
+   "source": true
+  },
+  "shippingservice": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "emailservice": {
+   "kind": "service",
+   "lang": "python",
+   "source": true
+  },
+  "checkoutservice": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "recommendationservice": {
+   "kind": "service",
+   "lang": "python",
+   "source": true
+  },
+  "adservice": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "loadgenerator": {
+   "kind": "service",
+   "lang": "python",
+   "source": true
+  },
+  "shoppingassistantservice": {
+   "kind": "service",
+   "lang": "python",
+   "source": true,
+   "optional": true
+  },
+  "redis-cart": {
+   "kind": "infra",
+   "what": "redis"
+  }
+ },
+ "edges": [
+  {
+   "from": "frontend",
+   "to": "productcatalogservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/frontend.yaml:69; src/frontend/main.go:132"
+  },
+  {
+   "from": "frontend",
+   "to": "currencyservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/frontend.yaml:71; src/frontend/main.go:133"
+  },
+  {
+   "from": "frontend",
+   "to": "cartservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/frontend.yaml:73; src/frontend/main.go:134"
+  },
+  {
+   "from": "frontend",
+   "to": "recommendationservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/frontend.yaml:75; src/frontend/main.go:135"
+  },
+  {
+   "from": "frontend",
+   "to": "checkoutservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/frontend.yaml:79; src/frontend/main.go:136"
+  },
+  {
+   "from": "frontend",
+   "to": "shippingservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/frontend.yaml:77; src/frontend/main.go:137"
+  },
+  {
+   "from": "frontend",
+   "to": "adservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/frontend.yaml:81; src/frontend/main.go:138"
+  },
+  {
+   "from": "frontend",
+   "to": "shoppingassistantservice",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/frontend.yaml:83 (service only deployed via kustomize/components/shopping-assistant)"
+  },
+  {
+   "from": "checkoutservice",
+   "to": "productcatalogservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/checkoutservice.yaml:57; src/checkoutservice/main.go:112"
+  },
+  {
+   "from": "checkoutservice",
+   "to": "shippingservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/checkoutservice.yaml:59; src/checkoutservice/main.go:111"
+  },
+  {
+   "from": "checkoutservice",
+   "to": "paymentservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/checkoutservice.yaml:61; src/checkoutservice/main.go:116"
+  },
+  {
+   "from": "checkoutservice",
+   "to": "emailservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/checkoutservice.yaml:63; src/checkoutservice/main.go:115"
+  },
+  {
+   "from": "checkoutservice",
+   "to": "currencyservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/checkoutservice.yaml:65; src/checkoutservice/main.go:114"
+  },
+  {
+   "from": "checkoutservice",
+   "to": "cartservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "go: mustMapEnv(&field, \"X_ADDR\") helper wrapping os.LookupEnv(envKey)",
+   "source": "kubernetes-manifests/checkoutservice.yaml:67; src/checkoutservice/main.go:113"
+  },
+  {
+   "from": "recommendationservice",
+   "to": "productcatalogservice",
+   "proto": "grpc",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "python: os.environ.get('PRODUCT_CATALOG_SERVICE_ADDR')",
+   "source": "kubernetes-manifests/recommendationservice.yaml:60; src/recommendationservice/recommendation_server.py:131"
+  },
+  {
+   "from": "loadgenerator",
+   "to": "frontend",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "address only in container command/locust --host (manifest + Dockerfile), not in code",
+   "source": "kubernetes-manifests/loadgenerator.yaml:69-83"
+  },
+  {
+   "from": "cartservice",
+   "to": "redis-cart",
+   "proto": "redis",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "csharp: Configuration[\"REDIS_ADDR\"]",
+   "source": "kubernetes-manifests/cartservice.yaml:50; src/cartservice/src/Startup.cs:29"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "src": "cartservice"
+  },
+  "hosts": {},
+  "workloads": {}
+ }
+}

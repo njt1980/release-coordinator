@@ -1,0 +1,206 @@
+{
+ "app": "teastore",
+ "upstream": "https://github.com/DescartesResearch/TeaStore",
+ "gt_source": "README/GET_STARTED architecture (WebUI -> Auth/Image/Recommender/Persistence; all register at Registry); Service.X enum uses in services/*/src/main; teastore-clusterip.yaml env",
+ "repos": [
+  {
+   "name": "teastore",
+   "url": "https://github.com/DescartesResearch/TeaStore.git",
+   "sha": "34b37f7e7be433ce72d5f9455e66922a13116749"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "k8s",
+   "paths": [
+    "teastore/examples/kubernetes/teastore-clusterip.yaml"
+   ]
+  }
+ ],
+ "observability": [],
+ "services": {
+  "webui": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "auth": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "image": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "recommender": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "persistence": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "registry": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "db": {
+   "kind": "infra",
+   "what": "mysql"
+  }
+ },
+ "edges": [
+  {
+   "from": "webui",
+   "to": "auth",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: registry client lookup by enum Service.X (ServiceLoadBalancer / RegistryClient) - no address in code",
+   "source": "services/tools.descartes.teastore.webui/src/main (Service.AUTH)"
+  },
+  {
+   "from": "webui",
+   "to": "image",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: registry client lookup by enum Service.X (ServiceLoadBalancer / RegistryClient) - no address in code",
+   "source": "services/tools.descartes.teastore.webui/src/main (Service.IMAGE)"
+  },
+  {
+   "from": "webui",
+   "to": "recommender",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: registry client lookup by enum Service.X (ServiceLoadBalancer / RegistryClient) - no address in code",
+   "source": "services/tools.descartes.teastore.webui/src/main (Service.RECOMMENDER)"
+  },
+  {
+   "from": "webui",
+   "to": "persistence",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: registry client lookup by enum Service.X (ServiceLoadBalancer / RegistryClient) - no address in code",
+   "source": "services/tools.descartes.teastore.webui/src/main (Service.PERSISTENCE)"
+  },
+  {
+   "from": "auth",
+   "to": "persistence",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: registry client lookup by enum Service.X (ServiceLoadBalancer / RegistryClient) - no address in code",
+   "source": "services/tools.descartes.teastore.auth/src/main (Service.PERSISTENCE)"
+  },
+  {
+   "from": "image",
+   "to": "persistence",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: registry client lookup by enum Service.X (ServiceLoadBalancer / RegistryClient) - no address in code",
+   "source": "services/tools.descartes.teastore.image/src/main (Service.PERSISTENCE)"
+  },
+  {
+   "from": "recommender",
+   "to": "persistence",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: registry client lookup by enum Service.X (ServiceLoadBalancer / RegistryClient) - no address in code",
+   "source": "services/tools.descartes.teastore.recommender/src/main (Service.PERSISTENCE)"
+  },
+  {
+   "from": "webui",
+   "to": "registry",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "JNDI env REGISTRY_HOST from Tomcat context.xml (set by start script), not code",
+   "source": "examples/kubernetes/teastore-clusterip.yaml webui env REGISTRY_HOST"
+  },
+  {
+   "from": "auth",
+   "to": "registry",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "JNDI env REGISTRY_HOST from Tomcat context.xml (set by start script), not code",
+   "source": "examples/kubernetes/teastore-clusterip.yaml auth env REGISTRY_HOST"
+  },
+  {
+   "from": "image",
+   "to": "registry",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "JNDI env REGISTRY_HOST from Tomcat context.xml (set by start script), not code",
+   "source": "examples/kubernetes/teastore-clusterip.yaml image env REGISTRY_HOST"
+  },
+  {
+   "from": "recommender",
+   "to": "registry",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "JNDI env REGISTRY_HOST from Tomcat context.xml (set by start script), not code",
+   "source": "examples/kubernetes/teastore-clusterip.yaml recommender env REGISTRY_HOST"
+  },
+  {
+   "from": "persistence",
+   "to": "registry",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "JNDI env REGISTRY_HOST from Tomcat context.xml (set by start script), not code",
+   "source": "examples/kubernetes/teastore-clusterip.yaml persistence env REGISTRY_HOST"
+  },
+  {
+   "from": "persistence",
+   "to": "db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "JNDI/DB_HOST via Tomcat context; persistence.xml has jdbc:mysql://localhost (overridden)",
+   "source": "examples/kubernetes/teastore-clusterip.yaml persistence env DB_HOST"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "e2e-tests": null,
+   "tools-descartes-teastore-kieker-rabbitmq": "__optional__",
+   "tools-descartes-teastore-webui": "webui",
+   "tools-descartes-teastore-auth": "auth",
+   "tools-descartes-teastore-image": "image",
+   "tools-descartes-teastore-recommender": "recommender",
+   "tools-descartes-teastore-persistence": "persistence",
+   "tools-descartes-teastore-registry": "registry"
+  },
+  "hosts": {
+   "teastore-webui": "webui",
+   "teastore-auth": "auth",
+   "teastore-image": "image",
+   "teastore-recommender": "recommender",
+   "teastore-persistence": "persistence",
+   "teastore-registry": "registry",
+   "teastore-db": "db"
+  },
+  "workloads": {
+   "teastore-webui": "webui",
+   "teastore-auth": "auth",
+   "teastore-image": "image",
+   "teastore-recommender": "recommender",
+   "teastore-persistence": "persistence",
+   "teastore-registry": "registry",
+   "teastore-db": "db"
+  }
+ }
+}

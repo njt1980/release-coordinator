@@ -1,0 +1,285 @@
+{
+ "app": "sock-shop",
+ "upstream": "https://github.com/microservices-demo/microservices-demo (+ one repo per service under github.com/microservices-demo)",
+ "gt_source": "internal-docs/design.md + deploy/kubernetes/complete-demo.yaml + per-service code",
+ "repos": [
+  {
+   "name": "sock-shop",
+   "url": "https://github.com/microservices-demo/microservices-demo.git",
+   "sha": "9dff06fae4981921caec6a62393a6ebfce4b3e3f"
+  },
+  {
+   "name": "sock-shop-front-end",
+   "url": "https://github.com/microservices-demo/front-end.git",
+   "sha": "52dee656f4423be041619bbb090205f912e00113"
+  },
+  {
+   "name": "sock-shop-catalogue",
+   "url": "https://github.com/microservices-demo/catalogue.git",
+   "sha": "925e08ee17c28b94b87160e1ae5e03da7f61cf84"
+  },
+  {
+   "name": "sock-shop-carts",
+   "url": "https://github.com/microservices-demo/carts.git",
+   "sha": "f4e80051668c6a83359c41b03a27baefa590adc8"
+  },
+  {
+   "name": "sock-shop-orders",
+   "url": "https://github.com/microservices-demo/orders.git",
+   "sha": "546a10c92d1ff9998c21f3849f5b95a0f14430a0"
+  },
+  {
+   "name": "sock-shop-payment",
+   "url": "https://github.com/microservices-demo/payment.git",
+   "sha": "384e33447dda5334187517dda09566c9a17fd6af"
+  },
+  {
+   "name": "sock-shop-user",
+   "url": "https://github.com/microservices-demo/user.git",
+   "sha": "e1a79e77860734cacc3f64cabff1487e22a442a4"
+  },
+  {
+   "name": "sock-shop-shipping",
+   "url": "https://github.com/microservices-demo/shipping.git",
+   "sha": "9c0fbfa31895dd029d44d3434de93f64cd71f87b"
+  },
+  {
+   "name": "sock-shop-queue-master",
+   "url": "https://github.com/microservices-demo/queue-master.git",
+   "sha": "7dc33721c765e5af415c9d244d84637ff2d510cd"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "k8s",
+   "paths": [
+    "sock-shop/deploy/kubernetes/complete-demo.yaml"
+   ]
+  }
+ ],
+ "observability": [
+  "zipkin"
+ ],
+ "services": {
+  "front-end": {
+   "kind": "service",
+   "lang": "node",
+   "source": true
+  },
+  "catalogue": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "carts": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "orders": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "payment": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "user": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "shipping": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "queue-master": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "carts-db": {
+   "kind": "infra",
+   "what": "mongo"
+  },
+  "orders-db": {
+   "kind": "infra",
+   "what": "mongo"
+  },
+  "user-db": {
+   "kind": "infra",
+   "what": "mongo"
+  },
+  "catalogue-db": {
+   "kind": "infra",
+   "what": "mysql"
+  },
+  "session-db": {
+   "kind": "infra",
+   "what": "redis"
+  },
+  "rabbitmq": {
+   "kind": "infra",
+   "what": "rabbitmq"
+  }
+ },
+ "edges": [
+  {
+   "from": "front-end",
+   "to": "catalogue",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "js: util.format(\"http://catalogue%s\", domain) (format string, host literal before %s)",
+   "source": "front-end/api/endpoints.js:18-26"
+  },
+  {
+   "from": "front-end",
+   "to": "carts",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "js: util.format(\"http://catalogue%s\", domain) (format string, host literal before %s)",
+   "source": "front-end/api/endpoints.js:18-26"
+  },
+  {
+   "from": "front-end",
+   "to": "orders",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "js: util.format(\"http://catalogue%s\", domain) (format string, host literal before %s)",
+   "source": "front-end/api/endpoints.js:18-26"
+  },
+  {
+   "from": "front-end",
+   "to": "user",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "js: util.format(\"http://catalogue%s\", domain) (format string, host literal before %s)",
+   "source": "front-end/api/endpoints.js:18-26"
+  },
+  {
+   "from": "orders",
+   "to": "payment",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: new ServiceUri(new Hostname(\"payment\"), domain, path) value objects",
+   "source": "orders/.../OrdersConfigurationProperties.java:12"
+  },
+  {
+   "from": "orders",
+   "to": "shipping",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "java: new ServiceUri(new Hostname(\"shipping\"), ...)",
+   "source": "orders/.../OrdersConfigurationProperties.java:16"
+  },
+  {
+   "from": "orders",
+   "to": "user",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "URL received in request payload (HATEOAS link from front-end)",
+   "source": "internal-docs/design.md; orders/.../OrdersController.java"
+  },
+  {
+   "from": "orders",
+   "to": "carts",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "URL received in request payload (HATEOAS link from front-end)",
+   "source": "internal-docs/design.md; orders/.../OrdersController.java"
+  },
+  {
+   "from": "carts",
+   "to": "carts-db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring: spring.data.mongodb.uri=mongodb://${db:carts-db}:27017",
+   "source": "carts/src/main/resources/application.properties:2"
+  },
+  {
+   "from": "orders",
+   "to": "orders-db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring: spring.data.mongodb.uri=mongodb://${db:orders-db}:27017",
+   "source": "orders/src/main/resources/application.properties:2"
+  },
+  {
+   "from": "catalogue",
+   "to": "catalogue-db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "go: flag.String(\"DSN\", \"...tcp(catalogue-db:3306)...\") default",
+   "source": "catalogue/cmd/cataloguesvc/main.go:48"
+  },
+  {
+   "from": "user",
+   "to": "user-db",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "go: flag/env 'mongo' (k8s env name 'mongo')",
+   "source": "sock-shop/deploy/kubernetes/complete-demo.yaml user env mongo=user-db:27017"
+  },
+  {
+   "from": "front-end",
+   "to": "session-db",
+   "proto": "cache",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "js: redis session store host literal 'session-db' (SESSION_REDIS=true)",
+   "source": "sock-shop/deploy/kubernetes/complete-demo.yaml front-end env SESSION_REDIS"
+  },
+  {
+   "from": "shipping",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring: spring.rabbitmq.host=rabbitmq",
+   "source": "shipping/src/main/resources/application.properties:2"
+  },
+  {
+   "from": "queue-master",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "spring: spring.rabbitmq.host=rabbitmq",
+   "source": "queue-master/src/main/resources/application.properties:2"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "sock-shop-front-end:sock-shop-front-end": "front-end",
+   "sock-shop-catalogue:sock-shop-catalogue": "catalogue",
+   "sock-shop-carts:sock-shop-carts": "carts",
+   "sock-shop-orders:sock-shop-orders": "orders",
+   "sock-shop-payment:sock-shop-payment": "payment",
+   "sock-shop-user:sock-shop-user": "user",
+   "sock-shop-shipping:sock-shop-shipping": "shipping",
+   "sock-shop-queue-master:sock-shop-queue-master": "queue-master"
+  },
+  "hosts": {
+   "users-orders-mock": "__noise__",
+   "mydomain": "__noise__",
+   "thishostshouldnotexist": "__noise__",
+   "test": "__noise__"
+  },
+  "workloads": {}
+ }
+}

@@ -1,0 +1,180 @@
+{
+ "app": "aks-store-demo",
+ "upstream": "https://github.com/Azure-Samples/aks-store-demo",
+ "gt_source": "README architecture table + assets/demo-arch-with-openai.png; aks-store-all-in-one.yaml env; src/store-*/nginx.conf proxy_pass",
+ "repos": [
+  {
+   "name": "aks-store-demo",
+   "url": "https://github.com/Azure-Samples/aks-store-demo.git",
+   "sha": "1d61b202d1e6dc9a78389c15e4bb9d529e5499d3"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "k8s",
+   "paths": [
+    "aks-store-demo/aks-store-all-in-one.yaml"
+   ]
+  }
+ ],
+ "observability": [],
+ "services": {
+  "store-front": {
+   "kind": "service",
+   "lang": "vue+nginx",
+   "source": true
+  },
+  "store-admin": {
+   "kind": "service",
+   "lang": "vue+nginx",
+   "source": true
+  },
+  "order-service": {
+   "kind": "service",
+   "lang": "node",
+   "source": true
+  },
+  "product-service": {
+   "kind": "service",
+   "lang": "rust",
+   "source": true
+  },
+  "makeline-service": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "virtual-customer": {
+   "kind": "service",
+   "lang": "rust",
+   "source": true
+  },
+  "virtual-worker": {
+   "kind": "service",
+   "lang": "rust",
+   "source": true
+  },
+  "ai-service": {
+   "kind": "service",
+   "lang": "python",
+   "source": true,
+   "optional": true
+  },
+  "rabbitmq": {
+   "kind": "infra",
+   "what": "rabbitmq"
+  },
+  "documentdb": {
+   "kind": "infra",
+   "what": "mongodb-compatible"
+  }
+ },
+ "edges": [
+  {
+   "from": "store-front",
+   "to": "order-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "nginx.conf proxy_pass literal",
+   "source": "src/store-front/nginx.conf"
+  },
+  {
+   "from": "store-front",
+   "to": "product-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "nginx.conf proxy_pass literal",
+   "source": "src/store-front/nginx.conf"
+  },
+  {
+   "from": "store-admin",
+   "to": "makeline-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "nginx.conf proxy_pass literal",
+   "source": "src/store-admin/nginx.conf:32-42"
+  },
+  {
+   "from": "store-admin",
+   "to": "product-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "nginx.conf proxy_pass literal",
+   "source": "src/store-admin/nginx.conf"
+  },
+  {
+   "from": "store-admin",
+   "to": "order-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "nginx.conf proxy_pass literal",
+   "source": "src/store-admin/nginx.conf:46"
+  },
+  {
+   "from": "virtual-customer",
+   "to": "order-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "rust: std::env::var(\"ORDER_SERVICE_URL\") (unsupported language)",
+   "source": "aks-store-all-in-one.yaml virtual-customer env ORDER_SERVICE_URL"
+  },
+  {
+   "from": "virtual-worker",
+   "to": "makeline-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "rust: std::env::var(\"MAKELINE_SERVICE_URL\") (unsupported language)",
+   "source": "aks-store-all-in-one.yaml virtual-worker env MAKELINE_SERVICE_URL"
+  },
+  {
+   "from": "product-service",
+   "to": "ai-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "rust: env AI_SERVICE_URL (unsupported language)",
+   "source": "aks-store-all-in-one.yaml product-service env AI_SERVICE_URL; ai-service not deployed by all-in-one"
+  },
+  {
+   "from": "order-service",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "node: process.env.ORDER_QUEUE_HOSTNAME (+port/user) composed URL",
+   "source": "aks-store-all-in-one.yaml order-service-configs ConfigMap"
+  },
+  {
+   "from": "makeline-service",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "go: os.Getenv(\"ORDER_QUEUE_URI\")",
+   "source": "aks-store-all-in-one.yaml makeline-service env ORDER_QUEUE_URI"
+  },
+  {
+   "from": "makeline-service",
+   "to": "documentdb",
+   "proto": "db",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "go: helper getEnv(name) (dynamic env name) for ORDER_DB_URI",
+   "source": "aks-store-all-in-one.yaml makeline-service env ORDER_DB_URI"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "tests": null
+  },
+  "hosts": {},
+  "workloads": {}
+ }
+}

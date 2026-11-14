@@ -1,0 +1,84 @@
+{
+ "apps": {
+  "aks-store-demo": {
+   "inventory_precision": 0.875,
+   "inventory_recall": 1.0,
+   "static_precision": 1.0,
+   "static_recall": 0.5,
+   "manifest_precision": 1.0,
+   "manifest_recall": 0.7,
+   "missed_silent": 0,
+   "missed_flagged": 3
+  },
+  "eShop": {
+   "inventory_precision": 0.9,
+   "inventory_recall": 1.0,
+   "static_precision": 0.75,
+   "static_recall": 0.36,
+   "manifest_precision": 0.875,
+   "manifest_recall": 0.84,
+   "missed_silent": 0,
+   "missed_flagged": 1
+  },
+  "online-boutique": {
+   "inventory_precision": 1.0,
+   "inventory_recall": 1.0,
+   "static_precision": null,
+   "static_recall": 0.0,
+   "manifest_precision": 1.0,
+   "manifest_recall": 0.125,
+   "missed_silent": 1,
+   "missed_flagged": 13
+  },
+  "otel-demo": {
+   "inventory_precision": 0.895,
+   "inventory_recall": 1.0,
+   "static_precision": 0.0,
+   "static_recall": 0.0,
+   "manifest_precision": 0.8,
+   "manifest_recall": 0.205,
+   "missed_silent": 18,
+   "missed_flagged": 13
+  },
+  "sock-shop": {
+   "inventory_precision": 0.375,
+   "inventory_recall": 0.75,
+   "static_precision": 0.0,
+   "static_recall": 0.0,
+   "manifest_precision": 0.167,
+   "manifest_recall": 0.133,
+   "missed_silent": 12,
+   "missed_flagged": 0
+  },
+  "spring-petclinic-microservices": {
+   "inventory_precision": 0.889,
+   "inventory_recall": 1.0,
+   "static_precision": 1.0,
+   "static_recall": 0.167,
+   "manifest_precision": 1.0,
+   "manifest_recall": 0.278,
+   "missed_silent": 13,
+   "missed_flagged": 0
+  },
+  "teastore": {
+   "inventory_precision": 0.857,
+   "inventory_recall": 1.0,
+   "static_precision": null,
+   "static_recall": 0.0,
+   "manifest_precision": null,
+   "manifest_recall": 0.0,
+   "missed_silent": 13,
+   "missed_flagged": 0
+  }
+ },
+ "pooled": {
+  "inventory_precision": 0.8,
+  "inventory_recall": 0.97,
+  "static_precision": 0.548,
+  "static_recall": 0.125,
+  "manifest_precision": 0.75,
+  "manifest_recall": 0.331,
+  "missed_silent": 57,
+  "missed_flagged": 30
+ }
+}
