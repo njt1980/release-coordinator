@@ -744,7 +744,7 @@ class DiscoveryLookbackTests(unittest.TestCase):
                 {"tenant": "acme", "project_id": "shop", "workspace_id": WORKSPACE, "discovery_reports": []}  # type: ignore[typeddict-item]
             )
         telemetry_cls.return_value.get_active_dependencies.assert_called_once_with(
-            days_back=3, scope=POLICY.telemetry_scope
+            days_back=3, scope=POLICY.telemetry_scope, roles=None
         )
         (report,) = result["discovery_reports"]  # type: ignore[misc]
         self.assertEqual(report.dropped_records, {"no_host": 3})

@@ -72,6 +72,25 @@ before falling back to the developer's `az login`.
 
   Only matching rows are counted, so a workspace shared by several clusters
   or applications is safe.
+- Optional role filter (`telemetry_role_filter`, off by default), applied
+  on top of the scope above to the discovery baseline's telemetry query:
+  - `role_names_in_inventory: true` keeps rows whose role name
+    (`service.name` or `AppRoleName`, without a `<namespace>/` prefix,
+    case-insensitive) is a discovered service, or a workload or container
+    name the Kubernetes scan read;
+  - `role_instances_in_pods: true` keeps rows whose `AppRoleInstance` is the
+    name of a pod the Kubernetes scan read. Pods replaced since the scan
+    don't match, so use it with a short lookback.
+
+  **This is a filter, not proof of the cluster.** Another cluster running
+  the same workloads reports the same role names, and pod names are unique
+  only within one cluster's namespace. It never satisfies the requirement
+  for `telemetry_cluster` or `telemetry_components`, and it is recorded in
+  the baseline (`scan.telemetry_role_filter`) only as what was applied. A
+  part that cannot be applied (no usable inventory name, pods not read) is
+  left out and the telemetry stage becomes PARTIAL with a note saying so.
+  Live telemetry at assessment and the Telemetry gap report are not
+  filtered: the gap report exists to show roles outside the inventory.
 - Resource attributes read from every dependency row:
   - with `telemetry_cluster`, the cluster attribute above
     (`k8s.cluster.name` by default): rows without it are never counted as

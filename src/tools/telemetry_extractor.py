@@ -34,6 +34,7 @@ from src.core.models import (
     normalize_workspace_ids,
 )
 from src.core.telemetry_capability import telemetry_stack
+from src.core.telemetry_roles import TelemetryRoleAllowList
 from src.tools.telemetry_normalization import DropReason, normalize_edges, parse_target
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
@@ -162,12 +163,15 @@ class TelemetryExtractor:
         self,
         days_back: int = 30,
         scope: TelemetryScope | None = None,
+        roles: TelemetryRoleAllowList | None = None,
     ) -> DiscoveryResult[DependencyEdge]:
         """Return active dependency edges observed within a lookback period.
 
         With ``scope``, only rows from that cluster and/or those
         Application Insights components are read (see
-        ``build_dependency_query``); the mock fixture ignores it. A source whose Kubernetes
+        ``build_dependency_query``); with ``roles``, only rows whose role
+        name and/or role instance it lists (a filter, not a cluster proof).
+        The mock fixture ignores both. A source whose Kubernetes
         namespace is known is named ``<namespace>/<name>``.
 
         The local source reads AppDependencies-shaped records from the root
@@ -190,7 +194,7 @@ class TelemetryExtractor:
         if self._source == "mock":
             result = self._get_active_dependencies_from_mock()
         else:
-            result = self._get_active_dependencies_from_azure(days_back, scope)
+            result = self._get_active_dependencies_from_azure(days_back, scope, roles)
         edges, dropped = normalize_edges(result.items)
         for reason, count in self._noise.items():
             dropped[reason] = dropped.get(reason, 0) + count
@@ -352,10 +356,13 @@ class TelemetryExtractor:
         return DiscoveryResult[DependencyEdge].from_items(edges, errors)
 
     def _get_active_dependencies_from_azure(
-        self, days_back: int, scope: TelemetryScope | None
+        self,
+        days_back: int,
+        scope: TelemetryScope | None,
+        roles: TelemetryRoleAllowList | None = None,
     ) -> DiscoveryResult[DependencyEdge]:
         """Query Azure Monitor for observed dependency edges."""
-        query = build_dependency_query(days_back, scope)
+        query = build_dependency_query(days_back, scope, roles=roles)
         self._runtime_metrics = {}
         self._noise = Counter()
         self._sampling = {}
@@ -391,6 +398,26 @@ def _cluster_clause(scope: TelemetryScope | None) -> str:
         f'| where tostring(Properties["{scope.cluster.attribute}"]) == '
         f'"{scope.cluster.value}"\n'
     )
+
+
+def _role_clause(prefix: str, roles: TelemetryRoleAllowList | None) -> str:
+    """KQL keeping rows whose role name / role instance the allow list names.
+
+    The role name is the row's ``<prefix>Name`` without a ``<namespace>/``
+    prefix, compared case-insensitively; the instance is ``AppRoleInstance``.
+    Names are pattern-restricted (``ROLE_NAME_PATTERN``), so they cannot
+    break out of the quoted strings.
+    """
+    if roles is None:
+        return ""
+    clauses = ""
+    if roles.role_names is not None:
+        quoted = ", ".join(f'"{name}"' for name in roles.role_names)
+        clauses += f'| where extract(@"[^/]*$", 0, {prefix}Name) in~ ({quoted})\n'
+    if roles.role_instances is not None:
+        quoted = ", ".join(f'"{name}"' for name in roles.role_instances)
+        clauses += f"| where tolower(AppRoleInstance) in ({quoted})\n"
+    return clauses
 
 
 def _namespace_expression() -> str:
@@ -471,6 +498,7 @@ def build_dependency_query(
     scope: TelemetryScope | None = None,
     join_days: int = config.REQUEST_JOIN_DAYS,
     join_lag_minutes: int = config.REQUEST_JOIN_LAG_MINUTES,
+    roles: TelemetryRoleAllowList | None = None,
 ) -> str:
     """Return the KQL that summarizes AppDependencies into edges.
 
@@ -496,6 +524,9 @@ def build_dependency_query(
     A scope keeps only rows (dependencies and requests) from its components
     and/or whose cluster attribute equals its value; both are
     pattern-restricted so they cannot break out of the quoted strings.
+    ``roles`` (an opt-in filter, see ``core.telemetry_roles``) further keeps
+    only dependencies and requests whose role name and/or role instance it
+    lists; it narrows rows but proves no cluster.
     """
     if days_back <= 0 or join_days <= 0 or join_lag_minutes < 0:
         raise ValueError("days_back and join_days must be positive, join_lag_minutes not negative")
@@ -506,6 +537,7 @@ def build_dependency_query(
         f"| where TimeGenerated >= ago({days_back}d)\n"
         f"{scope_clauses}"
         f"{_role_columns('Source')}"
+        f"{_role_clause('Source', roles)}"
         "| where isnotempty(SourceName) and isnotempty(Target)\n"
         f'| extend {_NOISE_COLUMN} = iff(Data matches regex @"{_KUBERNETES_API_PATH}", '
         f'"{KUBERNETES_API_NOISE}", "");\n'
@@ -513,6 +545,7 @@ def build_dependency_query(
         f"| where TimeGenerated >= ago({join_days}d)\n"
         f"{scope_clauses}"
         f"{_role_columns('Callee')}"
+        f"{_role_clause('Callee', roles)}"
         "| where isnotempty(CalleeName) and isnotempty(ParentId)\n"
         "| distinct OperationId, ParentId, CalleeName, CalleeNamespace;\n"
         "let joinable = deps\n"

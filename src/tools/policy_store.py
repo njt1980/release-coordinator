@@ -40,6 +40,7 @@ from src.core.models import (
     telemetry_scope_of,
 )
 from src.core.telemetry_capability import CollectorSource
+from src.core.telemetry_roles import TelemetryRoleFilter
 from src.tools.baseline_store import BaselineScope
 
 _POLICY_SUFFIX: Final[str] = ".yaml"
@@ -392,6 +393,11 @@ class ProjectPolicy(_StrictModel):
     or ``otel_sdk`` (an application's SDK, whose capability is unverified,
     so it never shows a protocol as observable). It picks the capability
     profile that judges LIVE_UNOBSERVABLE for those services.
+    ``telemetry_role_filter`` opts into keeping only rows whose role name is
+    in the inventory and/or whose role instance is a scanned pod's name. It
+    is a filter, not a scope: it does not prove which cluster the rows came
+    from, so it never satisfies the ``telemetry_cluster``/``telemetry_components``
+    requirement (see ``core.telemetry_roles``).
     """
 
     policy_version: int = Field(ge=1)
@@ -426,6 +432,7 @@ class ProjectPolicy(_StrictModel):
     service_owners: list[ServiceOwner] = Field(default_factory=list)
     contract_scope: ContractScope = ContractScope.STRICT
     telemetry_collector_source: CollectorSource = CollectorSource.OTEL_SDK
+    telemetry_role_filter: TelemetryRoleFilter = Field(default_factory=TelemetryRoleFilter)
 
     @field_validator("kubernetes_api_server")
     @classmethod

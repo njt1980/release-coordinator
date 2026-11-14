@@ -147,6 +147,9 @@ class KubernetesExtractor:
         config_maps = _config_map_data(
             listed("config maps", lambda: core_v1_api.list_namespaced_config_map(namespace))
         )
+        pods = _list_items(
+            lambda: core_v1_api.list_namespaced_pod(namespace), namespace, "pods", errors
+        )
         templates, findings = _pod_templates(
             namespace,
             deployments=listed(
@@ -165,7 +168,7 @@ class KubernetesExtractor:
                 "cron jobs", lambda: batch_v1_api.list_namespaced_cron_job(namespace)
             ),
             jobs=listed("jobs", lambda: batch_v1_api.list_namespaced_job(namespace)),
-            pods=listed("pods", lambda: core_v1_api.list_namespaced_pod(namespace)),
+            pods=pods or [],
         )
         named = [item for item in services if item.metadata and item.metadata.name]
         if len(named) < len(services):
@@ -175,7 +178,22 @@ class KubernetesExtractor:
             )
         topology = _namespace_topology(namespace, context, named, templates, config_maps)
         topology.findings[:0] = findings
+        topology.workload_names = _workload_names(templates)
+        topology.pod_names = (
+            sorted({_name(pod) for pod in pods} - {"?"}) if pods is not None else None
+        )
         return DiscoveryResult[NamespaceTopology].from_items([topology], errors)
+
+
+def _workload_names(templates: Iterable["PodTemplate"]) -> list[str]:
+    """Return the workload and container names the templates run, sorted, unique."""
+    names: set[str] = set()
+    for template in templates:
+        names.add(template.workload.split("/", 1)[-1])
+        for container in getattr(template.spec, "containers", None) or []:
+            if getattr(container, "name", None):
+                names.add(str(container.name))
+    return sorted(name for name in names if name)
 
 
 def _normalized_server(host: str) -> str:
@@ -323,6 +341,10 @@ class NamespaceTopology(BaseModel):
     ``environments`` the container environment each one's templates
     receive; ``edges`` the dependencies manifests declare (an ExternalName
     alias to its host); ``findings`` the objects outside the supported shape.
+    ``workload_names`` are the names of the workloads and containers the
+    namespace runs and ``pod_names`` its running pods (None when they could
+    not be listed); an opt-in telemetry role filter matches role names and
+    role instances against them (see ``core.telemetry_roles``).
     """
 
     namespace: str
@@ -330,6 +352,8 @@ class NamespaceTopology(BaseModel):
     environments: list[ServiceEnvironment] = Field(default_factory=list)
     edges: list[DependencyEdge] = Field(default_factory=list)
     findings: list[ShapeFinding] = Field(default_factory=list)
+    workload_names: list[str] = Field(default_factory=list)
+    pod_names: list[str] | None = None
 
 
 MANIFEST_PROVENANCE: Final[str] = "kubernetes"

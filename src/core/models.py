@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.core.proto_contract import ContractFinding
 from src.core.telemetry_capability import TelemetryStack
+from src.core.telemetry_roles import TelemetryRoleFilter
 
 
 T = TypeVar("T")
@@ -1099,6 +1100,8 @@ class ScanContext(BaseModel):
     are checked against the project policy, so the ``cluster`` label is
     backed by what was really read. ``telemetry_additional_workspaces`` are
     the workspaces read together with ``telemetry_workspace_id``.
+    ``telemetry_role_filter`` is the opt-in role filter the query actually
+    applied (None when none); it narrows rows but proves no cluster.
     """
 
     environment: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
@@ -1110,6 +1113,7 @@ class ScanContext(BaseModel):
     telemetry_cluster: Optional[TelemetryClusterFilter] = None
     telemetry_components: List[str] = Field(default_factory=list)
     telemetry_additional_workspaces: List[str] = Field(default_factory=list)
+    telemetry_role_filter: Optional[TelemetryRoleFilter] = None
 
     @field_validator("telemetry_additional_workspaces")
     @classmethod
