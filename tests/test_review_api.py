@@ -18,9 +18,11 @@ from src.core.models import (
     DiscoveryStageReport,
     DiscoveryStatus,
     KnowledgeGraph,
+    ServiceNode,
     UnresolvedEntity,
     UnresolvedEntityKind,
 )
+from src.core.models import IDENTITY_UNLINKED_METADATA_KEY
 from src.core.review import edge_key
 from src.tools.baseline_store import BaselineScope, BaselineStore
 from src.tools.policy_store import PolicyStore
@@ -61,6 +63,7 @@ class ReviewApiTests(unittest.TestCase):
             discovery=[DiscoveryStageReport(source=m, status=DiscoveryStatus.SUCCESS) for m in DiscoveryMethod],
             scan=SCAN,
         )
+        self.baselines, self.scope, self.graph = baselines, scope, graph
         self.snapshot = baselines.write(scope, graph).snapshot_id
         policies = PolicyStore(base / "policies")
         path = policies.policy_path(scope)
@@ -126,6 +129,28 @@ class ReviewApiTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(self._post(body).status_code, 422)
         self.assertEqual(self.reviews.answers(BaselineScope(tenant="acme", project_id="shop")), [])
+
+    def test_briefing_identity_question_is_answered_in_the_review(self) -> None:
+        # The briefing's identity group (root key from identity_issues) is
+        # answered through this endpoint; the answer is a review LINK.
+        hooks = ServiceNode(
+            service_id=_id("webhookclient"),
+            name="webhookclient",
+            metadata={"source": "STATIC_CODE", "repository": "Shop", "service_root": "src/hooks", IDENTITY_UNLINKED_METADATA_KEY: "true"},
+        )
+        running = ServiceNode(service_id=f"{_id('webhooks-client')}-k8s", name="webhooks-client", metadata={"source": "KUBERNETES"})
+        graph = self.graph.model_copy(update={"services": [*self.graph.services, hooks, running]})
+        snapshot = self.baselines.write(self.scope, graph).snapshot_id
+        (issue,) = coordinator_nodes.identity_issues(graph, [hooks.service_id])
+        question = next(q for q in self.client.get(URL).json()["questions"] if q["subject"]["key"] == issue.root_key)
+        self.assertEqual((question["subject"]["kind"], question["status"]), ("identity", "open"))
+        body = {"subject": question["subject"], "verdict": "link", "reviewer": "Dana", "linked_runtime_name": "webhooks-client"}
+        response = self._post(body)
+        self.assertEqual(response.status_code, 201, response.text)
+        answered = next(q for q in response.json()["questions"] if q["subject"]["key"] == issue.root_key)
+        self.assertEqual((answered["status"], answered["answer"]["linked_runtime_name"]), ("linked", "webhooks-client"))
+        (stored,) = self.reviews.answers(self.scope)
+        self.assertEqual((stored.anchors, stored.snapshot_id), ((), snapshot))
 
     def test_add_and_export(self) -> None:
         source, target = _id("payments-api"), _id("order-service")
