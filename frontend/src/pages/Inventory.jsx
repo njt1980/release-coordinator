@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import EgoGraph from "../components/EgoGraph.jsx";
 import Nav from "../components/Nav.jsx";
 import { ROUTES } from "../lib/router.js";
 
@@ -50,6 +51,7 @@ export default function Inventory() {
   const [scope, setScope] = useState(loadSaved);
   const [report, setReport] = useState(null);
   const [error, setError] = useState(null);
+  const [selected, setSelected] = useState(null);
   const base = `/api/v1/projects/${encodeURIComponent(scope.tenant)}/${encodeURIComponent(scope.projectId)}/inventory`;
 
   const load = useCallback(async () => {
@@ -60,6 +62,7 @@ export default function Inventory() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.detail ?? `Request failed with status ${response.status}`);
       setReport(body);
+      setSelected(null);
     } catch (caught) {
       setReport(null);
       setError(caught.message);
@@ -150,7 +153,14 @@ export default function Inventory() {
                     <tr key={row.service_id} className="align-top">
                       <td className="px-3 py-2 text-slate-500">{row.criticality_rank}</td>
                       <td className="px-3 py-2">
-                        <span className="font-medium text-slate-900">{row.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => setSelected(selected === row.service_id ? null : row.service_id)}
+                          aria-expanded={selected === row.service_id}
+                          className="font-medium text-brand-700 underline-offset-2 hover:underline"
+                        >
+                          {row.name}
+                        </button>
                         <span className="block text-xs text-slate-500">
                           {row.namespace}
                           {row.repository ? ` · ${row.repository}${row.service_root ? `/${row.service_root}` : ""}` : ""}
@@ -183,6 +193,18 @@ export default function Inventory() {
                 </tbody>
               </table>
             </div>
+            {selected && (
+              <section aria-label="Dependency map" className="mt-6">
+                <h2 className="text-sm font-semibold text-slate-900">
+                  Dependency map: {selected.split(":").pop()}
+                </h2>
+                <p className="mb-2 text-xs text-slate-500">Two hops each way in the newest baseline. Computed.</p>
+                <EgoGraph
+                  url={`${base}/graph?service=${encodeURIComponent(selected)}&depth=2`}
+                  centerLabel="This service"
+                />
+              </section>
+            )}
           </>
         )}
       </main>
