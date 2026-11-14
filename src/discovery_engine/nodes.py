@@ -28,6 +28,7 @@ from src.core.models import (
     baseline_problems,
     combine_statuses,
     merge_evidence_files,
+    merge_target_details,
     unresolved_entity_id,
 )
 from src.core.edge_resolution import (
@@ -566,6 +567,9 @@ def _merge_edge(existing_edge: DependencyEdge, edge: DependencyEdge) -> Dependen
         protocol=existing_edge.protocol or edge.protocol,
         evidence_files=merge_evidence_files(
             existing_edge.evidence_files, edge.evidence_files
+        ),
+        target_details=merge_target_details(
+            existing_edge.target_details, edge.target_details
         ),
     )
 
