@@ -141,6 +141,50 @@ class RequestJoinParseTests(unittest.TestCase):
         self.assertEqual(sql, [("probe/orders", "tcp:mssql,1433 | orders", "SQL")])
 
 
+class FullyJoinedTargetTests(unittest.TestCase):
+    """Seen in the OpenTelemetry Demo run: an exporter without an address
+    writes the span name as Target; when the join names the callee of every
+    call, that span name is not kept as a dependency of its own."""
+
+    COLUMNS_WITH_WINDOW = [*COLUMNS, "JoinWindowCalls"]
+
+    def _edges(self, rows: list[list[object]]) -> set[tuple[str, str]]:
+        table = LogsTable(
+            name="PrimaryResult", columns=self.COLUMNS_WITH_WINDOW,
+            columns_types=["string"] * len(self.COLUMNS_WITH_WINDOW), rows=rows,
+        )
+        result = parse_dependency_response(LogsQueryResult(tables=[table]), {}, Counter())
+        return {(edge.source_service_id, edge.target_service_id) for edge in result.items}
+
+    def test_query_counts_calls_in_the_join_window(self) -> None:
+        query = build_dependency_query(7)
+        self.assertIn("JoinWindowCalls = sum(ItemCount)", query)
+        self.assertIn("join kind=leftouter (window)", query)
+
+    def test_a_fully_joined_span_name_target_leaves_only_the_callee(self) -> None:
+        span = "grpc.oteldemo.CartService/GetCart"
+        edges = self._edges([
+            # every call in the window joined, split over two callee rows
+            ["frontend", "shop", span, "GRPC", "", SEEN, 500, 0, "cart", "shop", 30, 40],
+            ["frontend", "shop", span, "GRPC", "", SEEN, 500, 0, "cart-canary", "shop", 10, 40],
+            # only some joined: the target edge stays
+            ["checkout", "shop", "oteldemo.CartService/GetCart", "GRPC", "", SEEN, 50, 0, "cart", "shop", 3, 6],
+            # nothing in the join window: the target edge stays
+            ["quote", "shop", "HGET", "redis", "", SEEN, 9, 0, None, None, None, 0],
+        ])
+        self.assertNotIn(("shop/frontend", span), edges)
+        self.assertIn(("shop/frontend", "shop/cart"), edges)
+        self.assertIn(("shop/frontend", "shop/cart-canary"), edges)
+        self.assertIn(("shop/checkout", "oteldemo.CartService/GetCart"), edges)
+        self.assertIn(("shop/quote", "HGET"), edges)
+
+    def test_without_the_window_column_every_target_is_kept(self) -> None:
+        table = LogsTable(name="PrimaryResult", columns=COLUMNS, columns_types=["string"] * len(COLUMNS),
+                          rows=[["gateway", "", "orders", "HTTP", "", SEEN, 10, 0, "orders", "probe", 10]])
+        result = parse_dependency_response(LogsQueryResult(tables=[table]), {}, Counter())
+        self.assertIn("orders", {edge.target_service_id for edge in result.items})
+
+
 class RequestJoinPipelineTests(unittest.TestCase):
     def test_extractor_reports_noise_with_other_drops(self) -> None:
         extractor = TelemetryExtractor.__new__(TelemetryExtractor)
