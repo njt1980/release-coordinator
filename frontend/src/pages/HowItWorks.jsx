@@ -10,6 +10,7 @@ const SECTIONS = [
   { id: "decides", label: "How a release is decided" },
   { id: "reasons", label: "Blocking reasons" },
   { id: "setup", label: "Set it up" },
+  { id: "intended-use", label: "Intended use" },
   { id: "limits", label: "Current limits" },
 ];
 
@@ -74,6 +75,16 @@ exemptions:
     - pattern: "docs/**"
       reason: "Documentation only"
   dependencies: []`;
+
+// What the platform is not (docs/intended-use.md is the source of these claims).
+const INTENDED_USE_LIMITS = [
+  "Not a medical device, and not part of one.",
+  "Not validated software: the customer validates it for its own intended use.",
+  "Not compliant with 21 CFR Part 11, IEC 62304, ISO 13485 or the MDR by itself; the decision record is designed to support them.",
+  "Not an approver: it never releases or blocks a deployment. The decision is the person's.",
+  "Not a complete impact analysis: the blast radius covers what the evidence shows, and the briefing lists what it couldn't see.",
+  "Not a risk assessment under ISO 14971: the advisory risk review is AI-generated text that supports the person's judgement.",
+];
 
 const LIMITS = [
   "Verdicts are advisory and reviewed by an engineer; nothing is approved until contract analysis exists.",
@@ -261,6 +272,28 @@ export default function HowItWorks() {
                   </a>
                 </SetupStep>
               </ol>
+            </Section>
+
+            <Section id="intended-use" title="Intended use">
+              <p>
+                Release Coordinator helps a person decide whether, and in which order, to release a change to a
+                microservices application. It gathers the evidence, shows which services the change can affect
+                and a deployment order, and lists what the evidence cannot show. A named person makes and records
+                the decision.
+              </p>
+              <ul className="space-y-2">
+                {INTENDED_USE_LIMITS.map((item) => (
+                  <li key={item} className="flex gap-3">
+                    <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" aria-hidden="true" />
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+              <p>
+                Every part of a briefing is labelled <strong>Computed</strong> (deterministic code over recorded
+                evidence), <strong>Human</strong> (entered by a named person) or <strong>AI-generated</strong>{" "}
+                (written by an external model; it may be wrong and is never part of a signed decision).
+              </p>
             </Section>
 
             <Section id="limits" title="Current limits">
