@@ -42,6 +42,7 @@ from src.core.reason_explanations import REASON_EXPLANATIONS
 _DECISION_CODES: Final[frozenset[ReasonCode]] = frozenset(
     {
         ReasonCode.COMPATIBILITY_UNVERIFIED,
+        ReasonCode.CONTRACT_BREAKING,
         ReasonCode.DEPENDENCY_CYCLE,
         ReasonCode.MODEL_REJECTED,
         ReasonCode.BASELINE_DRIFT,
@@ -67,6 +68,7 @@ _TITLES: Final[dict[ReasonCode, str]] = {
     ReasonCode.BASELINE_DRIFT: "Live traffic shows a dependency the baseline lacks",
     ReasonCode.BASELINE_REVISION_MISMATCH: "The baseline doesn't match the pull request's base",
     ReasonCode.COMPATIBILITY_UNVERIFIED: "Contract compatibility is not verified",
+    ReasonCode.CONTRACT_BREAKING: "A changed contract breaks compatibility",
     ReasonCode.DEMO_EVIDENCE: "The evidence includes demo data",
     ReasonCode.DEPENDENCY_CYCLE: "No safe deployment order (dependency cycle)",
     ReasonCode.DISCOVERY_GAP: "Dependency evidence is incomplete",
@@ -469,9 +471,47 @@ def _regulatory_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
     ]
 
 
+def _contract_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
+    """The contract check: a decision when a contract breaks or compatibility is
+    unverified, context when it is verified."""
+    check = assessment.evidence.contract_check
+    if check is None:
+        return []
+    breaking = ReasonCode.CONTRACT_BREAKING in assessment.reason_codes
+    unverified = ReasonCode.COMPATIBILITY_UNVERIFIED in assessment.reason_codes
+    code = ReasonCode.CONTRACT_BREAKING if breaking else ReasonCode.COMPATIBILITY_UNVERIFIED
+    why, how = REASON_EXPLANATIONS[code]
+    listed = check.breaking_findings if breaking else check.findings
+    consumers = [
+        f"{path} is compiled as a client by: {', '.join(short_name(s) for s in services)}"
+        for path, services in check.consumers.items()
+        if services
+    ]
+    return [
+        BriefingGroup(
+            root_key="decision:contracts" if breaking or unverified else "info:contracts",
+            rank=BriefingRank.DECISION if breaking or unverified else BriefingRank.INFO,
+            title=_TITLES[code] if breaking or unverified else "Contract changes verified compatible",
+            why_it_matters=check.detail if not breaking and not unverified else f"{check.detail} {why}",
+            what_to_check=[
+                *(f"{finding.detail}" for finding in listed[:_LISTED]),
+                *(f"{path}: {reason}" for path, reason in check.unreadable.items()),
+                *consumers,
+            ],
+            how_to_close=[how] if breaking or unverified else [],
+            services=list(check.uncovered_callers),
+            reason_codes=[code] if breaking or unverified else [],
+        )
+    ]
+
+
 def build_briefing(assessment: ReleaseAssessment) -> ReleaseBriefing:
     """Arrange ``assessment`` for the person deciding (see module doc)."""
-    groups = [*_regulatory_group(assessment), *_groups(list(assessment.issues))]
+    groups = [
+        *_regulatory_group(assessment),
+        *_contract_group(assessment),
+        *_groups(list(assessment.issues)),
+    ]
     decisions = sum(1 for g in groups if g.rank is BriefingRank.DECISION)
     fixes = sum(1 for g in groups if g.rank is BriefingRank.FIX_EVIDENCE)
     return ReleaseBriefing(

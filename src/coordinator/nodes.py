@@ -9,6 +9,14 @@ from typing import Final, Literal
 
 from pydantic import BaseModel
 
+from src.coordinator.contracts import (
+    contract_consumers,
+    contract_links,
+    evaluate_contracts,
+    is_contract_file,
+    read_contract_diffs,
+    uncovered_callers,
+)
 from src.coordinator.coverage import radius_shape_findings, static_coverage_issues
 from src.coordinator.policy import decide_release, needs_model
 from src.coordinator.project_policy import (
@@ -57,6 +65,8 @@ from src.core.models import (
     REPOSITORY_METADATA_KEY,
     SERVICE_ROOT_METADATA_KEY,
     AssessmentEvidence,
+    ContractCheckStatus,
+    ContractScope,
     DependencyEdge,
     DiscoveryIncompleteError,
     DiscoveryMethod,
@@ -76,6 +86,7 @@ from src.core.models import (
     UnresolvedEntityKind,
     UnresolvedReach,
 )
+from src.core.proto_contract import ContractFinding
 from src.core.service_ids import IdentityIndex, parse_env_var_reference
 from src.tools.baseline_store import BaselineScope, StoredBaseline, default_store
 from src.tools.policy_store import (
@@ -1119,6 +1130,51 @@ def _apply_runtime_policy(
     return {"telemetry_status": status, "discovery_issues": issues}
 
 
+def check_contracts_node(state: ReleaseGraphState) -> dict[str, object]:
+    """Check the pull request's contract changes (see ``coordinator.contracts``).
+
+    Changed ``.proto`` files are read at the base and head through the
+    project policy's ``source_control`` (never a caller-supplied URL);
+    without one they count as unreadable. The policy's ``contract_scope``
+    (strict by default) decides whether code changes can be verified.
+    """
+    pull_request: PullRequestPayload = state["pull_request"]
+    policy = _policy(state)
+    scope = policy.contract_scope if policy is not None else ContractScope.STRICT
+    contract_files = [path.lstrip("/") for path in pull_request.changed_files if is_contract_file(path)]
+    findings: list[ContractFinding] = []
+    unreadable: dict[str, str] = {}
+    if contract_files:
+        source = policy.source_control if policy is not None else None
+        if source is None or not (pull_request.repository and pull_request.base_sha and pull_request.head_sha):
+            unreadable = {
+                path: "couldn't be read: no source_control in the project policy, or no pull request revisions"
+                for path in contract_files
+            }
+        else:
+            extractor = DevOpsExtractor(
+                org_url=source.organization_url, project=source.project, repositories=[pull_request.repository]
+            )
+            findings, unreadable = read_contract_diffs(
+                lambda path, commit: extractor.read_file(pull_request.repository, path, commit),
+                contract_files,
+                pull_request.base_sha,
+                pull_request.head_sha,
+            )
+    graph = state.get("assessed_graph") or state.get("baseline_graph")
+    targets = list(state.get("target_services", []))
+    links = contract_links(graph, state.get("head_coverage", [])) if graph is not None else {}
+    check = evaluate_contracts(
+        scope,
+        pull_request.changed_files,
+        findings,
+        unreadable,
+        contract_consumers(links, pull_request.repository, contract_files),
+        uncovered_callers(links, targets, graph.edges) if graph is not None else sorted(targets),
+    )
+    return {"contract_check": check}
+
+
 def sequence_deployment_node(state: ReleaseGraphState) -> dict[str, object]:
     """Compute the deterministic deployment plan before any LLM call.
 
@@ -1134,6 +1190,14 @@ def sequence_deployment_node(state: ReleaseGraphState) -> dict[str, object]:
         edges=state.get("matched_edges", []),
         change_type=pull_request.change_type,
     )
+    check = state.get("contract_check")
+    if check is not None:
+        plan = plan.model_copy(
+            update={
+                "compatibility_verified": check.compatible,
+                "contract_breaking": check.status is ContractCheckStatus.BREAKING,
+            }
+        )
     return {"deployment_plan": plan, "deployment_sequence": plan.sequence}
 
 
@@ -1213,6 +1277,7 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         exempted_unscanned_files=list(state.get("exempted_unscanned_files", [])),
         shape_findings=list(state.get("shape_findings", [])),
         review=state.get("assessment_review"),
+        contract_check=state.get("contract_check"),
         advisory_redactions=dict(state.get("advisory_redactions") or {}),
         test_scope=suggested_test_scope(
             state.get("target_services", []),

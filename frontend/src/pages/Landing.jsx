@@ -178,8 +178,9 @@ export default function Landing() {
             <h2 className="text-lg font-semibold text-amber-950">Where it stands today</h2>
             <p className="mt-3 max-w-3xl text-sm leading-relaxed text-amber-950/80">
               This is a pilot. Its verdicts are advisory and reviewed by an engineer.
-              No release is approved yet, because the platform doesn&apos;t yet compare
-              API and message contracts (<span className="font-mono">COMPATIBILITY_UNVERIFIED</span>).
+              Contract compatibility is checked for gRPC <span className="font-mono">.proto</span> files
+              only; changes to HTTP APIs and message schemas stay unverified
+              (<span className="font-mono">COMPATIBILITY_UNVERIFIED</span>).
               It supports Azure DevOps, Kubernetes and Azure Monitor today, and the
               platform&apos;s current limits are listed alongside how it works.
             </p>

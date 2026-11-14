@@ -10,7 +10,10 @@ Understood build files:
   ``UseWPF``, ``UseWindowsForms``: it runs on devices, not in the cluster),
   runnable (``Microsoft.NET.Sdk.Web``, ``Microsoft.NET.Sdk.Worker``, or
   ``OutputType`` ``Exe``/``WinExe``) or a library; ``<ProjectReference>``
-  paths are resolved relative to the file.
+  paths are resolved relative to the file. ``<Protobuf Include=...
+  GrpcServices=...>`` items are the project's contract files
+  (``ContractLink``): Client, Server or Both (the default); ``None``
+  (messages only) is not recorded.
 - Maven ``pom.xml``: ``packaging`` ``pom`` is an aggregator; a
   ``spring-boot-maven-plugin`` under ``build/plugins`` is runnable, whether
   the module declares it or inherits it from a parent POM in the
@@ -30,6 +33,7 @@ libraries; test projects and unconsumed libraries belong to no service;
 AppHost projects (local orchestration, like Docker Compose) are excluded.
 """
 
+import fnmatch
 import posixpath
 import re
 import xml.etree.ElementTree as ElementTree
@@ -38,7 +42,13 @@ from typing import Final
 
 from pydantic import BaseModel, Field
 
-from src.core.models import OpaqueReferenceKind, OpaqueReferenceSite, SharedLibrary
+from src.core.models import (
+    ContractLink,
+    ContractRole,
+    OpaqueReferenceKind,
+    OpaqueReferenceSite,
+    SharedLibrary,
+)
 
 
 class BuildSystem(str, Enum):
@@ -75,6 +85,7 @@ class BuildProject(BaseModel):
     ``root`` is the repository-relative directory of ``file_path`` (no
     leading slash). ``references`` are the roots of the repository projects
     it references; ``unresolved`` are references that don't resolve.
+    ``contracts`` are the contract files it compiles.
     """
 
     root: str
@@ -84,6 +95,7 @@ class BuildProject(BaseModel):
     artifact_id: str | None = None
     references: list[str] = Field(default_factory=list)
     unresolved: list[OpaqueReferenceSite] = Field(default_factory=list)
+    contracts: list[ContractLink] = Field(default_factory=list)
 
 
 class BuildParseError(ValueError):
@@ -169,6 +181,40 @@ def _text(element: ElementTree.Element | None) -> str:
 # --- .NET ------------------------------------------------------------------
 
 
+_GRPC_ROLES: Final[dict[str, ContractRole]] = {
+    "client": ContractRole.CLIENT,
+    "server": ContractRole.SERVER,
+    "both": ContractRole.BOTH,
+}
+
+
+def _protobuf_contracts(root: ElementTree.Element, path: str, file_paths: set[str]) -> list[ContractLink]:
+    """The ``<Protobuf>`` items of a csproj, resolved to repository paths."""
+    directory = _directory(path)
+    links: dict[str, ContractLink] = {}
+    for element in root.iter("Protobuf"):
+        services = element.get("GrpcServices")
+        if services is None:
+            child = element.find("GrpcServices")
+            services = _text(child) if child is not None else "Both"
+        role = _GRPC_ROLES.get(services.strip().lower())
+        if role is None:
+            continue
+        for include in element.get("Include", "").split(";"):
+            include = include.strip().replace("\\", "/")
+            if not include or "$(" in include:
+                continue
+            target = posixpath.normpath(posixpath.join(directory, include))
+            matches = (
+                sorted(p for p in file_paths if fnmatch.fnmatch(p, target))
+                if any(c in target for c in "*?[")
+                else [target] if target in file_paths else []
+            )
+            for match in matches:
+                links[match] = ContractLink(path=match, role=role, project_file=_relative(path))
+    return [links[key] for key in sorted(links)]
+
+
 def parse_csproj(content: str, path: str, file_paths: set[str]) -> BuildProject:
     """Read a ``*.csproj``; ``file_paths`` are the repository's files.
 
@@ -230,6 +276,7 @@ def parse_csproj(content: str, path: str, file_paths: set[str]) -> BuildProject:
         kind=kind,
         references=list(dict.fromkeys(references)),
         unresolved=unresolved,
+        contracts=_protobuf_contracts(root, path, file_paths),
     )
 
 

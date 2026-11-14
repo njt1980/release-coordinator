@@ -49,8 +49,10 @@ class DeploymentPlan(BaseModel):
     ``compatibility_verified`` records whether contract compatibility
     evidence proves the order safe. The order rules above are assumptions
     drawn from the declared change type (a new consumer may, for example,
-    need a field an old provider cannot return), and no contract analysis
-    exists yet, so ``sequence_deployment`` always leaves it False.
+    need a field an old provider cannot return); ``sequence_deployment``
+    leaves it False and the coordinator sets it from the contract check
+    (``coordinator.contracts``), as it sets ``contract_breaking`` when a
+    changed contract breaks compatibility.
     """
 
     change_type: ContractChange
@@ -60,6 +62,7 @@ class DeploymentPlan(BaseModel):
     unchanged_services: list[str] = Field(default_factory=list)
     stale_consumers: list[str] = Field(default_factory=list)
     compatibility_verified: bool = False
+    contract_breaking: bool = False
 
     @property
     def is_acyclic(self) -> bool:

@@ -17,6 +17,7 @@ from src.coordinator.file_mapping import ChangedFileMapping, map_changed_files
 from src.core.models import (
     TelemetryClusterFilter,
     AssessmentEvidence,
+    ContractCheckStatus,
     ContractChange,
     DependencyEdge,
     DiscoveryMethod,
@@ -528,8 +529,11 @@ class PrAssessmentWebhookTests(BaselineFixture):
                 scanned_revisions=SCAN.scanned_revisions,
                 head_scanned=True,
                 test_scope=assessment.evidence.test_scope,
+                contract_check=assessment.evidence.contract_check,
             ),
         )
+        # No contract file changed: the code change stays unverified.
+        self.assertEqual(assessment.evidence.contract_check.status, ContractCheckStatus.NO_CONTRACT)
         # store-front calls the changed order-service: it is the second tier.
         self.assertEqual(
             [(tier.title, tier.services) for tier in assessment.evidence.test_scope][:2],

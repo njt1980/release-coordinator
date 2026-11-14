@@ -35,7 +35,9 @@ def plan_reason_codes(plan: DeploymentPlan) -> list[ReasonCode]:
     codes: list[ReasonCode] = []
     if not plan.is_acyclic:
         codes.append(ReasonCode.DEPENDENCY_CYCLE)
-    if not plan.compatibility_verified:
+    if plan.contract_breaking:
+        codes.append(ReasonCode.CONTRACT_BREAKING)
+    elif not plan.compatibility_verified:
         codes.append(ReasonCode.COMPATIBILITY_UNVERIFIED)
     return codes
 

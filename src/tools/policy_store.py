@@ -30,6 +30,7 @@ from src.core.models import (
     IDENTITY_SEGMENT_PATTERN,
     UNKNOWN_LABEL,
     UNRESOLVED_ID_PREFIX,
+    ContractScope,
     DiscoveryMethod,
     TelemetryClusterFilter,
     TelemetryScope,
@@ -380,7 +381,11 @@ class ProjectPolicy(_StrictModel):
     Claude API): no advisory risk review (ADVISORY_DISABLED) and no
     assistant answers about the project. When true, what is sent is
     redacted first (``core.redaction``). ``service_owners`` name who answers
-    for each service; the review queue shows them.
+    for each service; the review queue shows them. ``contract_scope``
+    decides when contract evidence verifies compatibility: ``strict`` (only
+    pull requests changing nothing but contract files) or ``interfaces``
+    (code changes too, when every caller reaches the changed services
+    through a shared contract); see ``coordinator.contracts``.
     """
 
     policy_version: int = Field(ge=1)
@@ -413,6 +418,7 @@ class ProjectPolicy(_StrictModel):
     regulated_services: list[RegulatedService] = Field(default_factory=list)
     external_ai: bool = True
     service_owners: list[ServiceOwner] = Field(default_factory=list)
+    contract_scope: ContractScope = ContractScope.STRICT
 
     @field_validator("kubernetes_api_server")
     @classmethod

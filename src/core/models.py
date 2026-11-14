@@ -15,6 +15,7 @@ from src.core.env_names import (
 )
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from src.core.proto_contract import ContractFinding
 from src.core.telemetry_capability import TelemetryStack
 
 
@@ -575,6 +576,36 @@ class UnscannedFile(BaseModel):
     sites: List[OpaqueReferenceSite] = Field(default_factory=list)
 
 
+class ContractRole(str, Enum):
+    """How a service uses a contract file (a .NET ``<Protobuf GrpcServices>``).
+
+    CLIENT: it calls the service the contract describes.
+    SERVER: it implements that service.
+    BOTH: both (Grpc.Tools' default when ``GrpcServices`` is absent).
+    """
+
+    CLIENT = "CLIENT"
+    SERVER = "SERVER"
+    BOTH = "BOTH"
+
+    @property
+    def calls(self) -> bool:
+        return self is not ContractRole.SERVER
+
+    @property
+    def serves(self) -> bool:
+        return self is not ContractRole.CLIENT
+
+
+class ContractLink(BaseModel):
+    """One contract file a service's build compiles: ``path`` is
+    repository-relative, ``project_file`` the build file declaring it."""
+
+    path: str = Field(min_length=1)
+    role: ContractRole
+    project_file: str = ""
+
+
 class ServiceCoverage(BaseModel):
     """How completely one service directory was scanned at one commit.
 
@@ -588,7 +619,8 @@ class ServiceCoverage(BaseModel):
     incomplete. Container-image defaults (Dockerfile ``ENV``) are not
     source files here; see G6 in docs/release-model.md. ``libraries`` are
     the roots of the shared-library projects the service consumes
-    (directly or transitively); their files count here too.
+    (directly or transitively); their files count here too. ``contracts``
+    are the contract files its build compiles (see ``ContractLink``).
     """
 
     service_name: str = Field(min_length=1)
@@ -598,6 +630,7 @@ class ServiceCoverage(BaseModel):
     files_not_source: int = Field(ge=0, default=0)
     unscanned: List[UnscannedFile] = Field(default_factory=list)
     libraries: List[str] = Field(default_factory=list)
+    contracts: List[ContractLink] = Field(default_factory=list)
 
     @property
     def complete(self) -> bool:
@@ -1641,7 +1674,12 @@ class ReasonCode(str, Enum):
     DEMO_EVIDENCE: the evidence includes mock fixture data.
     DEPENDENCY_CYCLE: no deployment order satisfies every dependency edge.
     COMPATIBILITY_UNVERIFIED: the deployment order follows the declared
-        change type; no contract compatibility evidence proves it safe.
+        change type; no contract compatibility evidence proves it safe (see
+        ``ContractCheck`` for when it does).
+    CONTRACT_BREAKING: a changed contract file (``.proto``) breaks
+        compatibility: services built against the old and the new version
+        can't talk during a rolling deployment. A fully evidenced risk, so
+        the assessment stays actionable; a person decides.
     MODEL_REJECTED: the advisory model assessment did not approve.
     POLICY_MISSING: the project has no release policy file.
     POLICY_INVALID: the project's policy file is malformed or names another
@@ -1680,7 +1718,8 @@ class ReasonCode(str, Enum):
         no advisory risk review was made and nothing is approved
         automatically; a person decides.
 
-    Every code except MODEL_REJECTED and ADVISORY_DISABLED makes the
+    Every code except MODEL_REJECTED, ADVISORY_DISABLED and
+    CONTRACT_BREAKING makes the
     assessment non-actionable: the evidence is insufficient to rely on the
     verdict, which is different from a fully evidenced verdict that the
     release is too risky or that a person must judge.
@@ -1692,6 +1731,7 @@ class ReasonCode(str, Enum):
     DEMO_EVIDENCE = "DEMO_EVIDENCE"
     DEPENDENCY_CYCLE = "DEPENDENCY_CYCLE"
     COMPATIBILITY_UNVERIFIED = "COMPATIBILITY_UNVERIFIED"
+    CONTRACT_BREAKING = "CONTRACT_BREAKING"
     MODEL_REJECTED = "MODEL_REJECTED"
     POLICY_MISSING = "POLICY_MISSING"
     POLICY_INVALID = "POLICY_INVALID"
@@ -1710,7 +1750,11 @@ class ReasonCode(str, Enum):
     @property
     def limits_actionability(self) -> bool:
         """Whether this reason makes the assessment ineligible for operational use."""
-        return self not in (ReasonCode.MODEL_REJECTED, ReasonCode.ADVISORY_DISABLED)
+        return self not in (
+            ReasonCode.MODEL_REJECTED,
+            ReasonCode.ADVISORY_DISABLED,
+            ReasonCode.CONTRACT_BREAKING,
+        )
 
 
 class IssueSubjectKind(str, Enum):
@@ -1837,6 +1881,69 @@ class AssessmentReview(BaseModel):
     unapplied: List[str] = Field(default_factory=list)
 
 
+class ContractScope(str, Enum):
+    """When contract evidence may verify a release's compatibility (policy).
+
+    STRICT: only when the pull request changes nothing but contract files.
+    INTERFACES: also when it changes code, provided every caller of each
+        changed service reaches it through a contract both sides compile
+        (``ContractLink``), and the changed contracts are compatible.
+    """
+
+    STRICT = "strict"
+    INTERFACES = "interfaces"
+
+
+class ContractCheckStatus(str, Enum):
+    """The outcome of the contract check, in the order it is decided.
+
+    UNREADABLE: a changed contract file couldn't be read or understood.
+    BREAKING: a changed contract breaks compatibility (CONTRACT_BREAKING).
+    NO_CONTRACT: no contract evidence covers the change (no contract file
+        changed, or, under INTERFACES, a caller isn't covered).
+    CODE_CHANGED: under STRICT, the pull request also changes other files.
+    COMPATIBLE: the evidence proves the change compatible.
+    """
+
+    UNREADABLE = "UNREADABLE"
+    BREAKING = "BREAKING"
+    NO_CONTRACT = "NO_CONTRACT"
+    CODE_CHANGED = "CODE_CHANGED"
+    COMPATIBLE = "COMPATIBLE"
+
+
+class ContractCheck(BaseModel):
+    """Contract compatibility evidence for one pull request.
+
+    ``contract_files`` are the changed ``.proto`` files, ``other_files`` the
+    rest of the changed files. ``findings`` are every difference between
+    their base and head versions, ``unreadable`` the files that couldn't
+    be read or parsed (with why). ``consumers`` maps each changed contract
+    file to the services whose builds compile it as a client.
+    ``uncovered_callers`` are, under INTERFACES, callers of a changed
+    service that reach it through no shared contract. ``detail`` is the
+    sentence a person reads.
+    """
+
+    scope: ContractScope = ContractScope.STRICT
+    status: ContractCheckStatus
+    contract_files: List[str] = Field(default_factory=list)
+    other_files: List[str] = Field(default_factory=list)
+    findings: List[ContractFinding] = Field(default_factory=list)
+    unreadable: Dict[str, str] = Field(default_factory=dict)
+    consumers: Dict[str, List[str]] = Field(default_factory=dict)
+    uncovered_callers: List[str] = Field(default_factory=list)
+    detail: str = Field(min_length=1)
+
+    @property
+    def compatible(self) -> bool:
+        return self.status is ContractCheckStatus.COMPATIBLE
+
+    @property
+    def breaking_findings(self) -> List[ContractFinding]:
+        return [finding for finding in self.findings if finding.breaking]
+
+
 class AssessmentEvidence(BaseModel):
     """The exact inputs one release assessment was computed from.
 
@@ -1897,6 +2004,8 @@ class AssessmentEvidence(BaseModel):
     test_scope: List[TestScopeTier] = Field(default_factory=list)
     # What was redacted, per kind, from what the advisory model was sent.
     advisory_redactions: Dict[str, int] = Field(default_factory=dict)
+    # Contract compatibility evidence (None for records made before it existed).
+    contract_check: Optional[ContractCheck] = None
 
 
 class ReleaseAssessment(BaseModel):
