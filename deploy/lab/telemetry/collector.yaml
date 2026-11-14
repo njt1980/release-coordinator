@@ -1,6 +1,7 @@
 # OpenTelemetry Collector for the lab: receives OTLP from Beyla and exports
-# dependency (CLIENT/PRODUCER) spans to Application Insights, which stores them
-# in the Log Analytics workspace's AppDependencies table.
+# dependency (CLIENT/PRODUCER) spans and request (SERVER/CONSUMER) spans to
+# Application Insights, which stores them in the Log Analytics workspace's
+# AppDependencies and AppRequests tables.
 #
 # Requires the Secret observability/appinsights with key connection-string
 # (created by .claude/skills/app-up/lab.sh; never committed).
@@ -28,14 +29,17 @@ data:
         check_interval: 1s
         limit_mib: 200
         spike_limit_mib: 50
-      # Only dependency calls matter to the release coordinator. SERVER and
-      # CONSUMER spans (including kubelet health probes) would become
-      # AppRequests rows and spend the ingestion cap for nothing.
+      # Dependency calls (CLIENT/PRODUCER -> AppDependencies) and the requests
+      # they reach (SERVER/CONSUMER -> AppRequests) are kept: the release
+      # coordinator joins a request's ParentId to the caller's dependency Id
+      # to name the callee (request join). Internal spans and kubelet health
+      # probes would only spend the ingestion cap.
       filter/dependencies-only:
         error_mode: ignore
         traces:
           span:
-            - kind != SPAN_KIND_CLIENT and kind != SPAN_KIND_PRODUCER
+            - kind == SPAN_KIND_INTERNAL or kind == SPAN_KIND_UNSPECIFIED
+            - kind == SPAN_KIND_SERVER and attributes["url.path"] != nil and IsMatch(attributes["url.path"], "^/(health|healthz|healthcheck|ready|readyz|readiness|live|livez|liveness|alive|hc|ping|metrics)(/.*)?$")
             # Loopback calls stay inside one pod (e.g. documentdb's gateway
             # to its own postgres); they are not service dependencies.
             - attributes["network.peer.address"] == "127.0.0.1"

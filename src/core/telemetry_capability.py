@@ -20,12 +20,14 @@ observed in the probe lab (findings 05), stated in vendor documentation,
 or unverified. Only the first two make a protocol observable; an
 unverified claim is shown, never used to clear an issue. Profiles:
 
-- Grafana Beyla 3.x (OpenTelemetry eBPF Instrumentation): HTTP/1.1,
-  HTTP/2 and gRPC, Redis, PostgreSQL, MySQL, SQL Server, MongoDB, Kafka,
+- Grafana Beyla 3.x (OpenTelemetry eBPF Instrumentation): HTTP (lab:
+  client and server spans, requests join callers), HTTP/2 and gRPC, Redis, PostgreSQL, MySQL, SQL Server, MongoDB, Kafka,
   NATS and MQTT; AMQP 1.0 only, never AMQP over TLS (OBI support matrix,
   research findings 04).
 - Classic Application Insights SDK 2.x for .NET: HTTP and SQL Server (lab)
-  and Service Bus (lab: sends, ``Azure Service Bus`` rows); HTTPS from the
+  and Service Bus (lab: sends, ``Azure Service Bus`` rows, and a consumer
+  whose ``ProcessMessage`` requests join the send when the module lists
+  ``Azure.Messaging.ServiceBus``); HTTPS from the
   dependency auto-collection documentation.
 - Azure Monitor OpenTelemetry Distro for .NET: HTTP (lab); HTTPS and SQL
   Server from the Distro documentation (HttpClient and SqlClient
@@ -174,11 +176,18 @@ class TelemetryProfile(str, Enum):
 
 BEYLA: Final[TelemetryCapability] = TelemetryCapability(
     profile=TelemetryProfile.BEYLA.value,
-    claims=_claims(
-        _DOCS,
-        "http https grpc grpcs redis rediss postgres mysql sqlserver mongodb kafka nats mqtt",
+    claims=(
+        *_claims(
+            _LAB,
+            "http",
+            "aks-store client and server spans; requests join their callers (findings 06 F6)",
+        ),
+        *_claims(
+            _DOCS,
+            "https grpc grpcs redis rediss postgres mysql sqlserver mongodb kafka nats mqtt",
+        ),
     ),
-    source="OBI (Beyla) support matrix; research findings 04",
+    source="OBI (Beyla) support matrix; research findings 04; lab run findings 06",
 )
 
 _DISTRO_COMMON: Final[tuple[ProtocolClaim, ...]] = (
@@ -194,7 +203,13 @@ PROFILES: Final[dict[TelemetryProfile, TelemetryCapability]] = {
         claims=(
             *_claims(_LAB, "http", "orders -> inventory (findings 05 §1)"),
             *_claims(_LAB, "sqlserver", "orders -> mssql, type SQL (findings 05 §1)"),
-            *_claims(_LAB, SERVICE_BUS_PROTOCOL, "orders' sends, type Azure Service Bus (findings 05 §1)"),
+            *_claims(
+                _LAB,
+                SERVICE_BUS_PROTOCOL,
+                "orders' sends, type Azure Service Bus (findings 05 §1); with "
+                "Azure.Messaging.ServiceBus in IncludeDiagnosticSourceActivities the consumer's "
+                "ServiceBusProcessor.ProcessMessage requests join the send, 132/132 (findings 06 F8)",
+            ),
             *_claims(_DOCS, "https", "dependency auto-collection: HTTP/HTTPS"),
             *_claims(_UNVERIFIED, "grpc grpcs", "gRPC over HttpClient; not observed"),
         ),

@@ -73,6 +73,16 @@ class ProfileTests(unittest.TestCase):
         for profile in (classic, distro, activity):
             self.assertIn("grpc", profile.unverified, profile.profile)  # not observed in the lab
 
+    def test_lab_run_06_evidence(self) -> None:
+        """Findings 06: Beyla HTTP and the classic Service Bus consumer were seen in the lab."""
+        lab = CapabilityEvidence.LAB_VERIFIED
+        beyla = {claim.protocol: claim for claim in BEYLA.claims}
+        self.assertIs(beyla["http"].evidence, lab)
+        self.assertIs(beyla["grpc"].evidence, CapabilityEvidence.VENDOR_DOCUMENTED)
+        classic = {c.protocol: c for c in PROFILES[TelemetryProfile.APPINSIGHTS_CLASSIC].claims}
+        self.assertIs(classic["servicebus"].evidence, lab)
+        self.assertIn("ProcessMessage", classic["servicebus"].note)
+
     def test_duplicate_claims_are_rejected(self) -> None:
         claim = ProtocolClaim(protocol="http", evidence=CapabilityEvidence.LAB_VERIFIED)
         with self.assertRaises(ValueError):

@@ -19,6 +19,7 @@ traffic --> gateway --HTTP--> orders --HTTP--> inventory
 | orders | Classic SDK 2.x + Kubernetes enricher | B `rc-lab-appinsights-b` | `inventory \| cid-v1:<appId>`, `tcp:mssql,1433 \| orders`, `sb://<ns>/ \| orders` targets; role name from the container |
 | inventory | Classic SDK 2.x + Kubernetes enricher | A | Callee of two stacks and two resources |
 | fulfillment | Distro | A | Service Bus consumer: producer → consumer correlation |
+| billing | Classic SDK 2.x + Kubernetes enricher | A | Second consumer of queue `orders` (competing with fulfillment): classic consumer → producer correlation |
 
 Both resources send to the lab workspace `rc-lab-logs`, so one workspace holds
 two components, and two stacks, in one cluster. Sampling is left at each
@@ -30,7 +31,7 @@ From this directory, with `az` logged in and kubectl on the lab cluster:
 
 ```bash
 ./azure.sh                                   # App Insights B + Service Bus (idempotent)
-PROBE_ACR=rclab48a7217e PROBE_TAG=v1 ./build-images.sh
+PROBE_ACR=rclab48a7217e PROBE_TAG=v1 bash ./build-images.sh
 ./create-secrets.sh                          # connection strings + SQL password -> Secret, never printed
 PROBE_REGISTRY=rclab48a7217e.azurecr.io PROBE_TAG=v1 ./apply.sh
 ```
@@ -53,6 +54,10 @@ traced case as well, switch on Azure SDK tracing part-way through a run:
 ```bash
 kubectl -n appinsights-probe set env deploy/fulfillment AZURE_EXPERIMENTAL_ENABLE_ACTIVITY_SOURCE=true
 ```
+
+To check the classic consumer (`billing`, Azure.Messaging.ServiceBus listed in
+`IncludeDiagnosticSourceActivities`), scale `fulfillment` to 0 so billing receives every message.
+On 2026-11-14 its `ServiceBusProcessor.ProcessMessage` requests joined orders' send 132/132.
 
 Scaling `traffic` to ~20 replicas for a few minutes (~10 orders/s) makes the
 classic SDK's adaptive sampling kick in. Results of the first run (2026-11-14)
