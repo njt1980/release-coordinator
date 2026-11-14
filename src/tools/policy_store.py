@@ -32,7 +32,10 @@ from src.core.models import (
     UNRESOLVED_ID_PREFIX,
     DiscoveryMethod,
     TelemetryClusterFilter,
+    TelemetryScope,
     normalize_api_server,
+    normalize_component_ids,
+    telemetry_scope_of,
 )
 from src.tools.baseline_store import BaselineScope
 
@@ -323,8 +326,11 @@ class ProjectPolicy(_StrictModel):
     ``kubernetes_api_server`` is the API server the manifest scan must have
     read (required when K8S_MANIFEST is a required source).
     ``telemetry_cluster`` restricts every telemetry query to rows emitted
-    from this cluster (required when RUNTIME_TELEMETRY is a required source
-    or runtime evidence must be live).
+    from this cluster, ``telemetry_components`` to rows written by these
+    Application Insights components (resource IDs); one of them is required
+    when RUNTIME_TELEMETRY is a required source or runtime evidence must be
+    live. Classic SDK and Azure Monitor Distro rows carry no cluster
+    attribute, so components are their only scope (see ``TelemetryScope``).
 
     ``runtime_lookback_days`` is how far back every telemetry query reads.
     ``max_telemetry_age_minutes`` bounds how old the newest live row may be
@@ -348,6 +354,7 @@ class ProjectPolicy(_StrictModel):
     exemptions: Exemptions = Field(default_factory=Exemptions)
     kubernetes_api_server: str = ""
     telemetry_cluster: TelemetryClusterFilter | None = None
+    telemetry_components: list[str] = Field(default_factory=list)
     runtime_lookback_days: int = Field(
         default=config.DEFAULT_RUNTIME_LOOKBACK_DAYS,
         ge=1,
@@ -363,6 +370,16 @@ class ProjectPolicy(_StrictModel):
     @classmethod
     def _normalize_api_server(cls, value: str) -> str:
         return normalize_api_server(value) if value else ""
+
+    @field_validator("telemetry_components")
+    @classmethod
+    def _normalize_components(cls, components: list[str]) -> list[str]:
+        return normalize_component_ids(components)
+
+    @property
+    def telemetry_scope(self) -> TelemetryScope | None:
+        """Which telemetry rows count for this cluster; None when unscoped."""
+        return telemetry_scope_of(self.telemetry_cluster, self.telemetry_components)
 
     @field_validator("environment", "cluster")
     @classmethod
@@ -393,10 +410,10 @@ class ProjectPolicy(_StrictModel):
             DiscoveryMethod.RUNTIME_TELEMETRY in self.required_sources
             or self.runtime_evidence is RuntimeEvidenceRequirement.LIVE
         )
-        if needs_telemetry and self.telemetry_cluster is None:
+        if needs_telemetry and self.telemetry_scope is None:
             raise ValueError(
-                "telemetry_cluster is required when RUNTIME_TELEMETRY is a "
-                "required source or runtime_evidence is live"
+                "telemetry_cluster or telemetry_components is required when "
+                "RUNTIME_TELEMETRY is a required source or runtime_evidence is live"
             )
         return self
 

@@ -24,7 +24,7 @@ from src.core.models import (
     DependencyEdge,
     DiscoveryMethod,
     DiscoveryResult,
-    TelemetryClusterFilter,
+    TelemetryScope,
 )
 from src.tools.telemetry_normalization import normalize_edges
 from src.tools._timeout import (
@@ -45,9 +45,11 @@ _DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 # OpenTelemetry resource attributes, as Application Insights stores them in
 # Properties: the workload's own name, and the Kubernetes namespace it runs
 # in (service.namespace is a logical grouping in OpenTelemetry, not
-# necessarily the Kubernetes namespace, so it is not used).
+# necessarily the Kubernetes namespace, so it is not used). The classic
+# SDK's Kubernetes enricher (Microsoft.ApplicationInsights.Kubernetes)
+# writes the namespace under its own key.
 _SERVICE_NAME_PROPERTY = "service.name"
-_NAMESPACE_PROPERTY = "k8s.namespace.name"
+_NAMESPACE_PROPERTIES = ("k8s.namespace.name", "Kubernetes.Pod.Namespace")
 AZURE_MONITOR_PROVENANCE = "azure_monitor"
 MOCK_ENVIRONMENT = "mock"
 
@@ -134,13 +136,13 @@ class TelemetryExtractor:
     def get_active_dependencies(
         self,
         days_back: int = 30,
-        cluster_filter: TelemetryClusterFilter | None = None,
+        scope: TelemetryScope | None = None,
     ) -> DiscoveryResult[DependencyEdge]:
         """Return active dependency edges observed within a lookback period.
 
-        With ``cluster_filter``, only rows emitted from that cluster are
-        read (see ``build_dependency_query``); the mock fixture has no
-        cluster attributes and ignores it. A source whose Kubernetes
+        With ``scope``, only rows from that cluster and/or those
+        Application Insights components are read (see
+        ``build_dependency_query``); the mock fixture ignores it. A source whose Kubernetes
         namespace is known is named ``<namespace>/<name>``.
 
         The local source reads AppDependencies-shaped records from the root
@@ -163,25 +165,30 @@ class TelemetryExtractor:
         if self._source == "mock":
             result = self._get_active_dependencies_from_mock()
         else:
-            result = self._get_active_dependencies_from_azure(days_back, cluster_filter)
+            result = self._get_active_dependencies_from_azure(days_back, scope)
         edges, self._dropped_records = normalize_edges(result.items)
         return result.model_copy(update={"items": edges})
 
     def get_unscoped_sources(
-        self, days_back: int, cluster_filter: TelemetryClusterFilter | None
+        self, days_back: int, scope: TelemetryScope | None
     ) -> dict[str, int] | None:
         """Count rows the cluster filter drops for lacking its attribute, by source.
 
         A diagnostic only (see ``build_unscoped_query``): never raises, and
-        returns None when there is no filter, the source is the mock
-        fixture, or the query fails.
+        returns None when the scope has no cluster filter, the source is the
+        mock fixture, or the query fails.
         """
-        if cluster_filter is None or self._source != "azure" or self._client is None:
+        if (
+            scope is None
+            or scope.cluster is None
+            or self._source != "azure"
+            or self._client is None
+        ):
             return None
         try:
             response = self._client.query_workspace(
                 self._workspace_id,
-                build_unscoped_query(days_back, cluster_filter),
+                build_unscoped_query(days_back, scope),
                 timespan=timedelta(days=days_back),
             )
             return parse_unscoped_response(response)
@@ -280,10 +287,10 @@ class TelemetryExtractor:
         return DiscoveryResult[DependencyEdge].from_items(edges, errors)
 
     def _get_active_dependencies_from_azure(
-        self, days_back: int, cluster_filter: TelemetryClusterFilter | None
+        self, days_back: int, scope: TelemetryScope | None
     ) -> DiscoveryResult[DependencyEdge]:
         """Query Azure Monitor for observed dependency edges."""
-        query = build_dependency_query(days_back, cluster_filter)
+        query = build_dependency_query(days_back, scope)
         self._runtime_metrics = {}
         try:
             if self._client is None:
@@ -305,21 +312,51 @@ class TelemetryExtractor:
 _UNSCOPED_SOURCE_LIMIT = 50
 
 
-def build_unscoped_query(days_back: int, cluster_filter: TelemetryClusterFilter) -> str:
+def _component_clause(scope: TelemetryScope | None) -> str:
+    """KQL keeping rows written by the scope's Application Insights components."""
+    if scope is None or not scope.components:
+        return ""
+    quoted = ", ".join(f'"{component}"' for component in scope.components)
+    return f"| where _ResourceId in~ ({quoted})\n"
+
+
+def _cluster_clause(scope: TelemetryScope | None) -> str:
+    """KQL keeping rows whose cluster attribute equals the scope's value."""
+    if scope is None or scope.cluster is None:
+        return ""
+    return (
+        f'| where tostring(Properties["{scope.cluster.attribute}"]) == '
+        f'"{scope.cluster.value}"\n'
+    )
+
+
+def _namespace_expression() -> str:
+    """KQL for a row's Kubernetes namespace, from whichever property carries it."""
+    reads = ", ".join(f'tostring(Properties["{key}"])' for key in _NAMESPACE_PROPERTIES)
+    return f"coalesce({reads})"
+
+
+def build_unscoped_query(days_back: int, scope: TelemetryScope) -> str:
     """Return the KQL counting dependency rows the cluster filter drops.
 
     Rows without the filter's attribute (for example from an Application
     Insights SDK whose exporter doesn't copy Kubernetes resource attributes)
     are never this cluster's evidence; counting them by source name explains
-    why a radius service may look silent. Rows from another cluster are not
-    counted.
+    why a radius service may look silent. Rows from another cluster, or
+    outside the scope's components, are not counted.
+
+    Raises:
+        ValueError: if days_back isn't positive or the scope has no cluster filter.
     """
     if days_back <= 0:
         raise ValueError("days_back must be a positive integer")
+    if scope.cluster is None:
+        raise ValueError("the unscoped diagnostic needs a cluster filter")
     return (
         "AppDependencies\n"
         f"| where TimeGenerated >= ago({days_back}d)\n"
-        f'| where isempty(tostring(Properties["{cluster_filter.attribute}"]))\n'
+        f"{_component_clause(scope)}"
+        f'| where isempty(tostring(Properties["{scope.cluster.attribute}"]))\n'
         f'| extend SourceName = coalesce(tostring(Properties["{_SERVICE_NAME_PROPERTY}"]), AppRoleName)\n'
         "| where isnotempty(SourceName)\n"
         "| summarize Rows=count() by Source=SourceName\n"
@@ -348,34 +385,28 @@ def parse_unscoped_response(response: LogsQueryResult | LogsQueryPartialResult) 
     return counts
 
 
-def build_dependency_query(
-    days_back: int, cluster_filter: TelemetryClusterFilter | None = None
-) -> str:
+def build_dependency_query(days_back: int, scope: TelemetryScope | None = None) -> str:
     """Return the KQL that summarizes AppDependencies into edges.
 
     The source is the row's ``service.name`` resource attribute, falling
     back to ``AppRoleName`` (which some exporters prefix with
-    ``service.namespace``), with its Kubernetes namespace alongside, and
-    rows are kept apart by ``DependencyType`` so normalization can tell a
-    messaging delivery from a call (see ``telemetry_normalization``). A
-    cluster filter keeps only rows whose attribute equals the value; its
-    attribute and value are pattern-restricted by ``TelemetryClusterFilter``
-    so they cannot break out of the quoted strings.
+    ``service.namespace``), with its Kubernetes namespace alongside (from
+    ``k8s.namespace.name`` or the classic enricher's
+    ``Kubernetes.Pod.Namespace``), and rows are kept apart by
+    ``DependencyType`` so normalization can tell a messaging delivery from
+    a call (see ``telemetry_normalization``). A scope keeps only rows from
+    its components and/or whose cluster attribute equals its value; both
+    are pattern-restricted so they cannot break out of the quoted strings.
     """
     if days_back <= 0:
         raise ValueError("days_back must be a positive integer")
-    cluster_clause = (
-        f'| where tostring(Properties["{cluster_filter.attribute}"]) == '
-        f'"{cluster_filter.value}"\n'
-        if cluster_filter
-        else ""
-    )
     return (
         "AppDependencies\n"
         f"| where TimeGenerated >= ago({days_back}d)\n"
-        f"{cluster_clause}"
+        f"{_component_clause(scope)}"
+        f"{_cluster_clause(scope)}"
         f'| extend SourceName = coalesce(tostring(Properties["{_SERVICE_NAME_PROPERTY}"]), AppRoleName),\n'
-        f'    {_NAMESPACE_COLUMN} = tostring(Properties["{_NAMESPACE_PROPERTY}"])\n'
+        f"    {_NAMESPACE_COLUMN} = {_namespace_expression()}\n"
         "| where isnotempty(SourceName) and isnotempty(Target)\n"
         f"| summarize LastObservedAt=max(TimeGenerated), {_CALLS_COLUMN}=count(),\n"
         f"    {_FAILURES_COLUMN}=countif(Success == false)\n"

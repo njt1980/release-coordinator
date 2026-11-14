@@ -30,6 +30,7 @@ from src.core.models import (
     ServiceNode,
     SharedLibrary,
     TelemetryClusterFilter,
+    TelemetryScope,
     TelemetryStatus,
     UnscannedReason,
 )
@@ -535,7 +536,7 @@ class LibraryFileMappingTests(unittest.TestCase):
 # --- Unscoped telemetry -----------------------------------------------------
 
 
-CLUSTER = TelemetryClusterFilter(value="aks-1")
+CLUSTER = TelemetryScope(cluster=TelemetryClusterFilter(value="aks-1"))
 
 
 class UnscopedTelemetryTests(unittest.TestCase):

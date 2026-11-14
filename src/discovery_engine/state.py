@@ -12,7 +12,7 @@ from src.core.models import (
     ServiceEnvironment,
     ServiceNode,
     ServiceStaticConfig,
-    TelemetryClusterFilter,
+    TelemetryScope,
 )
 
 
@@ -29,8 +29,9 @@ class DiscoveryGraphState(TypedDict):
     ``environment`` and ``cluster`` are the deployment target being scanned;
     every service FQURI carries them. ``scanned_revisions`` records the
     commit each repository was read at. ``kubernetes_api_server`` is the API
-    server the manifest scan read and ``telemetry_cluster`` the cluster
-    filter the telemetry query applied; both prove the ``cluster`` label.
+    server the manifest scan read and ``telemetry_scope`` the scope (cluster
+    filter, Application Insights components) the telemetry query applied;
+    both prove the ``cluster`` label.
     ``static_coverage`` and ``pipeline_variables`` are recorded per scanned
     repository, ``kubernetes_shape`` per out-of-shape namespace object, and
     ``manifest_edges`` are dependencies the manifests declare (an
@@ -58,7 +59,7 @@ class DiscoveryGraphState(TypedDict):
     reconciled_graph: dict[str, object]
     baseline_snapshot_id: str
     kubernetes_api_server: str
-    telemetry_cluster: TelemetryClusterFilter | None
+    telemetry_scope: TelemetryScope | None
     static_coverage: list[RepositoryCoverage]
     pipeline_variables: list[PipelineVariables]
     kubernetes_shape: list[ShapeFinding]
