@@ -40,6 +40,42 @@ before falling back to the developer's `az login`.
   picked instead of typed; disabled and empty repositories are not offered.
   Same read identity and organization allowlist; no extra permission.
 
+### Pull request polling and feedback (`ado_connection`, opt-in)
+
+All off by default; each project turns them on in its policy, and they
+need `source_control`:
+
+```yaml
+ado_connection:
+  poll: true                 # read-only; needs nothing beyond Readers
+  repositories: [shop-api]   # required when polling
+  target_branches: [main]    # optional; empty = any
+  interval_minutes: 10
+  change_type: additive      # labels rc:breaking / rc:additive override it
+  status: false              # advisory status, genre release-coordinator
+  comment: false             # the briefing as one closed thread
+  link_base_url: ""          # optional: the status links to the record view
+```
+
+- **Polling** lists the active pull requests of `repositories` and assesses
+  each new iteration (new source commit or retarget) through PR intake; the
+  last handled iteration per pull request is kept in
+  `{RC_DATA_DIR}/pr-watch/{tenant}/{project}.json`. The server starts the
+  poller only if some policy turns it on when it starts, so turning it on for
+  the first project needs a restart.
+- **Status and comment** are the only writes to Azure DevOps. They go to the
+  pull request's iteration that was assessed, in the policy's
+  `source_control` project only, and need **Contribute to pull requests**
+  (Git repositories permission `PullRequestContribute`) for the identity on
+  that project. The project's **Readers** group has it by default; check
+  with **Project settings → Repositories → Security**. The status is
+  advisory: it blocks nothing unless a branch policy requires it; don't add
+  one. The comment thread is posted closed, so "comments must be resolved"
+  policies aren't held up.
+- Lab check (2026-11-14): `rc-backend-local` already has it on
+  `Release_Coordinator`, inherited from `[Release_Coordinator]\Readers`
+  (effective allow 81922, which includes 16384); no explicit grant made.
+
 ## Log Analytics (runtime telemetry)
 
 - Role **Log Analytics Reader**, scoped to the workspace that holds
