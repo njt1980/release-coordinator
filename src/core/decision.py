@@ -19,14 +19,14 @@ compliance, which only the customer's validation can establish):
 signatures.
 """
 
-import hashlib
-import json
 import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Final, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from src.core.hashing import sha256_hex
 
 GENESIS_HASH: Final[str] = "0" * 64
 _HEX64: Final[str] = r"^[0-9a-f]{64}$"
@@ -152,15 +152,11 @@ class DecisionRecord(DecisionDraft):
     def manifestation(self) -> str:
         """The signature as every human-readable view must show it (11.50)."""
         note = "" if self.signer.source is SignerSource.ENTRA else " (typed name, not an electronic signature)"
+        identifier = "" if self.signer.identifier == self.signer.name else f" <{self.signer.identifier}>"
         return (
-            f"{self.meaning}: {self.signer.name} <{self.signer.identifier}>{note}, "
+            f"{self.meaning}: {self.signer.name}{identifier}{note}, "
             f"{self.signed_at:%Y-%m-%d %H:%M:%S} UTC"
         )
-
-
-def canonical_json(value: object) -> str:
-    """JSON with sorted keys and no whitespace: the form every hash is taken over."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def content_hash(record: DecisionDraft | DecisionRecord, previous_hash: str | None = None, sequence: int | None = None) -> str:
@@ -174,7 +170,7 @@ def content_hash(record: DecisionDraft | DecisionRecord, previous_hash: str | No
         data["previous_hash"] = previous_hash
     if sequence is not None:
         data["sequence"] = sequence
-    return hashlib.sha256(canonical_json(data).encode("utf-8")).hexdigest()
+    return sha256_hex(data)
 
 
 def seal(draft: DecisionDraft, sequence: int, previous_hash: str) -> DecisionRecord:
@@ -189,7 +185,7 @@ def seal(draft: DecisionDraft, sequence: int, previous_hash: str) -> DecisionRec
 
 def assessment_digest(assessment_json: dict[str, object]) -> str:
     """SHA-256 of an assessment's JSON form (``model_dump(mode="json")``)."""
-    return hashlib.sha256(canonical_json(assessment_json).encode("utf-8")).hexdigest()
+    return sha256_hex(assessment_json)
 
 
 _UNSAFE_NAME: Final[re.Pattern[str]] = re.compile(r"[\x00-\x1f\x7f]")

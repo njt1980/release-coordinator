@@ -76,7 +76,10 @@ class DecisionModelTests(unittest.TestCase):
             "Approved for release: Jane Doe <jane@contoso.com>, 2026-11-14 10:22:01 UTC",
         )
         typed = seal(_draft(signer=Signer(name="Sam", identifier="Sam", source=SignerSource.TYPED)), 1, GENESIS_HASH)
-        self.assertIn("(typed name, not an electronic signature)", typed.manifestation)
+        self.assertEqual(
+            typed.manifestation,
+            "Approved for release: Sam (typed name, not an electronic signature), 2026-11-14 10:22:01 UTC",
+        )
 
     def test_a_changed_record_no_longer_validates(self) -> None:
         record = seal(_draft(), 1, GENESIS_HASH)
@@ -295,6 +298,12 @@ class DecisionApiTests(unittest.TestCase):
             self.assertEqual(self.client.post(self.URL, json=body, headers=no_role).status_code, 403)
             response = self.client.post(self.URL, json=body, headers=headers)
         self.assertEqual(response.status_code, 201, response.text)
+        with patch.object(config, "TRUST_PRINCIPAL_HEADER", True), patch.object(config, "DECISION_ROLE", "Release.Coordinator"):
+            me = self.client.get("/api/v1/decisions/signer", headers=headers).json()
+            anonymous = self.client.get("/api/v1/decisions/signer").json()
+        self.assertEqual((me["source"], me["name"], me["can_decide"]), ("entra", "Jane Doe", True))
+        self.assertFalse(anonymous["can_decide"])
+        self.assertEqual(self.client.get("/api/v1/decisions/signer").json()["source"], "typed")
         signer = response.json()[0]["record"]["signer"]
         self.assertEqual(signer, {"name": "Jane Doe", "identifier": "jane@contoso.com", "object_id": "oid-1", "source": "entra"})
 

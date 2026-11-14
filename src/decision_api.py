@@ -5,7 +5,8 @@ person's Approve / Decline / Further analysis on one completed assessment;
 ``GET`` on the same path lists that assessment's decisions, newest last,
 each with its signature manifestation and whether the assessment is still
 the one that was signed. ``GET /api/v1/decisions/verify`` walks the whole
-hash chain.
+hash chain, and ``GET /api/v1/decisions/signer`` says who a decision made
+now would be signed by.
 
 The client says only what was decided and why. The server sets the signer,
 the time, the assessment hash and everything the decision is about, from
@@ -85,6 +86,22 @@ def _job(job_id: str) -> tuple[PrAssessmentJob, ReleaseAssessment]:
             detail=f"Assessment {job_id} is {job.status}; only a completed assessment can be decided.",
         )
     return job, job.assessment
+
+
+class SignerView(BaseModel):
+    """Who would sign a decision made now, so the page can show it before signing.
+
+    ``source`` is ``entra`` behind the platform's sign-in (then ``name`` and
+    ``identifier`` are the signed-in user's) and ``typed`` locally (the page
+    asks for a name). ``can_decide`` is false, with ``why``, when the user
+    may not record decisions.
+    """
+
+    source: SignerSource
+    name: str = ""
+    identifier: str = ""
+    can_decide: bool
+    why: str = ""
 
 
 def _signer(request: DecisionRequest, principal: Principal | None) -> Signer:
@@ -194,6 +211,28 @@ def record_decision(
     except (DecisionStoreCorruptError, OSError) as error:
         raise _store_unavailable(error) from error
     return _views(records, assessment)
+
+
+@router.get("/api/v1/decisions/signer", response_model=SignerView)
+def current_signer(
+    user_name: Annotated[str | None, Header(alias=NAME_HEADER)] = None,
+    object_id: Annotated[str | None, Header(alias=ID_HEADER)] = None,
+    claims: Annotated[str | None, Header(alias=CLAIMS_HEADER)] = None,
+) -> SignerView:
+    """Who a decision recorded now would be signed by."""
+    if not config.TRUST_PRINCIPAL_HEADER:
+        return SignerView(source=SignerSource.TYPED, can_decide=True)
+    principal = parse_principal(user_name, object_id, claims)
+    if principal is None:
+        return SignerView(source=SignerSource.ENTRA, can_decide=False, why="Sign in to record a decision.")
+    allowed = not config.DECISION_ROLE or config.DECISION_ROLE in principal.roles
+    return SignerView(
+        source=SignerSource.ENTRA,
+        name=clean_name(principal.display_name),
+        identifier=principal.user_name,
+        can_decide=allowed,
+        why="" if allowed else f"Recording a release decision needs the {config.DECISION_ROLE!r} app role.",
+    )
 
 
 @router.get("/api/v1/decisions/verify", response_model=ChainReport)
