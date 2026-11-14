@@ -56,6 +56,13 @@ from src.tools.build_projects import (
     unresolved_sites,
 )
 from src.tools.client_libraries import client_libraries, manifest_ecosystem
+from src.tools.spring_cloud import (
+    ServedFile,
+    config_servers,
+    served_file,
+    spring_settings,
+    zuul_route_services,
+)
 from src.tools.proxy_configs import ProxyRead, is_envoy_config, proxy_upstreams, template_suffix
 from src.tools.config_readers import (
     ConfigFileKind,
@@ -855,17 +862,7 @@ def read_source_file(content: str, service_name: str, path: str) -> FileRead:
             config_keys={ConfigFramework.DOTNET: list(flatten_dotnet_settings(content))},
         )
     if kind is not None and kind.kind is ConfigFileKind.SPRING_CONFIG:
-        return FileRead(
-            bindings=spring_config_bindings(content, relative, kind.profile),
-            sites=external_config_sites(content),
-            config_keys={
-                ConfigFramework.SPRING: [
-                    key
-                    for _, properties in spring_documents(content, relative, kind.profile)
-                    for key in properties
-                ]
-            },
-        )
+        return spring_config_read(content, service_name, path, kind.profile)
     bindings = env_default_bindings(content, relative)
     suffix = os.path.splitext(path)[1].lower()
     references = _extract_references(content, service_name, path)
@@ -903,6 +900,44 @@ def read_source_file(content: str, service_name: str, path: str) -> FileRead:
         + (proxy.sites if proxy is not None else [])
         + (_unfollowed_proxy_variables(proxy, content) if proxy is not None else []),
         sections=bound_sections(content, path),
+    )
+
+
+# A YAML ``uri:`` key (spring.cloud.config.uri written nested).
+_YAML_URI_LINE: Final[re.Pattern[str]] = re.compile(r"^\s*uri\s*:", re.MULTILINE)
+
+
+def spring_config_read(content: str, service_name: str, path: str, profile: str | None) -> FileRead:
+    """Read a Spring configuration file: its own (``application*``) or one a
+    config server serves to the service (see ``spring_cloud``).
+
+    Raises:
+        ConfigParseError: if the file can't be parsed.
+    """
+    relative = path.lstrip("/")
+    documents = spring_documents(content, relative, profile)
+    sites = external_config_sites(content)
+    nested_uri = any(
+        key.lower() == "spring.cloud.config.uri" for _, properties in documents for key in properties
+    )
+    if nested_uri and not any(site.detail == "spring.cloud.config.uri" for site in sites):
+        line = _YAML_URI_LINE.search(content)
+        sites.append(
+            OpaqueReferenceSite(
+                line=content.count("\n", 0, line.start()) + 1 if line else 1,
+                kind=OpaqueReferenceKind.EXTERNAL_CONFIG_SOURCE,
+                detail="spring.cloud.config.uri",
+            )
+        )
+    return FileRead(
+        references=[
+            EndpointReference(service_name=service_name, endpoint=f"lb://{name}", file_path=path)
+            for _, properties in documents
+            for name in zuul_route_services(properties)
+        ],
+        bindings=spring_config_bindings(content, relative, profile),
+        sites=sites,
+        config_keys={ConfigFramework.SPRING: [key for _, properties in documents for key in properties]},
     )
 
 
@@ -1605,6 +1640,13 @@ class DevOpsExtractor:
                 f"{repo_name}: cannot read {path}: {error}"
                 for path, error in build_read_failures.items()
             ]
+            wiring = self._spring_cloud_wiring(
+                git_client, repository.id, project, commit_sha, file_paths, layout, boundaries
+            )
+            for clients in wiring.served.values():
+                for root in clients:
+                    if root in services:
+                        services[root].config_served_in_repository = True
             unowned = self._read_owned_files(
                 git_client,
                 repository.id,
@@ -1614,10 +1656,11 @@ class DevOpsExtractor:
                 file_paths,
                 layout,
                 services,
-                build_contents,
+                {**wiring.contents, **build_contents},
                 build_problems,
                 errors,
                 list_unowned=only_roots is None,
+                wiring=wiring,
             )
             for path, sites in unresolved_sites(projects).items():
                 for root in layout.owner(path).services:
@@ -1701,6 +1744,51 @@ class DevOpsExtractor:
             for scan in owners:
                 _add_unscanned_sites(scan, path.lstrip("/"), sites)
 
+    def _spring_cloud_wiring(
+        self,
+        git_client: Any,
+        repository_id: str,
+        project: str,
+        commit_sha: str,
+        file_paths: list[str],
+        layout: RepositoryLayout,
+        boundaries: list[ServiceBoundary],
+    ) -> "_SpringWiring":
+        """Read each service's own base-profile Spring files to find in-repository
+        config servers and their clients (see ``spring_cloud``).
+
+        Files that can't be read or parsed are skipped here; the main pass
+        reports them.
+        """
+        dotnet_roots = dotnet_project_roots(file_paths)
+        contents: dict[str, str] = {}
+        properties: dict[str, dict[str, dict[str, str]]] = {}
+        for path in file_paths:
+            kind = config_file(path)
+            if kind is None or kind.kind is not ConfigFileKind.SPRING_CONFIG or kind.profile:
+                continue
+            if classify_path(path, dotnet_roots) is not FileClass.SCANNED:
+                continue
+            owners = layout.owner(path).services
+            if len(owners) != 1:
+                continue
+            try:
+                content = self._read_item_content(git_client, repository_id, path, project, commit_sha)
+                documents = spring_documents(content, path.lstrip("/"), None)
+            except Exception as error:  # reported by the main pass
+                logger.debug("Spring pre-read of %s skipped: %s", path, error)
+                continue
+            contents[path] = content
+            base = {key: value for profile, values in documents if profile is None for key, value in values.items()}
+            properties.setdefault(owners[0], {})[path] = base
+        settings = {root: spring_settings(files) for root, files in properties.items()}
+        names = {boundary.root: boundary.name for boundary in boundaries}
+        return _SpringWiring(
+            contents=contents,
+            served=config_servers(settings, names),
+            application_names={root: s.application_name for root, s in settings.items()},
+        )
+
     def _read_owned_files(
         self,
         git_client: Any,
@@ -1715,11 +1803,14 @@ class DevOpsExtractor:
         build_problems: dict[str, UnscannedReason],
         errors: list[str],
         list_unowned: bool,
+        wiring: "_SpringWiring | None" = None,
     ) -> list[str]:
         """Read each file into the services that own it; return unowned source files.
 
         A file is read once, however many services own it (a shared
-        library's). ``errors`` receives read failures.
+        library's). ``errors`` receives read failures. A file an
+        in-repository config server serves (``wiring``) counts as scanned
+        for its owner but is read as configuration of its clients.
         """
         dotnet_roots = dotnet_project_roots(file_paths)
         unowned: list[str] = []
@@ -1759,6 +1850,10 @@ class DevOpsExtractor:
                 for owner in owners:
                     owner.unscanned(relative, UnscannedReason.READ_FAILED)
                 continue
+            served = served_file(path, wiring.served, wiring.application_names) if wiring else None
+            if served is not None:
+                self._read_served_file(content, path, served, owners, services, repo_name)
+                continue
             try:
                 read = read_source_file(content, owners[0].boundary.name, path)
             except ConfigParseError as error:
@@ -1769,6 +1864,36 @@ class DevOpsExtractor:
             for owner in owners:
                 owner.add_read(path, read, from_library=ownership.library is not None)
         return unowned
+
+    @staticmethod
+    def _read_served_file(
+        content: str,
+        path: str,
+        served: ServedFile,
+        owners: list["_ServiceAccumulator"],
+        services: dict[str, "_ServiceAccumulator"],
+        repo_name: str,
+    ) -> None:
+        """Count a config server's served file for its owner and read it into its clients.
+
+        A served file naming no known client configures nothing scanned
+        here, so it is only counted.
+        """
+        relative = path.lstrip("/")
+        for owner in owners:
+            owner.coverage.files_scanned += 1
+        clients = [services[root] for root in served.clients if root in services]
+        if not clients:
+            return
+        try:
+            read = spring_config_read(content, clients[0].boundary.name, path, served.profile)
+        except ConfigParseError as error:
+            logger.warning("Cannot parse %s in %s: %s", path, repo_name, error)
+            for client in clients:
+                client.unscanned(relative, UnscannedReason.PARSE_FAILED)
+            return
+        for client in clients:
+            client.add_read(path, read, from_library=False, count=False)
 
 
 def _add_unscanned_sites(scan: ServiceScan, path: str, sites: list[OpaqueReferenceSite]) -> None:
@@ -1782,6 +1907,19 @@ def _add_unscanned_sites(scan: ServiceScan, path: str, sites: list[OpaqueReferen
     scan.coverage.unscanned.append(
         UnscannedFile(path=path, reason=UnscannedReason.REFERENCES_NOT_UNDERSTOOD, sites=list(sites))
     )
+
+
+class _SpringWiring(BaseModel):
+    """In-repository Spring Cloud Config wiring (see ``spring_cloud``).
+
+    ``contents`` are the Spring files read to find it (reused by the main
+    pass); ``served`` maps a served directory to its clients' roots;
+    ``application_names`` each service root to its application name.
+    """
+
+    contents: dict[str, str] = Field(default_factory=dict)
+    served: dict[str, list[str]] = Field(default_factory=dict)
+    application_names: dict[str, str | None] = Field(default_factory=dict)
 
 
 class _ServiceAccumulator:
@@ -1798,6 +1936,9 @@ class _ServiceAccumulator:
         self.sites: dict[str, list[OpaqueReferenceSite]] = {}
         self.sections: dict[str, list[BoundSection]] = {}
         self.keys: dict[ConfigFramework, set[str]] = {}
+        # Its config server is a service of this repository whose served
+        # files are read, so importing from it hides nothing.
+        self.config_served_in_repository = False
 
     def unscanned(self, path: str, reason: UnscannedReason) -> None:
         """Record a file whose references are unknown."""
@@ -1808,10 +1949,15 @@ class _ServiceAccumulator:
         if sites:
             self.sites.setdefault(path.lstrip("/"), []).extend(sites)
 
-    def add_read(self, path: str, read: FileRead, from_library: bool) -> None:
-        """Add one scanned file. A library's Dockerfile doesn't build this image."""
+    def add_read(self, path: str, read: FileRead, from_library: bool, count: bool = True) -> None:
+        """Add one scanned file. A library's Dockerfile doesn't build this image.
+
+        Without ``count``, the file is another service's (a config server's
+        served file) and doesn't count toward this service's coverage.
+        """
         relative = path.lstrip("/")
-        self.coverage.files_scanned += 1
+        if count:
+            self.coverage.files_scanned += 1
         self.bindings.extend(read.bindings)
         if read.image is not None and not from_library:
             self.images.append((relative, read.image))
@@ -1829,6 +1975,12 @@ class _ServiceAccumulator:
         """Return the service's scan, with bound sections checked against its keys."""
         for path, sections in self.sections.items():
             self.add_sites(path, unbound_section_sites(sections, self.keys))
+        if self.config_served_in_repository:
+            self.sites = {
+                path: kept
+                for path, sites in self.sites.items()
+                if (kept := [site for site in sites if site.kind is not OpaqueReferenceKind.EXTERNAL_CONFIG_SOURCE])
+            }
         for path, sites in self.sites.items():
             unique = {(site.line, site.kind, site.detail): site for site in sites}
             self.coverage.unscanned.append(

@@ -19,7 +19,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from src.core.config_resolution import ResolutionOutcome, resolve_variable
-from src.core.edge_resolution import environment_addresses
+from src.core.edge_resolution import environment_addresses, shared_config_maps
 from src.core.env_names import endpoint_of_value
 from src.core.models import ServiceEnvironment
 from src.core.service_ids import host_of
@@ -121,6 +121,10 @@ def _environment(name: str, env: WorkloadEnv) -> ServiceEnvironment:
     return ServiceEnvironment(
         service_id=f"urn:release-coord:bench:bench:bench:default:{name}",
         variables=env.variables,
+        variable_sources={
+            variable: [f"bench/{name}:" + (f"configMap/{env.bulk[variable]}" if variable in env.bulk else "env")]
+            for variable in env.variables
+        },
         opaque_variables=sorted(set(env.opaque)),
         has_opaque_sources=env.has_opaque_sources,
     )
@@ -160,7 +164,9 @@ class _Predictor:
         env = self.envs.get(service.truth_name or "")
         if self.mode is not EdgeMode.MANIFEST or env is None or service.truth_name is None:
             return
-        for variable, address in environment_addresses(env.variables):
+        shared = shared_config_maps({_environment(n, e).service_id: _environment(n, e) for n, e in self.envs.items()})
+        sources = _environment(service.truth_name, env).variable_sources
+        for variable, address in environment_addresses(env.variables, sources, {name for _, name in shared}):
             callee = self.callee(normalize_host(address))
             if callee and callee != NOISE and callee not in self.truth.observability:
                 if callee != service.truth_name:

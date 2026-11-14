@@ -5,7 +5,7 @@ a pull request head's references against the baseline it is assessed
 against), so both resolve a reference the same way.
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Final
 
@@ -273,7 +273,50 @@ def reference_protocol(
     return wire_protocol(resolution.endpoint) if resolution.endpoint else None
 
 
-def environment_addresses(variables: Mapping[str, str]) -> list[tuple[str, str]]:
+def _imported_config_map(source: str) -> str | None:
+    """The config map a ``variable_sources`` entry imports whole (envFrom), or None."""
+    _, separator, origin = source.rpartition(":configMap/")
+    return origin if separator else None
+
+
+def shared_config_maps(environments: Mapping[str, ServiceEnvironment]) -> set[tuple[str, str]]:
+    """``(namespace, config map)`` pairs more than one service imports whole.
+
+    Such a config map is an address book: every workload importing it gets
+    every address, whatever it calls.
+    """
+    importers: dict[tuple[str, str], set[str]] = {}
+    for service_id, environment in environments.items():
+        try:
+            namespace = ServiceIdentity.parse(service_id).namespace
+        except ValueError:
+            continue
+        for sources in environment.variable_sources.values():
+            for source in sources:
+                name = _imported_config_map(source)
+                if name is not None:
+                    importers.setdefault((namespace, name), set()).add(service_id)
+    return {key for key, services in importers.items() if len(services) > 1}
+
+
+def from_shared_import(sources: Sequence[str], shared: Collection[str]) -> bool:
+    """Whether a variable's value only comes from importing whole a config
+    map named in ``shared`` (see ``shared_config_maps``).
+
+    An explicit ``env`` entry (a literal or ``configMapKeyRef``), or a
+    config map only this service imports, is a decision to wire the
+    variable into this workload. No recorded source (older snapshots)
+    counts as explicit.
+    """
+    names = [_imported_config_map(source) for source in sources]
+    return bool(names) and all(name is not None and name in shared for name in names)
+
+
+def environment_addresses(
+    variables: Mapping[str, str],
+    sources: Mapping[str, Sequence[str]] | None = None,
+    shared: Collection[str] = (),
+) -> list[tuple[str, str]]:
     """(variable, address) for each endpoint-like variable a workload's
     Kubernetes environment sets to an address (a URL, ``host:port``, a bare
     host or a connection string's server), in name order.
@@ -281,10 +324,14 @@ def environment_addresses(variables: Mapping[str, str]) -> list[tuple[str, str]]
     Only names that denote an endpoint count (``*_URL``, ``*_HOST``,
     ``*_ADDR``, ``ConnectionStrings__*``...; see ``is_endpoint_variable``),
     so a value like ``APP_NAME=frontend`` is never read as a dependency.
+    Variables only imported from a config map several services share
+    (``from_shared_import``; ``shared`` names those config maps) don't
+    count: importing an address book is no call to everything in it (code
+    that reads one still makes that edge).
     """
     found: list[tuple[str, str]] = []
     for name in sorted(variables):
-        if not is_endpoint_variable(name):
+        if not is_endpoint_variable(name) or from_shared_import((sources or {}).get(name, ()), shared):
             continue
         address = endpoint_of_value(variables[name], connection_string=True)
         if address:
@@ -309,13 +356,17 @@ def environment_edges(
     nothing add nothing (no new gaps).
     """
     edges: list[DependencyEdge] = []
+    shared = shared_config_maps(environments)
     for service_id, environment in sorted(environments.items()):
         try:
             owner = ServiceIdentity.parse(service_id)
         except ValueError:
             continue
         owner_context = context.in_namespace(owner.namespace)
-        for _, address in environment_addresses(environment.variables):
+        in_namespace = {name for namespace, name in shared if namespace == owner.namespace}
+        for _, address in environment_addresses(
+            environment.variables, environment.variable_sources, in_namespace
+        ):
             target = resolve_reference(address, index, owner_context)
             if target is None or target.uri == service_id:
                 continue
