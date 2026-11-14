@@ -53,6 +53,16 @@ Identity is namespace-safe:
 - Telemetry names its source by the `service.name` and `k8s.namespace.name`
   resource attributes, so the same workload name in two namespaces stays
   two services.
+- A source service whose name matches no running service can still be
+  linked by what is declared about it, for identity only (never for an
+  edge): docker-compose services and images, skaffold artifacts, `Docker@2`
+  pipeline tasks, .NET Aspire AppHost resources and a Dockerfile's
+  `org.opencontainers.image.title` label on the build side; workload
+  labels (`app.kubernetes.io/name`, `app.kubernetes.io/component`, `app`),
+  `OTEL_SERVICE_NAME` and OCI image annotations on the cluster side. A
+  link is made only when these facts point at exactly one running service
+  that no other source service also points at; otherwise they are offered
+  as suggestions. The link records why it was made.
 
 ### Coverage and shape
 
@@ -247,6 +257,30 @@ IDs, or "Release train" on the Assessments page). Nothing is re-assessed:
 Trains are kept in memory; recreate one from the same assessments after a
 restart. A decision is still recorded per pull request.
 
+### Where to look when a service fails (advisory)
+
+Selecting a service on the Inventory page shows "If it fails: where to look
+first" (`GET /api/v1/projects/{tenant}/{project}/rca?service=...`). It walks
+what the service depends on (up to 4 hops) in the newest baseline with the
+dependency review applied, and lists, for the service and each dependency,
+the changes recorded across the last baselines (dependency added or
+removed, image or repository commit changed, configuration keys by name,
+contract files added or removed) and completed assessments that changed it.
+Nearer first; within a hop, recently changed first, then stronger
+evidence. It reads no logs, metrics or incidents and diagnoses nothing; it
+is a starting list for a person.
+
+### Assessing pull requests automatically (opt-in)
+
+With `ado_connection.poll: true` in a project's policy, the server lists
+the active pull requests of the named repositories every
+`interval_minutes` and assesses each new iteration through the same PR
+intake as "Assess PR #N". Two further switches, off by default, post the
+result back: an advisory pull request status (genre `release-coordinator`)
+and the briefing as a closed comment thread. The platform sets no branch
+policy, so the status blocks nothing unless the team adds one. Access is
+described in `docs/access-requirements.md`.
+
 ### Every run is logged
 
 Each onboarding and assessment writes a live, plain-language log: one line
@@ -340,7 +374,7 @@ a platform capability, not a lab fix.
 | G4 | Telemetry only from Azure Monitor `AppDependencies` | Teams use Datadog, Grafana Tempo, Prometheus and others | Telemetry adapter interface; Azure Monitor first |
 | G5 | Code only from Azure DevOps | Many teams use GitHub or GitLab | Code-host adapter interface |
 | G6 | A service's evidence isn't reconciled across sources (an environment variable the code scan can't resolve vs the endpoint telemetry observes; differing service names) | Gaps that other evidence already answers still block | Record each edge's sources, and resolve environment-variable references with observed endpoints. **Partly done (PR 2a-2, revised in 2a-3):** a variable that Kubernetes provably doesn't set is classified `ENVIRONMENT_VARIABLE_UNSET` but stays a gap: live traffic doesn't prove the code path reading it ran, and defaults set in the code or the container image aren't read. Only a reviewed policy exemption accepts it. **PR 2b-3a:** when Kubernetes, the pipelines and the image's Dockerfile `ENV` provably don't set a variable, its default in source control (the active profile's configuration file, then the base file, then the default in code) resolves it, and the snapshot lists each such use (`static_defaults_used`). Defaults that differ by profile while the profile variable is opaque, or that point at the container itself (`localhost`), don't resolve. Matching defaults with observed edges is still open. Secret-backed or imported variables are never treated as unset, and a name any container sets opaquely, or that a later `envFrom` Secret may override, is never treated as resolved. Each resolved value records the workload and container it came from. |
-| G7 | Messaging is modeled as service → broker | The release risk is producer → queue/topic → consumer | Queues and topics as dependency nodes |
+| G7 | Messaging channels (queues, topics, exchanges, message types) are typed nodes with producers and consumers, read from .NET (event bus, MassTransit, Azure Service Bus, RabbitMQ.Client) and Java (Spring Rabbit/Kafka, Spring Cloud Stream) code; Service Bus entities can be listed read-only from Azure | Go, Node, Python and Rust producers and consumers, Confluent/plain Kafka clients, Dapr and NServiceBus aren't read: their consumers are missing from the radius and nothing flags it | Readers for further languages and frameworks |
 | G8 | Contract analysis covers `.proto`, OpenAPI (local `$ref` only; `oneOf`/`anyOf` and external refs opaque) and C#/Java payload types of type-routed channels (`coordinator/contracts.py`, `core/proto_contract.py`, `core/openapi_contract.py`, `core/message_contract.py`) | HTTP APIs without an OpenAPI document in the repository, queue/topic payloads, JSON Schema and AsyncAPI stay unverified; OpenAPI client links are recorded for .NET `<OpenApiReference>` only | Add JSON Schema / AsyncAPI differs; record non-.NET client links (Go, Java, Node generated stubs) |
 | G9 | The agent bundle is a lab directory with fixed names | Every cluster differs | A versioned, parameterized bundle (namespaces, connection string) with documented known issues |
 | G10 | The backend runs as a single local process with no authentication | Shared and customer use | The security track: authentication, tenant isolation, webhook signatures, managed identity, and an allowlist of code-host organizations a tenant may name |
