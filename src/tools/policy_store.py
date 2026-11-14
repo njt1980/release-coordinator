@@ -35,6 +35,7 @@ from src.core.models import (
     TelemetryScope,
     normalize_api_server,
     normalize_component_ids,
+    normalize_workspace_ids,
     telemetry_scope_of,
 )
 from src.tools.baseline_store import BaselineScope
@@ -331,6 +332,9 @@ class ProjectPolicy(_StrictModel):
     when RUNTIME_TELEMETRY is a required source or runtime evidence must be
     live. Classic SDK and Azure Monitor Distro rows carry no cluster
     attribute, so components are their only scope (see ``TelemetryScope``).
+    ``telemetry_additional_workspaces`` are Log Analytics workspaces read
+    together with the onboarded one, in the same query, for estates whose
+    Application Insights components send to several workspaces.
 
     ``runtime_lookback_days`` is how far back every telemetry query reads.
     ``max_telemetry_age_minutes`` bounds how old the newest live row may be
@@ -355,6 +359,7 @@ class ProjectPolicy(_StrictModel):
     kubernetes_api_server: str = ""
     telemetry_cluster: TelemetryClusterFilter | None = None
     telemetry_components: list[str] = Field(default_factory=list)
+    telemetry_additional_workspaces: list[str] = Field(default_factory=list)
     runtime_lookback_days: int = Field(
         default=config.DEFAULT_RUNTIME_LOOKBACK_DAYS,
         ge=1,
@@ -375,6 +380,11 @@ class ProjectPolicy(_StrictModel):
     @classmethod
     def _normalize_components(cls, components: list[str]) -> list[str]:
         return normalize_component_ids(components)
+
+    @field_validator("telemetry_additional_workspaces")
+    @classmethod
+    def _normalize_workspaces(cls, workspaces: list[str]) -> list[str]:
+        return normalize_workspace_ids(workspaces)
 
     @property
     def telemetry_scope(self) -> TelemetryScope | None:

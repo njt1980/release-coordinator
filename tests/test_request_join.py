@@ -144,6 +144,7 @@ class RequestJoinParseTests(unittest.TestCase):
 class RequestJoinPipelineTests(unittest.TestCase):
     def test_extractor_reports_noise_with_other_drops(self) -> None:
         extractor = TelemetryExtractor.__new__(TelemetryExtractor)
+        extractor._additional_workspaces = []
         extractor._workspace_id = "ws"
         extractor._source = "azure"
         extractor._runtime_metrics = {}

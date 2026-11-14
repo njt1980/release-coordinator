@@ -39,6 +39,7 @@ def _table(rows: list[list[object]], columns: list[str] = COLUMNS) -> LogsTable:
 
 def _azure_extractor(response: object) -> TelemetryExtractor:
     extractor = TelemetryExtractor.__new__(TelemetryExtractor)
+    extractor._additional_workspaces = []
     extractor._workspace_id = "ws-1"
     extractor._source = "azure"
     extractor._runtime_metrics = {}
@@ -204,6 +205,7 @@ class AzureExtractorTests(unittest.TestCase):
 class MockSourceTests(unittest.TestCase):
     def test_mock_fixture_loads_as_success(self) -> None:
         extractor = TelemetryExtractor.__new__(TelemetryExtractor)
+        extractor._additional_workspaces = []
         extractor._source = "mock"
         extractor._runtime_metrics = {}
 

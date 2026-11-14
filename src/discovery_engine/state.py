@@ -31,7 +31,8 @@ class DiscoveryGraphState(TypedDict):
     commit each repository was read at. ``kubernetes_api_server`` is the API
     server the manifest scan read and ``telemetry_scope`` the scope (cluster
     filter, Application Insights components) the telemetry query applied;
-    both prove the ``cluster`` label.
+    both prove the ``cluster`` label. ``telemetry_additional_workspaces``
+    are the workspaces read with ``workspace_id``.
     ``static_coverage`` and ``pipeline_variables`` are recorded per scanned
     repository, ``kubernetes_shape`` per out-of-shape namespace object, and
     ``manifest_edges`` are dependencies the manifests declare (an
@@ -60,6 +61,7 @@ class DiscoveryGraphState(TypedDict):
     baseline_snapshot_id: str
     kubernetes_api_server: str
     telemetry_scope: TelemetryScope | None
+    telemetry_additional_workspaces: list[str]
     static_coverage: list[RepositoryCoverage]
     pipeline_variables: list[PipelineVariables]
     kubernetes_shape: list[ShapeFinding]

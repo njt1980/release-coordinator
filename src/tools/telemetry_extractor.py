@@ -7,6 +7,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, TypeAlias
 
 from azure.identity import DefaultAzureCredential
@@ -29,6 +30,7 @@ from src.core.models import (
     TargetDetail,
     TargetDetailKind,
     TelemetryScope,
+    normalize_workspace_ids,
 )
 from src.tools.telemetry_normalization import DropReason, normalize_edges, parse_target
 from src.tools._timeout import (
@@ -49,6 +51,7 @@ _NOISE_COLUMN = "Noise"
 _CALLEE_COLUMN = "Callee"
 _CALLEE_NAMESPACE_COLUMN = "CalleeNamespace"
 _RESOLVED_CALLS_COLUMN = "ResolvedCalls"
+_MAX_ITEM_COUNT_COLUMN = "MaxItemCount"
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 # OpenTelemetry resource attributes, as Application Insights stores them in
 # Properties: the workload's own name, and the Kubernetes namespace it runs
@@ -75,18 +78,26 @@ class _MockDependencyRecord(BaseModel):
 class TelemetryExtractor:
     """Read-only client boundary for telemetry-derived dependencies."""
 
-    def __init__(self, workspace_id: str) -> None:
-        """Bind the extractor to an explicit Log Analytics workspace.
+    def __init__(self, workspace_id: str, additional_workspaces: Sequence[str] = ()) -> None:
+        """Bind the extractor to explicit Log Analytics workspaces.
 
         Args:
             workspace_id: Log Analytics workspace ID that every query targets.
+            additional_workspaces: workspace IDs every dependency query also
+                reads, as one query (joins span them all).
 
         Raises:
-            ValueError: If workspace_id is blank or TELEMETRY_SOURCE is invalid.
+            ValueError: If workspace_id is blank, an additional workspace isn't
+                a workspace ID, or TELEMETRY_SOURCE is invalid.
         """
         if not workspace_id or not workspace_id.strip():
             raise ValueError("workspace_id is required")
         self._workspace_id = workspace_id.strip()
+        self._additional_workspaces = [
+            workspace
+            for workspace in normalize_workspace_ids(additional_workspaces)
+            if workspace != self._workspace_id.lower()
+        ]
 
         self._source = os.getenv("TELEMETRY_SOURCE", "mock").lower()
         if self._source not in {"mock", "azure"}:
@@ -95,6 +106,7 @@ class TelemetryExtractor:
         self._runtime_metrics: RuntimeMetrics = {}
         self._dropped_records: dict[str, int] = {}
         self._noise: Counter[str] = Counter()
+        self._sampling: dict[str, int] = {}
         self._credential: DefaultAzureCredential | None = None
         self._client: LogsQueryClient | None = None
         if self._source == "azure":
@@ -198,15 +210,32 @@ class TelemetryExtractor:
         ):
             return None
         try:
-            response = self._client.query_workspace(
-                self._workspace_id,
-                build_unscoped_query(days_back, scope),
-                timespan=timedelta(days=days_back),
+            return parse_unscoped_response(
+                self._query(build_unscoped_query(days_back, scope), days_back)
             )
-            return parse_unscoped_response(response)
         except Exception as error:
             logger.warning("Unscoped telemetry diagnostic failed: %s", error)
             return None
+
+    @property
+    def sampled_sources(self) -> dict[str, int]:
+        """Sources whose rows in the last query were sampled, with the largest ItemCount.
+
+        A row with ItemCount n stands for n calls; any n > 1 means the
+        source's telemetry is sampled, so rare calls may have no row.
+        """
+        return dict(self._sampling)
+
+    def _query(self, query: str, days_back: int) -> LogsQueryResult | LogsQueryPartialResult:
+        """Run a query over the bound workspaces."""
+        if self._client is None:
+            raise RuntimeError("Azure telemetry client was not initialized")
+        return self._client.query_workspace(
+            self._workspace_id,
+            query,
+            timespan=timedelta(days=days_back),
+            additional_workspaces=self._additional_workspaces or None,
+        )
 
     @property
     def dropped_records(self) -> dict[str, int]:
@@ -228,6 +257,7 @@ class TelemetryExtractor:
         mock_path = Path(__file__).resolve().parents[2] / "mock_telemetry.json"
         self._runtime_metrics = {}
         self._noise = Counter()
+        self._sampling = {}
         try:
             with mock_path.open(encoding="utf-8") as mock_file:
                 payload = json.load(mock_file)
@@ -306,20 +336,17 @@ class TelemetryExtractor:
         query = build_dependency_query(days_back, scope)
         self._runtime_metrics = {}
         self._noise = Counter()
+        self._sampling = {}
         try:
-            if self._client is None:
-                raise RuntimeError("Azure telemetry client was not initialized")
-            response = self._client.query_workspace(
-                self._workspace_id,
-                query,
-                timespan=timedelta(days=days_back),
-            )
+            response = self._query(query, days_back)
         except Exception as error:
             logger.exception("Failed to query active application dependencies")
             return DiscoveryResult[DependencyEdge].failed(
                 f"Telemetry query failed: {error}"
             )
-        return parse_dependency_response(response, self._runtime_metrics, self._noise)
+        return parse_dependency_response(
+            response, self._runtime_metrics, self._noise, self._sampling
+        )
 
 
 # How many unscoped source names the diagnostic returns at most.
@@ -432,7 +459,8 @@ def build_dependency_query(
     ``Kubernetes.Pod.Namespace``), and rows are kept apart by
     ``DependencyType`` so normalization can tell a messaging delivery from
     a call (see ``telemetry_normalization``). Calls are ``sum(ItemCount)``:
-    each sampled row stands for that many calls.
+    each sampled row stands for that many calls; ``MaxItemCount`` above 1
+    shows the source is sampled.
 
     Each (source, target, type) row also names the callees its calls
     reached: a request whose ``ParentId`` is the dependency's ``Id`` in the
@@ -475,11 +503,12 @@ def build_dependency_query(
         f"    {_CALLEE_COLUMN} = CalleeName, {_CALLEE_NAMESPACE_COLUMN} = CalleeNamespace;\n"
         "deps\n"
         f"| summarize LastObservedAt = max(TimeGenerated), {_CALLS_COLUMN} = sum(ItemCount),\n"
-        f"    {_FAILURES_COLUMN} = sumif(ItemCount, Success == false)\n"
+        f"    {_FAILURES_COLUMN} = sumif(ItemCount, Success == false), "
+        f"{_MAX_ITEM_COUNT_COLUMN} = max(ItemCount)\n"
         f"    by Source = SourceName, {_NAMESPACE_COLUMN} = SourceNamespace, Target, {_TYPE_COLUMN}, {_NOISE_COLUMN}\n"
         f"| join kind=leftouter (resolved) on Source, {_NAMESPACE_COLUMN}, Target, {_TYPE_COLUMN}\n"
         f"| project Source, {_NAMESPACE_COLUMN}, Target, {_TYPE_COLUMN}, {_NOISE_COLUMN}, "
-        f"LastObservedAt, {_CALLS_COLUMN}, {_FAILURES_COLUMN},\n"
+        f"LastObservedAt, {_CALLS_COLUMN}, {_FAILURES_COLUMN}, {_MAX_ITEM_COUNT_COLUMN},\n"
         f"    {_CALLEE_COLUMN}, {_CALLEE_NAMESPACE_COLUMN}, {_RESOLVED_CALLS_COLUMN}\n"
     )
 
@@ -564,6 +593,7 @@ def _parse_dependency_table(
     table: LogsTable,
     calls: dict[str, tuple[int, int]] | None = None,
     noise: Counter[str] | None = None,
+    sampling: dict[str, int] | None = None,
 ) -> tuple[list[DependencyEdge], list[str]]:
     """Parse one result table into edges and per-row errors.
 
@@ -572,7 +602,9 @@ def _parse_dependency_table(
     ``SourceNamespace`` column is optional; when present it qualifies the
     source (see ``source_reference``); the optional ``DependencyType``
     column is carried on the edge. The optional ``Calls`` and
-    ``Failures`` columns are summed per source into ``calls``.
+    ``Failures`` columns are summed per source into ``calls``, and the
+    largest optional ``MaxItemCount`` above 1 per source is kept in
+    ``sampling``.
 
     Each (source, target, type) yields an edge to the target address
     (``EdgeResolution.TARGET``); a row naming a ``Callee`` also yields an
@@ -619,6 +651,9 @@ def _parse_dependency_table(
                 continue
             row_calls = _count(row, index_of(_CALLS_COLUMN))
             row_failures = _count(row, index_of(_FAILURES_COLUMN))
+            item_count = _count(row, index_of(_MAX_ITEM_COUNT_COLUMN))
+            if sampling is not None and item_count > 1:
+                sampling[reference] = max(sampling.get(reference, 0), item_count)
             if first_sighting:
                 edges.append(_runtime_edge(reference, str(target), observed_at, dependency_type))
                 if calls is not None:
@@ -651,6 +686,7 @@ def parse_dependency_response(
     response: LogsQueryResult | LogsQueryPartialResult,
     metrics: RuntimeMetrics | None = None,
     noise: Counter[str] | None = None,
+    sampling: dict[str, int] | None = None,
 ) -> DiscoveryResult[DependencyEdge]:
     """Turn a ``query_workspace`` response into an explicit discovery result.
 
@@ -658,7 +694,8 @@ def parse_dependency_response(
     exposes ``partial_data`` and ``partial_error``. Partial responses keep
     whatever edges were returned but are marked PARTIAL, never SUCCESS.
     When ``metrics`` is given, per-source call metrics are written into it,
-    and when ``noise`` is given, rows marked as noise are counted in it.
+    when ``noise`` is given, rows marked as noise are counted in it, and
+    when ``sampling`` is given, sampled sources are recorded in it.
     """
     status = getattr(response, "status", None)
     errors: list[str] = []
@@ -687,7 +724,7 @@ def parse_dependency_response(
     parsed_tables = 0
     for table in tables:
         try:
-            table_edges, table_errors = _parse_dependency_table(table, calls, noise)
+            table_edges, table_errors = _parse_dependency_table(table, calls, noise, sampling)
         except ValueError as error:
             logger.error("Unusable telemetry result table: %s", error)
             errors.append(str(error))

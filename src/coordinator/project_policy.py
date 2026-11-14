@@ -86,6 +86,16 @@ def baseline_scope_issue(
             f"but the project policy requires {policy.telemetry_scope.describe()}. "
             "Re-run discovery."
         )
+    elif (
+        scan.telemetry_workspace_id
+        and scan.telemetry_additional_workspaces != policy.telemetry_additional_workspaces
+    ):
+        detail = (
+            f"Baseline snapshot {snapshot_id} read telemetry from additional workspaces "
+            f"{', '.join(scan.telemetry_additional_workspaces) or 'none'}, but the "
+            f"project policy lists "
+            f"{', '.join(policy.telemetry_additional_workspaces) or 'none'}. Re-run discovery."
+        )
     else:
         return None
     return EvidenceIssue(code=ReasonCode.BASELINE_SCOPE_MISMATCH, detail=detail)
@@ -404,13 +414,30 @@ def live_runtime_state(
         )
         return RuntimeEvidenceState.LIVE_UNCOVERED, (
             f"Every radius service must be seen within {minutes_allowed} minutes; not "
-            f"seen recently enough: {details}.{expired}{unscoped} Allow intentionally "
-            "quiet services under exemptions.silent_services."
+            f"seen recently enough: {details}.{expired}{unscoped}{_sampling_note(coverage)} "
+            "Allow intentionally quiet services under exemptions.silent_services."
             + (f" {_unobservable_detail(coverage)}" if coverage.unobservable_services else "")
         )
     if coverage.unobservable_services:
         return RuntimeEvidenceState.LIVE_UNOBSERVABLE, _unobservable_detail(coverage)
     return RuntimeEvidenceState.LIVE, ""
+
+
+# How many sampled sources an explanation names before summarizing.
+_SAMPLED_SOURCES_SHOWN = 5
+
+
+def _sampling_note(coverage: LiveCoverage) -> str:
+    """Say that sampled telemetry can miss a rarely called service, if it is sampled."""
+    if not coverage.sampled_sources:
+        return ""
+    ranked = sorted(coverage.sampled_sources.items(), key=lambda item: (-item[1], item[0]))
+    shown = ", ".join(f"{source} (1 row per up to {count} calls)" for source, count in ranked[:_SAMPLED_SOURCES_SHOWN])
+    more = len(ranked) - _SAMPLED_SOURCES_SHOWN
+    return (
+        f" This telemetry is sampled ({shown}{f', and {more} more' if more > 0 else ''}),"
+        " so a service called rarely can have no row in the window while working."
+    )
 
 
 def _unobservable_detail(coverage: LiveCoverage) -> str:

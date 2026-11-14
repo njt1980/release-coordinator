@@ -931,7 +931,10 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
 
     radius = _radius(state)
     policy = _policy(state)
-    extractor = TelemetryExtractor(workspace_id=workspace_id)
+    extractor = TelemetryExtractor(
+        workspace_id=workspace_id,
+        additional_workspaces=policy.telemetry_additional_workspaces if policy else (),
+    )
     result = extractor.get_active_dependencies(
         days_back=(
             policy.runtime_lookback_days if policy else config.DEFAULT_RUNTIME_LOOKBACK_DAYS
@@ -963,7 +966,9 @@ def validate_runtime_telemetry_node(state: ReleaseGraphState) -> dict[str, objec
         issues.extend(drift_issues)
     now = utc_now()
     blind = unobservable_protocols(graph.edges, radius) if graph is not None else {}
-    coverage = live_coverage(policy, observed, radius, now, blind)
+    coverage = live_coverage(policy, observed, radius, now, blind).model_copy(
+        update={"sampled_sources": extractor.sampled_sources}
+    )
     if coverage.uncovered_services and not is_mock and policy is not None:
         coverage = with_unscoped_sources(
             coverage,

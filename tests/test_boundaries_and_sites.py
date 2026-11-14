@@ -556,6 +556,7 @@ class UnscopedTelemetryTests(unittest.TestCase):
 
     def test_extractor_never_raises_and_skips_without_filter(self) -> None:
         extractor = TelemetryExtractor.__new__(TelemetryExtractor)
+        extractor._additional_workspaces = []
         extractor._source = "azure"
         extractor._workspace_id = "ws"
         extractor._client = MagicMock()

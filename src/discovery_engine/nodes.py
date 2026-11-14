@@ -334,7 +334,8 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
 
     policy = _project_policy(state)
     scope = policy.telemetry_scope if policy else None
-    extractor = TelemetryExtractor(workspace_id=workspace_id)
+    additional = list(policy.telemetry_additional_workspaces) if policy else []
+    extractor = TelemetryExtractor(workspace_id=workspace_id, additional_workspaces=additional)
     result = extractor.get_active_dependencies(
         days_back=policy.runtime_lookback_days if policy else NO_POLICY_LOOKBACK_DAYS,
         scope=scope,
@@ -349,6 +350,7 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
     return {
         "runtime_edges": list(result.items),
         "telemetry_scope": scope,
+        "telemetry_additional_workspaces": additional,
         "discovery_reports": _append_report(state, report),
     }
 
@@ -741,6 +743,7 @@ def scan_context(state: DiscoveryGraphState) -> ScanContext:
         kubernetes_api_server=state.get("kubernetes_api_server") or "",
         telemetry_cluster=scope.cluster if (scope := state.get("telemetry_scope")) else None,
         telemetry_components=list(scope.components) if scope else [],
+        telemetry_additional_workspaces=list(state.get("telemetry_additional_workspaces") or []),
     )
 
 
