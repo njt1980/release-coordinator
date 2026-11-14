@@ -652,12 +652,27 @@ class SharedLibrary(BaseModel):
     consumers: List[str] = Field(default_factory=list)
 
 
+class SharedFile(BaseModel):
+    """A file outside every service directory that services copy into their images.
+
+    ``path`` is repository-relative; ``consumers`` are the roots of the
+    services whose Dockerfiles ``copied_by`` copy it (``COPY``/``ADD``, see
+    ``tools.docker_copies``). Like a shared library's file, a change to it
+    changes each consumer.
+    """
+
+    path: str = Field(min_length=1)
+    consumers: List[str] = Field(default_factory=list)
+    copied_by: List[str] = Field(default_factory=list)
+
+
 class RepositoryCoverage(BaseModel):
     """Scan coverage for every service in one repository at one commit.
 
     ``unowned_source_files`` are source files outside every service
     directory and every consumed library (tooling, test projects); they
-    are reported, not read. ``libraries`` are the consumed shared libraries.
+    are reported, not read. ``libraries`` are the consumed shared libraries,
+    ``shared_files`` the files outside every service that Dockerfiles copy in.
     """
 
     repository: str = Field(min_length=1)
@@ -665,6 +680,7 @@ class RepositoryCoverage(BaseModel):
     services: List[ServiceCoverage] = Field(default_factory=list)
     unowned_source_files: List[str] = Field(default_factory=list)
     libraries: List[SharedLibrary] = Field(default_factory=list)
+    shared_files: List[SharedFile] = Field(default_factory=list)
 
 
 class PipelineVariables(BaseModel):

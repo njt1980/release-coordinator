@@ -8,6 +8,8 @@ root is the deepest directory containing the file, mirroring how discovery
 assigned source files to services. A file of a shared library (recorded in
 the baseline's ``static_coverage``) whose root is deeper than any service's
 belongs to every service consuming the library: its code ships in each.
+So does a file outside every service that their Dockerfiles copy into
+their images (``SharedFile``, for example a shared ``.proto``).
 Files no service owns, and files whose deepest owner is ambiguous, are
 reported instead of guessed.
 """
@@ -87,6 +89,12 @@ def _library_roots(
             segments = _segments(library.root)
             if segments is not None and library.consumers:
                 libraries.append((segments, library.consumers))
+        # A file Dockerfiles copy in from outside every service: its own
+        # path acts as a one-file library root.
+        for shared in record.shared_files:
+            segments = _segments(shared.path)
+            if segments is not None and shared.consumers:
+                libraries.append((segments, shared.consumers))
     return libraries
 
 

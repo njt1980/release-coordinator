@@ -39,7 +39,7 @@ const SOURCES = [
     color: "bg-indigo-500",
     reads: [
       "The default branch head, resolved to a commit; every file fetched pinned to it (429/503 retried, blobs cached by git object id).",
-      "Service boundaries from release-coord.yaml, else from Dockerfile, package.json or go.mod markers and runnable build projects (.csproj, pom.xml, build.gradle).",
+      "Service boundaries from release-coord.yaml, else from Dockerfile, package.json or go.mod markers and runnable build projects (.csproj, pom.xml, build.gradle). A file outside every service that Dockerfiles COPY in (a shared .proto, say) belongs to each service that copies it.",
       "Dependencies: literal URLs to in-cluster or private hosts; reads of address-like environment variables (*_ADDR, *_URL, *_HOST, ConnectionStrings__*) in Python, JS/TS, Go, Java, C#, PHP and Ruby; appsettings and Spring config keys; Dockerfile ENV; nginx and Envoy upstreams; Feign and Eureka names; gRPC <Protobuf> contract links.",
     ],
     flags: "Flagged instead of guessed: dynamic variable names and config keys, client addresses built at runtime, a client library with no address anywhere, external config servers, unsupported languages (C/C++, Kotlin, Rust, Elixir, Scala…).",
@@ -156,7 +156,6 @@ const INTENDED_USE_LIMITS = [
 const LIMITS = [
   "Verdicts are advisory; a named person decides. A pull request that changes code can't be approved automatically under the default strict contract scope.",
   "Contracts: only .proto files are compared, and client links are recorded for .NET builds only. OpenAPI and message schemas aren't read yet.",
-  "A shared file outside every service directory (for example a root-level .proto copied in by Dockerfiles) belongs to no service, so a pull request changing only it can't be assessed.",
   "Telemetry exported through the OpenTelemetry Collector's Azure Monitor exporter can carry span names instead of addresses as targets (gRPC, Redis, DNS); they show as unresolved unless the request join names the callee.",
   "Code from Azure DevOps and telemetry from Azure Monitor only; GitHub, GitLab and other telemetry backends need adapters.",
   "Messaging is modeled as service to broker, not producer to queue or topic to consumer.",
