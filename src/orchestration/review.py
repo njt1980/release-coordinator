@@ -39,6 +39,7 @@ from src.core.models import (
     ReasonCode,
     ServiceNode,
     merge_evidence_files,
+    merge_resolution,
     merge_target_details,
 )
 from src.core.review import (
@@ -301,6 +302,7 @@ def _union(first: DependencyEdge, second: DependencyEdge) -> DependencyEdge:
             "protocol": first.protocol or second.protocol,
             "evidence_files": merge_evidence_files(first.evidence_files, second.evidence_files),
             "target_details": merge_target_details(first.target_details, second.target_details),
+            "resolution": merge_resolution(first.resolution, second.resolution),
             "direction_uncertain": first.direction_uncertain and second.direction_uncertain,
         }
     )
