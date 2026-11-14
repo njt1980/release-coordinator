@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 from src.assistant.chat import (
     Assistant,
+    AssistantDisabledError,
     AssistantUnavailableError,
     ChatContext,
     ChatTurn,
@@ -53,6 +54,8 @@ async def chat(request: ChatRequest) -> ChatTurn:
         return await run_in_threadpool(
             ASSISTANT.ask, request.message, request.context, request.conversation_id
         )
+    except AssistantDisabledError as error:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=str(error)) from error
     except AssistantUnavailableError as error:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
     except anthropic.RateLimitError as error:

@@ -29,6 +29,7 @@ from anthropic.types.beta import (
 )
 from pydantic import BaseModel, Field
 
+from src.core.redaction import redact
 from src.assistant.tools import AssistantTools
 
 DEFAULT_MODEL: Final[str] = "claude-opus-5-5"
@@ -100,6 +101,10 @@ class AssistantUnavailableError(RuntimeError):
     """The assistant can't reach Claude (e.g. no API credentials)."""
 
 
+class AssistantDisabledError(RuntimeError):
+    """The project's policy keeps its data from the external model."""
+
+
 class Assistant:
     """Runs conversations against the Messages API with read-only tools."""
 
@@ -144,14 +149,21 @@ class Assistant:
         """Answer ``question``, calling tools as needed, and remember the turn.
 
         Raises:
+            AssistantDisabledError: the project's policy turns external AI off.
             AssistantUnavailableError: no credentials, or authentication failed.
             anthropic.APIError: other API failures (rate limits, outages).
         """
+        if not self._tools.external_ai_allowed(context.tenant, context.project_id):
+            raise AssistantDisabledError(
+                f"External AI is turned off for project {context.tenant}/{context.project_id} "
+                "(policy external_ai: false), so the assistant can't answer about it."
+            )
         conversation_id, messages = self._history(conversation_id)
         where = f"Context: the user is on the {context.page or 'app'} page, project " \
             f"{context.tenant}/{context.project_id}" + (
                 f", looking at run {context.run_id}" if context.run_id else ""
             ) + "."
+        question = redact(question).text
         messages.append({"role": "user", "content": [{"type": "text", "text": f"{where}\n\n{question}"}]})
         used: list[ToolUse] = []
         response: BetaMessage | None = None

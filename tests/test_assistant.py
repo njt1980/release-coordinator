@@ -79,7 +79,9 @@ class ToolTests(unittest.TestCase):
         self.runs = RunLogStore()
         self.runs.start("run-1", "assessment", "Assess PR-1", "acme", "shop")
         self.runs.add("run-1", EventDraft(stage="Verdict", status=RunEventStatus.BLOCKED, message="Not approved: DISCOVERY_GAP."))
-        self.assessments = {"run-1": MagicMock(model_dump=lambda **_: {"status": "completed"})}
+        self.assessments = {
+            "run-1": MagicMock(tenant="acme", project_id="shop", model_dump=lambda **_: {"status": "completed"})
+        }
         self.tools = AssistantTools(
             baselines=self.baselines,
             policies=PolicyStore(policies),

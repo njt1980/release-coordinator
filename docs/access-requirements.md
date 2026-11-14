@@ -145,6 +145,25 @@ before falling back to the developer's `az login`.
 - `ANTHROPIC_API_KEY` in `.env` (gitignored). Without it the risk model
   can't be consulted and the Ask panel says it isn't configured.
 - The assistant uses `claude-opus-5-5` unless `ASSISTANT_MODEL` is set.
+- **What leaves the platform:** the advisory risk review sends the pull
+  request's title, description and diff with the assessment context (service
+  names, dependencies, telemetry summary); the assistant sends the user's
+  question and the platform records its tools read (no source code). Both go
+  to Anthropic's Claude API, which processes them as a sub-processor; list it
+  in the customer's data-processing records.
+- **Redaction:** everything sent is redacted first (`src/core/redaction.py`):
+  private keys, credentials in URLs, known token shapes (Anthropic, GitHub,
+  AWS, Slack, JWT, bearer, Azure SAS signatures), connection-string secrets,
+  values assigned to `*key*`/`*secret*`/`*token*`/`*password*` names, and
+  e-mail addresses become `[redacted:<kind>]`. Counts per kind are recorded
+  on the assessment (`advisory_redactions`). The patterns find well-known
+  shapes, not every secret.
+- **Per-project switch:** `external_ai: false` in the project policy keeps
+  the project's data from the model: no advisory risk review (the
+  assessment says `ADVISORY_DISABLED` and is never approved automatically; a
+  person decides) and the assistant neither answers on that project nor
+  returns its data from other pages. Default `true`. A project whose policy
+  can't be read is treated as `false` by the assistant.
 
 ## Lab setup (2026-11-13)
 

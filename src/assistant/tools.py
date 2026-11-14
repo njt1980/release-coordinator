@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.core.reason_explanations import REASON_EXPLANATIONS
 from src.core.models import ReasonCode, ServiceIdentity
+from src.core.redaction import redact
 from src.orchestration.run_log import DEFAULT_RUN_LOGS, RunLogStore
 from src.tools.baseline_store import (
     PATH_SEGMENT_PATTERN,
@@ -159,8 +160,32 @@ class AssistantTools:
             )
         return definitions
 
+    def external_ai_allowed(self, tenant: str, project_id: str) -> bool:
+        """Whether the project's data may be sent to the external model.
+
+        A project without a policy may (the platform default); a project
+        whose policy can't be read may not (it may say no).
+        """
+        try:
+            return self._policies.load(BaselineScope(tenant=tenant, project_id=project_id)).policy.external_ai
+        except PolicyMissingError:
+            return True
+        except (PolicyInvalidError, OSError, ValueError):
+            return False
+
+    def _refusal(self, tenant: str, project_id: str) -> str:
+        return (
+            f"External AI is turned off for project {tenant}/{project_id} (policy external_ai: "
+            "false); its data is not sent to the model."
+        )
+
     def run(self, name: str, raw_input: Any) -> tuple[str, bool]:
-        """Run tool ``name``; returns (result text, is_error)."""
+        """Run tool ``name``; returns (result text, is_error).
+
+        Data of a project whose policy turns external AI off is never
+        returned; every result is redacted (``core.redaction``) before it
+        goes to the model.
+        """
         spec = self.specs().get(name)
         if spec is None:
             return f"Unknown tool {name!r}.", True
@@ -169,10 +194,14 @@ class AssistantTools:
             arguments = model.model_validate(raw_input)
         except ValidationError as error:
             return f"Invalid input: {error}", True
+        tenant, project_id = getattr(arguments, "tenant", None), getattr(arguments, "project_id", None)
+        if tenant and project_id and not self.external_ai_allowed(tenant, project_id):
+            return self._refusal(tenant, project_id), True
         try:
-            return handler(arguments), False
+            text = handler(arguments)
         except (OSError, ValueError, LookupError) as error:
-            return f"{name} failed: {error}", True
+            return redact(f"{name} failed: {error}").text, True
+        return redact(text).text, False
 
     # --- handlers ---------------------------------------------------------
 
@@ -250,13 +279,21 @@ class AssistantTools:
         )
 
     def list_runs(self, arguments: NoInput) -> str:
-        return _json([summary.model_dump(mode="json") for summary in self._runs.summaries()])
+        return _json(
+            [
+                summary.model_dump(mode="json")
+                for summary in self._runs.summaries()
+                if self.external_ai_allowed(summary.tenant, summary.project_id)
+            ]
+        )
 
     def run_log(self, arguments: RunInput) -> str:
         found = self._runs.get(arguments.run_id)
         if found is None:
             raise LookupError(f"no run {arguments.run_id!r} (logs are cleared on restart)")
         summary, events = found
+        if not self.external_ai_allowed(summary.tenant, summary.project_id):
+            raise LookupError(self._refusal(summary.tenant, summary.project_id))
         return _json(
             {
                 "run": summary.model_dump(mode="json"),
@@ -277,6 +314,9 @@ class AssistantTools:
         record = self._find_assessment(arguments.run_id) if self._find_assessment else None
         if record is None:
             raise LookupError(f"no PR assessment {arguments.run_id!r} (cleared on restart)")
+        tenant, project_id = getattr(record, "tenant", None), getattr(record, "project_id", None)
+        if tenant and project_id and not self.external_ai_allowed(tenant, project_id):
+            raise LookupError(self._refusal(tenant, project_id))
         return _json(record.model_dump(mode="json", exclude={"evidence_report"}))
 
     def explain_reason(self, arguments: ReasonInput) -> str:

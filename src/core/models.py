@@ -1674,10 +1674,15 @@ class ReasonCode(str, Enum):
     REVIEW_UNAVAILABLE: the project's dependency review answers couldn't be
         read, so dependencies a coordinator declared may be missing from
         the deployment order.
+    ADVISORY_DISABLED: the evidence is complete, but the project policy
+        keeps its data from the external model (``external_ai: false``), so
+        no advisory risk review was made and nothing is approved
+        automatically; a person decides.
 
-    Every code except MODEL_REJECTED makes the assessment non-actionable: the
-    evidence is insufficient to rely on the verdict, which is different from
-    a fully evidenced verdict that the release is too risky.
+    Every code except MODEL_REJECTED and ADVISORY_DISABLED makes the
+    assessment non-actionable: the evidence is insufficient to rely on the
+    verdict, which is different from a fully evidenced verdict that the
+    release is too risky or that a person must judge.
     """
 
     BASELINE_UNAVAILABLE = "BASELINE_UNAVAILABLE"
@@ -1699,11 +1704,12 @@ class ReasonCode(str, Enum):
     IDENTITY_UNLINKED = "IDENTITY_UNLINKED"
     RUNTIME_UNOBSERVABLE = "RUNTIME_UNOBSERVABLE"
     REVIEW_UNAVAILABLE = "REVIEW_UNAVAILABLE"
+    ADVISORY_DISABLED = "ADVISORY_DISABLED"
 
     @property
     def limits_actionability(self) -> bool:
         """Whether this reason makes the assessment ineligible for operational use."""
-        return self is not ReasonCode.MODEL_REJECTED
+        return self not in (ReasonCode.MODEL_REJECTED, ReasonCode.ADVISORY_DISABLED)
 
 
 class IssueSubjectKind(str, Enum):
@@ -1877,6 +1883,8 @@ class AssessmentEvidence(BaseModel):
     review: Optional[AssessmentReview] = None
     # Regulated services this PR touches (see RegulatedImpact).
     regulated_impact: List[RegulatedImpact] = Field(default_factory=list)
+    # What was redacted, per kind, from what the advisory model was sent.
+    advisory_redactions: Dict[str, int] = Field(default_factory=dict)
 
 
 class ReleaseAssessment(BaseModel):

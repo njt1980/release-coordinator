@@ -11,6 +11,7 @@ import os
 import anthropic
 from pydantic import BaseModel, Field
 
+from src.core.redaction import redact
 from src.core import config
 from src.core.models import (
     ContractChange,
@@ -153,20 +154,26 @@ class RiskReasoner:
             or config.DEFAULT_RISK_REASONER_MODEL
         )
         self._client = client or anthropic.Anthropic()
+        self.last_redactions: dict[str, int] = {}
 
     def assess(self, request: RiskAssessmentRequest) -> RiskAssessment:
         """Return a validated risk assessment for the request.
+
+        Everything sent is redacted first (``core.redaction``); what was
+        removed is counted in ``last_redactions``.
 
         Raises:
             RiskReasoningError: If the model refuses or the output cannot be
                 parsed.
             anthropic.APIError: On API, authentication, or network failures.
         """
+        redacted = redact(_render_request(request))
+        self.last_redactions = redacted.counts
         response = self._client.beta.messages.parse(
             model=self._model,
             max_tokens=_MAX_TOKENS,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": _render_request(request)}],
+            messages=[{"role": "user", "content": redacted.text}],
             output_config={"effort": "high"},
             output_format=RiskAssessment,
             betas=[_FALLBACK_BETA],

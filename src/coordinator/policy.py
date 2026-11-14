@@ -90,6 +90,7 @@ def decide_release(
     issues: list[EvidenceIssue],
     plan: DeploymentPlan,
     advisory: RiskAssessment | None,
+    advisory_disabled: bool = False,
 ) -> ReleaseVerdict:
     """Return the final policy verdict.
 
@@ -98,18 +99,31 @@ def decide_release(
     actionable only when no reason code limits actionability; a model
     rejection over complete evidence is still actionable.
 
+    With ``advisory_disabled`` (the policy keeps the project's data from the
+    external model) a release whose evidence is complete is not approved
+    (ADVISORY_DISABLED) but stays actionable: a person decides.
+
     Raises:
         ValueError: if ``advisory`` is missing although ``needs_model`` says
-            the model had to be consulted.
+            the model had to be consulted and it isn't disabled.
     """
-    if advisory is None and needs_model(issues, plan):
+    disabled = advisory is None and advisory_disabled and needs_model(issues, plan)
+    if advisory is None and needs_model(issues, plan) and not disabled:
         raise ValueError("an advisory assessment is required for this release")
     codes =[issue.code for issue in issues] + plan_reason_codes(plan)
     if advisory is not None and not advisory.approved:
         codes.append(ReasonCode.MODEL_REJECTED)
+    if disabled:
+        codes.append(ReasonCode.ADVISORY_DISABLED)
     codes = _unique(codes)
     if issues:
         justification = _evidence_rejection(issues)
+    elif disabled:
+        justification = (
+            "Not approved automatically: the evidence is complete, but the project policy keeps "
+            "its data from the external model (external_ai: false), so no advisory risk review "
+            "was made. A person decides."
+        )
     elif advisory is None:
         justification = _cycle_rejection(plan)
     else:
