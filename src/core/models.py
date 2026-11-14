@@ -935,6 +935,29 @@ class ScanContext(BaseModel):
         )
 
 
+class TargetDetailKind(str, Enum):
+    """What a ``TargetDetail`` names behind an edge's target host.
+
+    APP_COMPONENT: the Application Insights component (``cid-v1:<appId>``)
+        the callee reports to, as the classic SDK records for calls into
+        another instrumented service.
+    RESOURCE: a named resource the host serves: a database, a queue, a
+        topic, an event hub or a container.
+    """
+
+    APP_COMPONENT = "app_component"
+    RESOURCE = "resource"
+
+
+class TargetDetail(BaseModel):
+    """One named thing behind a telemetry target's host (see ``TargetDetailKind``)."""
+
+    kind: TargetDetailKind
+    name: str = Field(min_length=1)
+
+    model_config = {"frozen": True}
+
+
 class DependencyEdge(BaseModel):
     """A directed, evidence-backed relationship between two service nodes.
 
@@ -963,6 +986,11 @@ class DependencyEdge(BaseModel):
     answer can be anchored to it. Empty when no file is the evidence
     (telemetry, Kubernetes environment); None in snapshots written before
     it was recorded.
+
+    ``target_details`` are the named things telemetry reported behind the
+    target host (the database, queue or Application Insights component
+    of ``server | db``, ``sb://ns/ | queue`` or ``host | cid-v1:<appId>``),
+    sorted and unique. None when no telemetry row named any.
     """
 
     source_service_id: str
@@ -976,6 +1004,14 @@ class DependencyEdge(BaseModel):
     direction_uncertain: bool = False
     protocol: str | None = None
     evidence_files: List[str] | None = None
+    target_details: List[TargetDetail] | None = None
+
+    @field_validator("target_details")
+    @classmethod
+    def _sorted_unique_details(
+        cls, details: List[TargetDetail] | None
+    ) -> List[TargetDetail] | None:
+        return merge_target_details(details, None)
 
     @field_validator("evidence_files")
     @classmethod
@@ -994,6 +1030,20 @@ class DependencyEdge(BaseModel):
     def is_mock_fixture(self) -> bool:
         """Whether any of this edge's evidence comes from a mock fixture."""
         return MOCK_FIXTURE_PROVENANCE in self.provenance.split(LABEL_SEPARATOR)
+
+
+def merge_target_details(
+    first: List[TargetDetail] | None, second: List[TargetDetail] | None
+) -> List[TargetDetail] | None:
+    """Union two edges' target details, sorted; None when neither recorded any.
+
+    Edges updated with ``model_copy`` skip validation, so every writer of
+    ``target_details`` goes through here to keep them sorted and unique.
+    """
+    merged = {*(first or []), *(second or [])}
+    if not merged:
+        return None
+    return sorted(merged, key=lambda detail: (detail.kind.value, detail.name))
 
 
 def merge_evidence_files(

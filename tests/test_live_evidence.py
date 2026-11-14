@@ -21,7 +21,10 @@ from src.coordinator.project_policy import (
     live_coverage,
     live_runtime_state,
 )
+from src.discovery_engine.nodes import _merge_edge
 from src.core.models import (
+    TargetDetail,
+    TargetDetailKind,
     ContractChange,
     DependencyEdge,
     DiscoveryMethod,
@@ -136,6 +139,15 @@ class NormalizationTests(unittest.TestCase):
             "order-service": "order-service",
             "[2001:db8::1]:8080": "[2001:db8::1]:8080",
             "nodeport-svc:32767": "nodeport-svc:32767",
+            # Application Insights writes details after " | " (topic 03, 2026-11-14).
+            "basket-api | cid-v1:7f3c0000-aaaa": "basket-api",
+            "tcp:sql.database.windows.net,1433 | orders": "sql.database.windows.net:1433",
+            "sqlhost\\SQLEXPRESS | orders": "sqlhost",
+            "sb://bus.servicebus.windows.net/ | orders": "bus.servicebus.windows.net",
+            "localhost | orders": DropReason.LOOPBACK,
+            " | orders": DropReason.NO_HOST,
+            # A service named like a SqlClient protocol keeps its host.
+            "admin:8080": "admin:8080",
         }
         for target, expected in cases.items():
             with self.subTest(target=target):
@@ -153,6 +165,41 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertEqual([e.target_service_id for e in kept], ["rabbitmq:5672"])
         self.assertEqual(dropped, {"no_host": 1, "loopback": 1, "reversed_delivery": 2})
+
+    def test_app_insights_details_travel_on_the_edge(self) -> None:
+        kept, dropped = normalize_edges(
+            [
+                _edge("shop/order", "basket-api | cid-v1:7f3c", dependency_type="Http (tracked component)"),
+                _edge("shop/order", "tcp:sql.example.net,1433 | orders", dependency_type="SQL"),
+                _edge("shop/order", "sb://bus.servicebus.windows.net/ | orders", dependency_type="Azure Service Bus"),
+                _edge("shop/order", "bus.servicebus.windows.net/payments", dependency_type="Microsoft.ServiceBus"),
+                # An HTTP path is not an entity.
+                _edge("shop/order", "ledger:8080/api/v1", dependency_type="HTTP"),
+            ]
+        )
+        self.assertEqual(dropped, {})
+        component = TargetDetail(kind=TargetDetailKind.APP_COMPONENT, name="7f3c")
+        orders = TargetDetail(kind=TargetDetailKind.RESOURCE, name="orders")
+        payments = TargetDetail(kind=TargetDetailKind.RESOURCE, name="payments")
+        self.assertEqual(
+            [(e.target_service_id, e.target_details) for e in kept],
+            [
+                ("basket-api", [component]),
+                ("sql.example.net:1433", [orders]),
+                ("bus.servicebus.windows.net", [orders]),
+                ("bus.servicebus.windows.net", [payments]),
+                ("ledger:8080", None),
+            ],
+        )
+
+    def test_merged_edges_union_target_details(self) -> None:
+        orders = TargetDetail(kind=TargetDetailKind.RESOURCE, name="orders")
+        payments = TargetDetail(kind=TargetDetailKind.RESOURCE, name="payments")
+        first = _edge("shop/order", "bus").model_copy(update={"target_details": [payments]})
+        second = _edge("shop/order", "bus").model_copy(update={"target_details": [orders, payments]})
+        merged = _merge_edge(first, second)
+        self.assertEqual(merged.target_details, [orders, payments])
+        self.assertIsNone(_merge_edge(_edge("a", "b"), _edge("a", "b")).target_details)
 
     def test_high_port_calls_are_kept_and_qualified(self) -> None:
         kept, dropped = normalize_edges(
