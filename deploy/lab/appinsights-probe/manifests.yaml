@@ -1,0 +1,211 @@
+# Application Insights probe: .NET services on the two telemetry stacks a
+# .NET estate typically runs, to record real AppDependencies/AppRequests rows
+# (see README.md). ${PROBE_REGISTRY} and ${PROBE_TAG} are filled in by apply.sh;
+# Secret "probe" comes from create-secrets.sh.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: appinsights-probe
+---
+# The classic SDK's Kubernetes enricher reads its own pod and owners.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: probe-enricher
+  namespace: appinsights-probe
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: probe-enricher
+  namespace: appinsights-probe
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [replicasets, deployments]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: probe-enricher
+  namespace: appinsights-probe
+subjects:
+  - kind: ServiceAccount
+    name: probe-enricher
+    namespace: appinsights-probe
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: probe-enricher
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mssql
+  namespace: appinsights-probe
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: mssql}}
+  template:
+    metadata: {labels: {app: mssql}}
+    spec:
+      containers:
+        - name: mssql
+          image: mcr.microsoft.com/mssql/server:2022-CU16-ubuntu-22.04
+          env:
+            - {name: ACCEPT_EULA, value: "Y"}
+            - {name: MSSQL_PID, value: Developer}
+            - name: MSSQL_SA_PASSWORD
+              valueFrom: {secretKeyRef: {name: probe, key: sa-password}}
+          ports: [{containerPort: 1433}]
+          resources:
+            requests: {cpu: 200m, memory: 2Gi}
+            limits: {memory: 2560Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: mssql, namespace: appinsights-probe}
+spec:
+  selector: {app: mssql}
+  ports: [{port: 1433, targetPort: 1433}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: appinsights-probe
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: gateway}}
+  template:
+    metadata: {labels: {app: gateway}}
+    spec:
+      containers:
+        - name: gateway
+          image: ${PROBE_REGISTRY}/appinsights-probe/gateway:${PROBE_TAG}
+          env:
+            - {name: OTEL_SERVICE_NAME, value: gateway}
+            - {name: ORDERS_URL, value: "http://orders"}
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              valueFrom: {secretKeyRef: {name: probe, key: appinsights-a}}
+          ports: [{containerPort: 8080}]
+          readinessProbe: {tcpSocket: {port: 8080}}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 384Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: gateway, namespace: appinsights-probe}
+spec:
+  selector: {app: gateway}
+  ports: [{port: 80, targetPort: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+  namespace: appinsights-probe
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: orders}}
+  template:
+    metadata: {labels: {app: orders}}
+    spec:
+      serviceAccountName: probe-enricher
+      containers:
+        - name: orders
+          image: ${PROBE_REGISTRY}/appinsights-probe/orders:${PROBE_TAG}
+          env:
+            - {name: INVENTORY_URL, value: "http://inventory"}
+            - {name: ORDERS_QUEUE, value: orders}
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              valueFrom: {secretKeyRef: {name: probe, key: appinsights-b}}
+            - name: SERVICEBUS_CONNECTION
+              valueFrom: {secretKeyRef: {name: probe, key: servicebus}}
+            - name: SA_PASSWORD
+              valueFrom: {secretKeyRef: {name: probe, key: sa-password}}
+            - name: ConnectionStrings__Orders
+              value: "Server=tcp:mssql,1433;Database=orders;User Id=sa;Password=$(SA_PASSWORD);TrustServerCertificate=True"
+          ports: [{containerPort: 8080}]
+          readinessProbe: {tcpSocket: {port: 8080}}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 384Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: orders, namespace: appinsights-probe}
+spec:
+  selector: {app: orders}
+  ports: [{port: 80, targetPort: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory
+  namespace: appinsights-probe
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: inventory}}
+  template:
+    metadata: {labels: {app: inventory}}
+    spec:
+      serviceAccountName: probe-enricher
+      containers:
+        - name: inventory
+          image: ${PROBE_REGISTRY}/appinsights-probe/inventory:${PROBE_TAG}
+          env:
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              valueFrom: {secretKeyRef: {name: probe, key: appinsights-a}}
+          ports: [{containerPort: 8080}]
+          readinessProbe: {tcpSocket: {port: 8080}}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 384Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: inventory, namespace: appinsights-probe}
+spec:
+  selector: {app: inventory}
+  ports: [{port: 80, targetPort: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fulfillment
+  namespace: appinsights-probe
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: fulfillment}}
+  template:
+    metadata: {labels: {app: fulfillment}}
+    spec:
+      containers:
+        - name: fulfillment
+          image: ${PROBE_REGISTRY}/appinsights-probe/fulfillment:${PROBE_TAG}
+          env:
+            - {name: OTEL_SERVICE_NAME, value: fulfillment}
+            - {name: INVENTORY_URL, value: "http://inventory"}
+            - {name: ORDERS_QUEUE, value: orders}
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              valueFrom: {secretKeyRef: {name: probe, key: appinsights-a}}
+            - name: SERVICEBUS_CONNECTION
+              valueFrom: {secretKeyRef: {name: probe, key: servicebus}}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 384Mi}}
+---
+# One order every 2 seconds: enough rows to study, well under the 0.2 GB daily caps.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic
+  namespace: appinsights-probe
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: traffic}}
+  template:
+    metadata: {labels: {app: traffic}}
+    spec:
+      containers:
+        - name: traffic
+          image: curlimages/curl:8.11.1
+          command: [sh, -c, "while true; do curl -s -o /dev/null -m 10 http://gateway/place; sleep 2; done"]
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 32Mi}}
