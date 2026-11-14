@@ -20,6 +20,7 @@ from src.core.models import (
     UnresolvedEntity,
     UnresolvedEntityKind,
 )
+from src.core.telemetry_capability import wire_protocol
 from src.core.service_ids import (
     IdentityContext,
     IdentityIndex,
@@ -232,3 +233,33 @@ def target_context(source_id: str, context: IdentityContext) -> IdentityContext:
     except ValueError:
         return context
     return context.in_namespace(source.namespace)
+
+
+def reference_protocol(
+    reference: str,
+    index: IdentityIndex,
+    context: IdentityContext,
+    environments: dict[str, ServiceEnvironment],
+    pipelines: Mapping[str, PipelineVariables] | None,
+    configs: Mapping[str, ServiceStaticConfig] | None,
+) -> str | None:
+    """The wire protocol an ``env:`` reference's resolved address names.
+
+    None for anything else, or when the address has no scheme (a bare host,
+    a connection string's server).
+    """
+    parsed = parse_env_var_reference(reference)
+    if parsed is None:
+        return None
+    service_name, variable = parsed
+    owner = resolve_reference(service_name, index, context)
+    if owner is None:
+        return None
+    resolution = resolve_variable(
+        variable,
+        configs.get(owner.uri) if configs is not None else None,
+        environments.get(owner.uri),
+        pipelines.get(owner.uri) if pipelines is not None else None,
+    )
+    return wire_protocol(resolution.endpoint) if resolution.endpoint else None
+

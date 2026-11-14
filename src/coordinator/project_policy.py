@@ -8,11 +8,12 @@ check is an ``EvidenceIssue`` whose reason code limits actionability, so
 the advisory model is not consulted and the release is not approved.
 """
 
-from collections.abc import Collection, Iterable
-from datetime import datetime, timedelta, timezone
+from collections.abc import Collection, Iterable, Mapping
+from datetime import date, datetime, timedelta, timezone
 
 from src.core import config
 from src.core.models import (
+    DependencyEdge,
     DiscoveryMethod,
     DiscoveryStageReport,
     DiscoveryStatus,
@@ -29,6 +30,7 @@ from src.core.models import (
     UnresolvedEntityKind,
 )
 from src.core.service_ids import classify_unresolved, host_of
+from src.core.telemetry_capability import BEYLA, TelemetryCapability
 from src.tools.policy_store import ProjectPolicy, RuntimeEvidenceRequirement
 
 _ACCEPTED_RUNTIME: dict[RuntimeEvidenceRequirement, frozenset[RuntimeEvidenceState]] = {
@@ -169,6 +171,15 @@ def runtime_evidence_issue(
     policy's runtime evidence requirement; ``why`` explains the state."""
     if state in _ACCEPTED_RUNTIME[policy.runtime_evidence]:
         return None
+    if state is RuntimeEvidenceState.LIVE_UNOBSERVABLE:
+        return EvidenceIssue(
+            code=ReasonCode.RUNTIME_UNOBSERVABLE,
+            detail=(
+                f"The project policy requires {policy.runtime_evidence.value} runtime "
+                "evidence, but some radius services talk only protocols the telemetry "
+                "can't see." + (f" {why}" if why else "")
+            ),
+        )
     return EvidenceIssue(
         code=ReasonCode.REQUIRED_SOURCE_MISSING,
         detail=(
@@ -199,11 +210,45 @@ def _live_window(policy: ProjectPolicy | None) -> timedelta:
     )
 
 
+def unobservable_protocols(
+    edges: Iterable[DependencyEdge],
+    services: Collection[str],
+    capability: TelemetryCapability = BEYLA,
+) -> dict[str, list[str]]:
+    """Radius services the telemetry can't see, with the protocols why.
+
+    A service is unobservable when it has dependencies (as caller or
+    callee) and every one is provably outside ``capability``: its address
+    names a protocol the telemetry can't parse, or one whose version is
+    unknown (``amqp://``), and telemetry never observed it. An edge whose
+    protocol is unknown because no address scheme was seen (a bare host)
+    proves nothing, so it keeps the service observable: it stays uncovered
+    if unseen.
+    """
+    protocols: dict[str, set[str]] = {}
+    observable: set[str] = set()
+    for edge in edges:
+        for service in (edge.source_service_id, edge.target_service_id):
+            if service not in services:
+                continue
+            seen = DiscoveryMethod.RUNTIME_TELEMETRY in edge.discovery_methods
+            if seen or edge.protocol is None or capability.can_observe(edge.protocol):
+                observable.add(service)
+            else:
+                protocols.setdefault(service, set()).add(edge.protocol)
+    return {
+        service: sorted(found)
+        for service, found in sorted(protocols.items())
+        if service not in observable
+    }
+
+
 def live_coverage(
     policy: ProjectPolicy | None,
     observed: Collection[ObservedEdge],
     radius: Collection[str],
     now: datetime,
+    blind: Mapping[str, list[str]] | None = None,
 ) -> LiveCoverage:
     """Describe, service by service, how live telemetry covers the radius.
 
@@ -213,7 +258,12 @@ def live_coverage(
     silent-service entry may allow it: always without ``max_quiet_days``,
     or when it was seen within that many days. Anything else is uncovered,
     so one busy service can't make a quiet one look fresh.
+
+    A service in ``blind`` (see ``unobservable_protocols``) that wasn't seen
+    is unobservable instead: no silent allowance applies to it, only an
+    active ``exemptions.unobservable`` entry for each of its protocols.
     """
+    blind = blind or {}
     last_seen: dict[str, datetime] = {}
     for edge in observed:
         edge_seen = _utc(edge.last_observed_at)
@@ -226,10 +276,16 @@ def live_coverage(
     silent: list[str] = []
     uncovered: list[str] = []
     expired: list[str] = []
+    unobservable: dict[str, list[str]] = {}
+    accepted: dict[str, list[str]] = {}
     for service in sorted(radius):
         seen_at = last_seen.get(service)
         if seen_at is not None and now - seen_at <= window:
             observed_services.append(service)
+            continue
+        if service in blind:
+            covered = all(_unobservable_allowed(policy, p, today, expired) for p in blind[service])
+            (accepted if covered else unobservable)[service] = blind[service]
             continue
         rule = policy.silent_service_rule(_namespaced_name(service)) if policy else None
         if rule is not None and not rule.is_active(today):
@@ -247,8 +303,20 @@ def live_coverage(
         uncovered_services=uncovered,
         silent_services=silent,
         service_last_seen=last_seen,
-        expired_exemptions=expired,
+        expired_exemptions=sorted(set(expired)),
+        unobservable_services=unobservable,
+        accepted_unobservable=accepted,
     )
+
+
+def _unobservable_allowed(
+    policy: ProjectPolicy | None, protocol: str, today: date, expired: list[str]
+) -> bool:
+    rule = policy.unobservable_rule(protocol) if policy else None
+    if rule is not None and not rule.is_active(today):
+        expired.append(f"unobservable protocol {protocol}")
+        return False
+    return rule is not None
 
 
 def _unscoped_name_matches(source: str, service_name: str) -> bool:
@@ -343,8 +411,24 @@ def live_runtime_state(
             f"Every radius service must be seen within {minutes_allowed} minutes; not "
             f"seen recently enough: {details}.{expired}{unscoped} Allow intentionally "
             "quiet services under exemptions.silent_services."
+            + (f" {_unobservable_detail(coverage)}" if coverage.unobservable_services else "")
         )
+    if coverage.unobservable_services:
+        return RuntimeEvidenceState.LIVE_UNOBSERVABLE, _unobservable_detail(coverage)
     return RuntimeEvidenceState.LIVE, ""
+
+
+def _unobservable_detail(coverage: LiveCoverage) -> str:
+    services = "; ".join(
+        f"{service} ({', '.join(protocols)})"
+        for service, protocols in sorted(coverage.unobservable_services.items())
+    )
+    return (
+        "The configured telemetry can't see these services' protocols, so not seeing "
+        f"them proves nothing: {services}. Instrument them (OpenTelemetry or Application "
+        "Insights auto-instrumentation), or accept the blind spot per protocol under "
+        "exemptions.unobservable after checking their dependencies by hand."
+    )
 
 
 def is_normalized_relative_path(path: str) -> bool:

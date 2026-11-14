@@ -96,6 +96,12 @@ _REASONS: Final[dict[ReasonCode, tuple[str, str]]] = {
         "Changed files belong to no registered service and aren't exempt.",
         "Declare the service in release-coord.yaml, or exempt the path in the policy.",
     ),
+    ReasonCode.RUNTIME_UNOBSERVABLE: (
+        "Live evidence is required, but a radius service talks only protocols the telemetry "
+        "can't see (e.g. AMQP 0-9-1, Azure Service Bus), so not seeing it proves nothing.",
+        "Instrument the service (OpenTelemetry or Application Insights auto-instrumentation), "
+        "or accept the protocol under exemptions.unobservable with a reason and expiry.",
+    ),
     ReasonCode.IDENTITY_UNLINKED: (
         "A service in the radius exists in source code but matches no running service, so "
         "its runtime calls and callers are unknown.",

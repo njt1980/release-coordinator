@@ -177,7 +177,16 @@ removed. Every other variable is recorded by name only.
    optionally `max_quiet_days` (it must still be seen within that many
    days). Otherwise it is
    `live_empty`, `live_stale` or `live_uncovered`, and a policy requiring
-   live evidence blocks with the reason. An observed edge in the radius
+   live evidence blocks with the reason. A service that is unseen and whose
+   every dependency uses a protocol the telemetry can't parse is
+   **unobservable**, not quiet (`live_unobservable`, `RUNTIME_UNOBSERVABLE`).
+   The lab's Beyla sees HTTP/1.1, HTTP/2, gRPC, Redis, PostgreSQL, MySQL,
+   SQL Server, MongoDB, Kafka, NATS and MQTT. It does not see AMQP 0-9-1
+   (RabbitMQ.Client, Spring AMQP, MassTransit) or AMQP over TLS (Azure
+   Service Bus), and `amqp://` doesn't say which AMQP version a client
+   speaks. A silent-service allowance never applies to an unobservable
+   service; `exemptions.unobservable` accepts one protocol at a time, with a
+   reason and `expires_on`. An observed edge in the radius
    that the baseline lacks means the baseline no longer describes the
    system (drift).
 6. **Sequence**: order the deployment deterministically. For an additive
@@ -224,6 +233,7 @@ policy (G19) is required before anyone else's data goes through it.
 | `BASELINE_DRIFT` | Live telemetry shows an edge in the radius that the baseline lacks |
 | `REVISION_UNVERIFIED` | The PR's commits can't be verified: missing, base not an ancestor of head, changed files that don't match the commits, no `source_control` in the policy, or the head couldn't be scanned |
 | `BASELINE_REVISION_MISMATCH` | Commits between the baseline's scanned revision and the PR's base change the release, the two have diverged, or the baseline predates recorded container environments |
+| `RUNTIME_UNOBSERVABLE` | Live evidence is required, but a radius service talks only protocols the telemetry can't see, so not seeing it proves nothing; accepted per protocol only through `exemptions.unobservable` |
 | `IDENTITY_UNLINKED` | A service in the radius exists in source code but matches no running service by name (or by name up to case and `-_.` separators, unique on both sides); near names are offered as a question, never applied |
 | `DEPENDENCY_CYCLE` | No safe deployment order exists |
 | `COMPATIBILITY_UNVERIFIED` | No evidence that the contract change is compatible |
