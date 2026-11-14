@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import DecisionPanel from "../components/DecisionPanel.jsx";
 import EgoGraph from "../components/EgoGraph.jsx";
 import Nav from "../components/Nav.jsx";
-import { ROUTES } from "../lib/router.js";
+import { ROUTES, href } from "../lib/router.js";
+import { openObservability } from "./Observability.jsx";
 
 const REFRESH_MS = 3000;
 const API = "/api/v1/webhooks";
@@ -87,7 +88,7 @@ function Advisory({ advisory }) {
   );
 }
 
-function Group({ group, number }) {
+function Group({ group, number, scope }) {
   const rank = RANKS[group.rank] ?? RANKS.info;
   return (
     <li className="rounded-xl bg-white p-4 ring-1 ring-slate-200">
@@ -133,6 +134,17 @@ function Group({ group, number }) {
           </ul>
         </div>
       )}
+      {group.root_key === "info:observability" && scope && (
+        <p className="mt-3 text-sm">
+          <a
+            href={href(ROUTES.observability)}
+            onClick={() => openObservability(scope)}
+            className="font-medium text-brand-600 hover:text-brand-700"
+          >
+            See the whole project's telemetry gaps →
+          </a>
+        </p>
+      )}
       {group.policy_draft && (
         <details className="mt-3">
           <summary className="cursor-pointer text-xs font-medium text-brand-600 hover:text-brand-700">
@@ -161,7 +173,7 @@ function Group({ group, number }) {
   );
 }
 
-function Briefing({ jobId }) {
+function Briefing({ jobId, scope }) {
   const [briefing, setBriefing] = useState(null);
   const [error, setError] = useState(null);
 
@@ -209,7 +221,7 @@ function Briefing({ jobId }) {
             <ol className="mt-3 space-y-3">
               {groups.map((group) => {
                 number += 1;
-                return <Group key={group.root_key} group={group} number={number} />;
+                return <Group key={group.root_key} group={group} number={number} scope={scope} />;
               })}
             </ol>
           </section>
@@ -496,6 +508,10 @@ export default function Assessments() {
             >
               {selected ? (
                 <Briefing
+                  scope={(() => {
+                    const item = (items ?? []).find((i) => i.job_id === selected);
+                    return item?.tenant ? { tenant: item.tenant, projectId: item.project_id } : null;
+                  })()}
                   key={`${selected}:${(items ?? []).find((i) => i.job_id === selected)?.status ?? ""}`}
                   jobId={selected}
                 />

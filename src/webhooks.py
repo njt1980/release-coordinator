@@ -126,10 +126,16 @@ class PrAssessmentJob(BaseModel):
 
 
 class PrAssessmentSummary(BaseModel):
-    """One PR assessment in a list: enough to choose which to open."""
+    """One PR assessment in a list: enough to choose which to open.
+
+    ``tenant`` and ``project_id`` are the project it was assessed for, so a
+    page can link to that project's other views (e.g. the telemetry gaps).
+    """
 
     job_id: str
     pr_id: str
+    tenant: str = config.DEFAULT_TENANT
+    project_id: str = config.DEFAULT_PROJECT_ID
     status: AssessmentJobStatus
     headline: str = ""
     decisions_needed: int = 0
@@ -480,6 +486,8 @@ def list_pr_assessments() -> list[PrAssessmentSummary]:
         PrAssessmentSummary(
             job_id=record.job_id,
             pr_id=record.pr_id,
+            tenant=record.tenant,
+            project_id=record.project_id,
             status=record.status,
             headline=record.briefing.headline if record.briefing else "",
             decisions_needed=record.briefing.decisions_needed if record.briefing else 0,

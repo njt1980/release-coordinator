@@ -6,6 +6,7 @@ import Runs from "./pages/Runs.jsx";
 import Assessments from "./pages/Assessments.jsx";
 import Review from "./pages/Review.jsx";
 import Inventory from "./pages/Inventory.jsx";
+import Observability from "./pages/Observability.jsx";
 import AskPanel from "./components/AskPanel.jsx";
 import { FocusContext } from "./lib/focus.js";
 import { ROUTES, useRoute } from "./lib/router.js";
@@ -18,6 +19,7 @@ const PAGES = {
   [ROUTES.assessments]: { component: Assessments, title: "Assessments · Release Coordinator", name: "assessments" },
   [ROUTES.review]: { component: Review, title: "Dependency review · Release Coordinator", name: "dependency review" },
   [ROUTES.inventory]: { component: Inventory, title: "Inventory · Release Coordinator", name: "inventory" },
+  [ROUTES.observability]: { component: Observability, title: "Telemetry · Release Coordinator", name: "telemetry" },
 };
 
 export default function App() {

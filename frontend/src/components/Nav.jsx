@@ -19,6 +19,7 @@ const LINKS = [
   { path: ROUTES.home, label: "Overview", wide: true },
   { path: ROUTES.howItWorks, label: "How it works", wide: true },
   { path: ROUTES.inventory, label: "Inventory" },
+  { path: ROUTES.observability, label: "Telemetry" },
   { path: ROUTES.review, label: "Review" },
   { path: ROUTES.assessments, label: "Assessments" },
   { path: ROUTES.runs, label: "Runs" },
