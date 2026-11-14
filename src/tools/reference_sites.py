@@ -14,7 +14,10 @@ Recognized, per language the scanner reads:
   Java: ``getProperty(name)``) and dynamic environment names
   (``os.getenv(name)``, ``process.env[name]``, ``os.Getenv(name)``,
   ``Environment.GetEnvironmentVariable(name)``, ``System.getenv(name)``,
-  ``ENV[name]``). Interpolated strings are dynamic.
+  ``ENV[name]``). Interpolated strings are dynamic. An environment name
+  the same file fixes to literals is followed instead (a loop over a
+  literal list, a file-local wrapper called only with literals; see
+  ``followed_env_reads``).
 - Client addresses (C#: ``BaseAddress = ...``, ``Address = new Uri(...)``,
   ``GrpcChannel.ForAddress(...)``; Java: ``baseUrl(...)``,
   ``WebClient.create(...)``, ``RestClient.create(...)``, ``rootUri(...)``,
@@ -192,6 +195,138 @@ def _key_calls(suffix: str) -> tuple[tuple[re.Pattern[str], OpaqueReferenceKind]
     return ()
 
 
+# A string literal (no escapes across quotes), captured.
+_STRING_LITERAL: Final[str] = r"""(?:"([^"\\\n]*)"|'([^'\\\n]*)')"""
+_LITERAL_LIST: Final[re.Pattern[str]] = re.compile(
+    rf"^\s*(?:{_STRING_LITERAL}\s*,\s*)*(?:{_STRING_LITERAL}\s*,?\s*)?$"
+)
+# Loops binding ``{var}`` to each element of a collection named ``coll``.
+_LOOP_HEADERS: Final[tuple[str, ...]] = (
+    r"\bfor\s*\(\s*(?:final\s+)?[\w<>\[\]?]+\s+{var}\s*:\s*(?P<coll>[\w.]+)\s*\)",  # Java
+    r"\bforeach\s*\(\s*[\w<>\[\]?]+\s+{var}\s+in\s+(?P<coll>[\w.]+)\s*\)",  # C#
+    r"\bfor\s+{var}\s+in\s+(?P<coll>[\w.]+)\s*:",  # Python
+    r"\bfor\s+\w+\s*,\s*{var}\s*:=\s*range\s+(?P<coll>[\w.]+)",  # Go
+    r"\bfor\s*\(\s*(?:const|let|var)\s+{var}\s+of\s+(?P<coll>[\w.]+)\s*\)",  # JavaScript
+    r"(?P<coll>[\w.]+)\.forEach\(\s*(?:function\s*)?\(?\s*{var}\b",  # JavaScript
+    r"\bforeach\s*\(\s*\$?(?P<coll>[\w.]+)\s+as\s+\${var}\s*\)",  # PHP
+)
+# Function declarations: (pattern, group holding the modifiers or None).
+_FUNCTION_DECLARATIONS: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(
+        r"(?P<mods>(?:\b(?:private|public|protected|internal|static|final|function)\s+)*)"
+        r"[\w<>\[\]?]*\s+(?P<fn>\w+)\s*\((?P<params>[^()]*)\)\s*(?:throws[^{;]*)?\{"
+    ),
+    re.compile(r"\bdef\s+(?P<fn>\w+)\s*\((?P<params>[^()]*)\)"),
+    re.compile(r"\bfunc\s+(?:\([^()]*\)\s*)?(?P<fn>\w+)\s*\((?P<params>[^()]*)\)"),
+    re.compile(r"\bfunction\s+(?P<fn>\w+)\s*\((?P<params>[^()]*)\)"),
+    re.compile(r"\b(?:const|let|var)\s+(?P<fn>\w+)\s*=\s*\((?P<params>[^()]*)\)\s*=>"),
+)
+
+
+class FollowedEnvRead(BaseModel):
+    """An environment read through a name the same file fixes to a literal.
+
+    The read itself takes a variable, but every value that variable can
+    take is a literal in the file: a loop over a literal list of names, or
+    a file-local wrapper whose every call passes a literal name.
+    ``default`` is the literal a wrapper call passes as its fallback.
+    """
+
+    name: str = Field(min_length=1)
+    default: str | None = None
+
+
+def _literal_list(content: str, collection: str) -> list[str] | None:
+    """The string literals a collection is initialized with, if it holds only literals."""
+    name = re.escape(collection.rsplit(".", 1)[-1])
+    for match in re.finditer(rf"\b{name}\b[^=;\n(){{}}]*=\s*", content):
+        rest = content[match.end(): match.end() + 4000]
+        opening = re.match(r"(?:new\s+[\w<>\[\]]+\s*|\[\]\w+\s*|(?:List|Set|Arrays)\.(?:of|asList)\s*|array\s*)?([\[{(])", rest)
+        if opening is None:
+            continue
+        body = _argument(rest, opening.end(), "")
+        literal = _LITERAL_LIST.match(body)
+        if literal is None:
+            return None
+        return [a or b for a, b in re.findall(_STRING_LITERAL, body)]
+    return None
+
+
+def _loop_names(content: str, variable: str, position: int) -> list[str] | None:
+    """Names a loop variable takes when the nearest loop over it iterates a literal list."""
+    nearest: re.Match[str] | None = None
+    for header in _LOOP_HEADERS:
+        for match in re.finditer(header.format(var=re.escape(variable)), content[:position]):
+            if nearest is None or match.start() > nearest.start():
+                nearest = match
+    return _literal_list(content, nearest.group("coll")) if nearest else None
+
+
+def _file_local(declaration: re.Match[str], content: str, suffix: str) -> bool:
+    """Whether a function is visibly callable only from its own file."""
+    name = declaration.group("fn")
+    modifiers = declaration.groupdict().get("mods") or ""
+    if suffix in (".java", ".cs", ".php"):
+        return "private" in modifiers
+    if suffix == ".go":
+        return name[:1].islower()
+    if suffix in _JAVASCRIPT_SUFFIXES:
+        return not re.search(rf"\bexport\b[^\n]*\b{name}\b|\bexports\.{name}\b|module\.exports\b[^;]*\b{name}\b", content)
+    return name.startswith("_")
+
+
+def _wrapper_calls(content: str, variable: str, position: int, suffix: str) -> list[FollowedEnvRead] | None:
+    """Literal calls of the file-local function whose parameter ``variable`` is read."""
+    nearest: re.Match[str] | None = None
+    for pattern in _FUNCTION_DECLARATIONS:
+        for match in pattern.finditer(content[:position]):
+            if re.search(rf"\b{re.escape(variable)}\b", match.group("params")) and (
+                nearest is None or match.start() > nearest.start()
+            ):
+                nearest = match
+    if nearest is None or not _file_local(nearest, content, suffix):
+        return None
+    reads: list[FollowedEnvRead] = []
+    # Unqualified (or this./self.) calls: System.getenv( is not the wrapper.
+    for call in re.finditer(rf"(?<![\w$.>])(?:this\.|self\.|\$this->)?{re.escape(nearest.group('fn'))}\s*\(", content):
+        if nearest.start("fn") <= call.start() < nearest.end() or _in_comment(content, call.start()):
+            continue
+        arguments = _argument(content, call.end(), "")
+        literals = re.match(rf"^\s*{_STRING_LITERAL}\s*(?:,\s*(?:{_STRING_LITERAL})?)?", arguments)
+        if literals is None:
+            return None
+        first, second = literals.group(1) or literals.group(2), literals.group(3) or literals.group(4)
+        reads.append(FollowedEnvRead(name=first, default=second))
+    return reads or None
+
+
+def _followed(content: str, argument: str, position: int, suffix: str) -> list[FollowedEnvRead] | None:
+    """The literal names a dynamic environment read takes, or None if not all are known."""
+    identifier = _IDENTIFIER.match(argument.lstrip("$"))
+    if identifier is None:
+        return None
+    variable = identifier.group("name")
+    names = _loop_names(content, variable, position)
+    if names is not None:
+        return [FollowedEnvRead(name=name) for name in names]
+    return _wrapper_calls(content, variable, position, suffix)
+
+
+def followed_env_reads(content: str, path: str) -> list[FollowedEnvRead]:
+    """Environment reads through a variable whose every value is a literal
+    in the same file (see ``FollowedEnvRead``), in order of appearance."""
+    suffix = os.path.splitext(path)[1].lower()
+    reads: list[FollowedEnvRead] = []
+    for pattern, kind in _key_calls(suffix):
+        if kind is not OpaqueReferenceKind.DYNAMIC_ENV_NAME:
+            continue
+        for match in pattern.finditer(content):
+            argument = _argument(content, match.end())
+            if argument and not _LITERAL.match(argument) and not _in_comment(content, match.start()):
+                reads.extend(_followed(content, argument, match.start(), suffix) or [])
+    return list({(read.name, read.default): read for read in reads}.values())
+
+
 def _dynamic_key_sites(content: str, suffix: str) -> list[OpaqueReferenceSite]:
     sites: list[OpaqueReferenceSite] = []
     for pattern, kind in _key_calls(suffix):
@@ -199,8 +334,11 @@ def _dynamic_key_sites(content: str, suffix: str) -> list[OpaqueReferenceSite]:
             if _in_comment(content, match.start()):
                 continue
             argument = _argument(content, match.end())
-            if argument and not _LITERAL.match(argument):
-                sites.append(OpaqueReferenceSite(line=_line(content, match.start()), kind=kind))
+            if not argument or _LITERAL.match(argument):
+                continue
+            if kind is OpaqueReferenceKind.DYNAMIC_ENV_NAME and _followed(content, argument, match.start(), suffix):
+                continue
+            sites.append(OpaqueReferenceSite(line=_line(content, match.start()), kind=kind))
     return sites
 
 

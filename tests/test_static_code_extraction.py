@@ -146,11 +146,37 @@ class InferServiceBoundariesTests(unittest.TestCase):
         )
 
     def test_a_src_directory_is_named_after_its_parent(self) -> None:
-        self.assertEqual(self._inferred(["/src/cart/src/Dockerfile"]), [])  # too deep for a marker
+        # A nested Dockerfile under a grouping directory is a boundary.
+        self.assertEqual(self._inferred(["/src/cart/src/Dockerfile"]), [("cart", "src/cart/src")])
         boundaries = devops_extractor._boundary_directory_name
         self.assertEqual(boundaries(["src", "cartservice", "src"]), "cartservice")
         self.assertEqual(boundaries(["src"]), "src")
         self.assertIsNone(boundaries([]))
+
+    def test_nested_dockerfiles_are_boundaries_unless_inside_another(self) -> None:
+        self.assertEqual(
+            self._inferred(["/src/accounts/contacts/Dockerfile", "/src/accounts/userservice/Dockerfile", "/src/frontend/Dockerfile"]),
+            [("frontend", "src/frontend"), ("contacts", "src/accounts/contacts"), ("userservice", "src/accounts/userservice")],
+        )
+        # Inside an existing service (generated code, a sidecar image) it is not.
+        self.assertEqual(
+            self._inferred(["/src/checkout/go.mod", "/src/checkout/genproto/Dockerfile"]),
+            [("checkout", "src/checkout")],
+        )
+        # Outside a grouping directory, or under tooling, it is not.
+        self.assertEqual(self._inferred(["/deploy/elk/kibana/Dockerfile"]), [])
+        self.assertEqual(self._inferred(["/src/a/scripts/Dockerfile"]), [])
+
+    def test_an_envoy_config_outside_deployment_directories_is_a_boundary(self) -> None:
+        self.assertEqual(
+            self._inferred(
+                [
+                    "/src/ApiGateways/Envoy/config/webshopping/envoy.yaml",
+                    "/deploy/k8s/helm/apigwws/envoy.yaml",
+                ]
+            ),
+            [("webshopping", "src/ApiGateways/Envoy/config/webshopping")],
+        )
 
     def test_files_belong_to_the_deepest_boundary(self) -> None:
         boundaries = devops_extractor._infer_service_boundaries(

@@ -41,6 +41,7 @@ from src.core.env_names import (
     endpoint_of_value,
     is_endpoint_variable,
     is_loopback_endpoint,
+    names_host,
 )
 from src.core.service_ids import env_var_reference, host_of, is_private_dns_host
 from src.tools.build_projects import (
@@ -55,6 +56,7 @@ from src.tools.build_projects import (
     unresolved_sites,
 )
 from src.tools.client_libraries import client_libraries, manifest_ecosystem
+from src.tools.proxy_configs import ProxyRead, is_envoy_config, proxy_upstreams, template_suffix
 from src.tools.config_readers import (
     ConfigFileKind,
     ConfigParseError,
@@ -63,6 +65,7 @@ from src.tools.config_readers import (
     dockerfile_environment,
     dotnet_code_bindings,
     dotnet_settings_bindings,
+    env_binding,
     env_default_bindings,
     feign_client_services,
     fill_placeholder_defaults,
@@ -77,6 +80,7 @@ from src.tools.reference_sites import (
     BoundSection,
     bound_sections,
     external_config_sites,
+    followed_env_reads,
     opaque_reference_sites,
     unbound_section_sites,
 )
@@ -163,6 +167,11 @@ _TEST_FILE_PATTERN: Final[re.Pattern[str]] = re.compile(
 # marker file (a Dockerfile for a local Prometheus, CI images...).
 _TOOLING_DIRECTORY_NAMES: Final[frozenset[str]] = frozenset(
     {".devcontainer", ".github", "docker", "hack", "scripts"}
+)
+# Directories holding deployment configuration (charts, manifests), whose
+# copies of a proxy configuration are not a service of their own.
+_DEPLOYMENT_DIRECTORY_NAMES: Final[frozenset[str]] = frozenset(
+    {"charts", "deploy", "deployment", "deployments", "helm", "k8s", "kubernetes", "manifests"}
 )
 # Build output only inside a .NET project directory (Express keeps real
 # source in bin/www).
@@ -519,7 +528,7 @@ def classify_path(path: str, dotnet_roots: Collection[str] = frozenset()) -> Fil
         return FileClass.NOT_SOURCE
     if filename == ".env" or filename.startswith(".env.") or filename == "dockerfile":
         return FileClass.SCANNED
-    suffix = os.path.splitext(filename)[1]
+    suffix = template_suffix(filename) or os.path.splitext(filename)[1]
     if suffix in _TEXT_FILE_SUFFIXES:
         return FileClass.SCANNED
     if suffix in _UNSUPPORTED_SOURCE_SUFFIXES:
@@ -575,6 +584,32 @@ def _marker_boundary_root(
     return None
 
 
+def _nested_boundary_root(path: str, dotnet_roots: Collection[str]) -> list[str] | None:
+    """Return the directory a deeper marker makes a candidate boundary, or None.
+
+    A Dockerfile anywhere under a grouping directory
+    (``src/accounts/contacts/Dockerfile``), and an Envoy configuration
+    anywhere outside deployment directories (a gateway run from the stock
+    Envoy image has no code of its own). Candidates inside another
+    boundary are dropped by ``_infer_service_boundaries``.
+    """
+    segments = _path_segments(path)
+    if len(segments) < 2:
+        return None
+    directory = segments[:-1]
+    lowered = [segment.lower() for segment in directory]
+    if _in_excluded_directory(directory, dotnet_roots) or any(
+        name in _TOOLING_DIRECTORY_NAMES or name in _DEPLOYMENT_DIRECTORY_NAMES for name in lowered
+    ):
+        return None
+    filename = segments[-1].lower()
+    if filename == "dockerfile" and lowered[0] in _SERVICE_CONTAINER_DIRECTORIES:
+        return directory
+    if is_envoy_config(filename):
+        return directory
+    return None
+
+
 def _service_project_roots(
     file_paths: list[str], projects: list[BuildProject], dotnet_roots: Collection[str]
 ) -> dict[str, list[str]]:
@@ -610,7 +645,9 @@ def _infer_service_boundaries(
 
     Markers are a Dockerfile, package.json or go.mod at a shallow depth
     (see ``_marker_boundary_root``) and service build projects at any depth
-    (see ``_service_project_roots``). A marker at the repository root names
+    (see ``_service_project_roots``). Deeper Dockerfiles and Envoy
+    configurations (see ``_nested_boundary_root``) are boundaries only
+    when no other boundary contains them or lies inside them. A marker at the repository root names
     the service after the repository; any other boundary is named after its
     directory (a ``src`` directory after its parent, as ``cart/src``).
     Directories whose name cannot become a DNS label are skipped. A root
@@ -621,6 +658,7 @@ def _infer_service_boundaries(
     project_roots = _service_project_roots(file_paths, projects or [], dotnet_roots)
     boundaries: dict[str, ServiceBoundary] = {}
     root_markers: set[str] = set()
+    nested: list[list[str]] = []
     for path in file_paths:
         directory = _marker_boundary_root(path, dotnet_roots)
         if directory == []:
@@ -628,6 +666,9 @@ def _infer_service_boundaries(
         if directory is None:
             directory = project_roots.get(path.lstrip("/"))
         if directory is None:
+            candidate = _nested_boundary_root(path, dotnet_roots)
+            if candidate is not None:
+                nested.append(candidate)
             continue
         root = "/".join(directory)
         if root in boundaries:
@@ -641,6 +682,16 @@ def _infer_service_boundaries(
         )
     if "" in boundaries and root_markers == {"package.json"} and len(boundaries) > 1:
         del boundaries[""]
+    for directory in sorted(nested, key=len):
+        root = "/".join(directory)
+        others = [_path_segments(other) for other in boundaries if other]
+        if root in boundaries or any(
+            directory[: len(other)] == other or other[: len(directory)] == directory for other in others
+        ):
+            continue
+        name = _dns_label(_boundary_directory_name(directory) or repo_name)
+        if name is not None:
+            boundaries[root] = ServiceBoundary(name=name, root=root, source=BoundarySource.MARKER)
     return list(boundaries.values())
 
 
@@ -786,8 +837,10 @@ def read_source_file(content: str, service_name: str, path: str) -> FileRead:
     runtime environment may override, never a fixed edge. A Dockerfile
     contributes its image ``ENV``. Code contributes literal URLs and
     environment reads (a URL that is only a read's default is that
-    default, not a separate edge), C# IConfiguration and Spring reads, and
-    ``@FeignClient`` service names.
+    default, not a separate edge), C# IConfiguration and Spring reads,
+    ``@FeignClient`` service names, environment reads through names the
+    file fixes to literals (``followed_env_reads``) and, for an nginx or
+    Envoy configuration, its upstreams (see ``proxy_configs``).
 
     Raises:
         ConfigParseError: if a framework configuration file can't be parsed.
@@ -816,6 +869,15 @@ def read_source_file(content: str, service_name: str, path: str) -> FileRead:
     bindings = env_default_bindings(content, relative)
     suffix = os.path.splitext(path)[1].lower()
     references = _extract_references(content, service_name, path)
+    for read in followed_env_reads(content, path):
+        binding = env_binding(read.name, read.default, relative)
+        if binding is not None:
+            bindings.append(binding)
+            references.append(
+                EndpointReference(
+                    service_name=service_name, endpoint=read.name, file_path=path, kind=ReferenceKind.ENV_VAR
+                )
+            )
     if suffix == ".cs":
         bindings.extend(dotnet_code_bindings(content, relative))
     elif suffix == ".java":
@@ -824,6 +886,9 @@ def read_source_file(content: str, service_name: str, path: str) -> FileRead:
             EndpointReference(service_name=service_name, endpoint=f"lb://{name}", file_path=path)
             for name in feign_client_services(content)
         )
+    proxy = proxy_upstreams(content, path)
+    if proxy is not None:
+        references.extend(_proxy_references(proxy, service_name, path))
     code_defaults = {default.template for binding in bindings for default in binding.defaults}
     references = [
         reference
@@ -832,11 +897,59 @@ def read_source_file(content: str, service_name: str, path: str) -> FileRead:
         or endpoint_of_value(reference.endpoint) not in code_defaults
     ]
     return FileRead(
-        references=references,
+        references=_unique_references(references),
         bindings=bindings,
-        sites=opaque_reference_sites(content, path),
+        sites=opaque_reference_sites(content, path)
+        + (proxy.sites if proxy is not None else [])
+        + (_unfollowed_proxy_variables(proxy, content) if proxy is not None else []),
         sections=bound_sections(content, path),
     )
+
+
+def _proxy_references(proxy: ProxyRead, service_name: str, path: str) -> list[EndpointReference]:
+    """References for a proxy configuration's upstreams (see ``proxy_configs``)."""
+    references = [
+        EndpointReference(service_name=service_name, endpoint=url, file_path=path)
+        for url in proxy.urls
+        if not _is_noise_endpoint(url)
+    ]
+    references.extend(
+        EndpointReference(service_name=service_name, endpoint=name, file_path=path, kind=ReferenceKind.ENV_VAR)
+        for name in proxy.variables
+        if names_host(name)
+    )
+    return references
+
+
+def _unfollowed_proxy_variables(proxy: ProxyRead, content: str) -> list[OpaqueReferenceSite]:
+    """Upstream hosts from a variable whose name doesn't say it holds a host.
+
+    Resolution only reads a bare host from host-named variables
+    (``names_host``), so any other name can't be followed.
+    """
+    return [
+        OpaqueReferenceSite(
+            line=_line_of(content, f"${{{name}}}"), kind=OpaqueReferenceKind.CLIENT_ADDRESS_EXPRESSION
+        )
+        for name in proxy.variables
+        if not names_host(name)
+    ]
+
+
+def _line_of(content: str, needle: str) -> int:
+    position = content.find(needle)
+    return content.count("\n", 0, position) + 1 if position >= 0 else 1
+
+
+def _unique_references(references: list[EndpointReference]) -> list[EndpointReference]:
+    seen: set[tuple[ReferenceKind, str]] = set()
+    unique: list[EndpointReference] = []
+    for reference in references:
+        key = (reference.kind, reference.endpoint)
+        if key not in seen:
+            seen.add(key)
+            unique.append(reference)
+    return unique
 
 
 def _default_is_dependency(template: str) -> bool:

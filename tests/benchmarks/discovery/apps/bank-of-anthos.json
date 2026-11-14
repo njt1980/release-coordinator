@@ -1,6 +1,6 @@
 {
  "app": "bank-of-anthos",
- "split": "held_out",
+ "split": "tuned",
  "upstream": "https://github.com/GoogleCloudPlatform/bank-of-anthos",
  "gt_source": "kubernetes-manifests/*.yaml (service-api-config, *-db-config ConfigMaps) cross-checked against call sites in src/frontend/frontend.py, ledgerwriter LedgerWriterController.java and the README architecture diagram (docs/img/architecture.png).",
  "repos": [

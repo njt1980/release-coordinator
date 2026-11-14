@@ -346,6 +346,52 @@ EVENT_BUS = _binding(
 )
 
 
+class BareHostDefaultTests(unittest.TestCase):
+    """Host-named variables may default to a bare host (robot-shop style)."""
+
+    def test_host_named_reads_keep_a_bare_host_default(self) -> None:
+        code = """
+            const catalogueHost = process.env.CATALOGUE_HOST || 'catalogue';
+            CART = os.getenv('CART_HOST', 'cart')
+            r = os.environ.get('REDIS_HOST') or 'redis'
+            $dsn = getenv('PDO_URL') ?: 'mysql:host=mysql;dbname=ratings';
+            ENDPOINT = os.getenv('CART_ENDPOINT', 'cart:8080')
+            PATH = os.getenv('ORDERS_URL', 'orders')
+        """
+        bindings = {b.variable: [d.template for d in b.defaults] for b in env_default_bindings(code, "x")}
+        self.assertEqual(
+            bindings,
+            {
+                "CATALOGUE_HOST": ["catalogue"],
+                "CART_HOST": ["cart"],
+                "REDIS_HOST": ["redis"],
+                "PDO_URL": ["mysql"],
+                "CART_ENDPOINT": ["cart:8080"],
+                # A *_URL value needs a scheme: a bare word is no address.
+                "ORDERS_URL": [],
+            },
+        )
+
+    def test_go_fallback_after_an_environment_read(self) -> None:
+        code = 'h, ok := os.LookupEnv("AMQP_HOST")\n\tif !ok {\n\t\th = "rabbitmq"\n\t}\n'
+        code += 'u := os.Getenv("USER_HOST")\nif u == "" {\n  u = "user"\n}\n'
+        bindings = {b.variable: [d.template for d in b.defaults] for b in env_default_bindings(code, "m.go")}
+        self.assertEqual(bindings, {"AMQP_HOST": ["rabbitmq"], "USER_HOST": ["user"]})
+
+    def test_image_and_code_bare_hosts_resolve_for_host_named_variables(self) -> None:
+        image = resolve_variable("DB_HOST", _config(DB_HOST="mysql"), _env(), None)
+        self.assertEqual((image.outcome, image.endpoint), (ResolutionOutcome.STATIC_DEFAULT, "mysql"))
+        runtime = resolve_variable("CART_ENDPOINT", _config(), _env(CART_ENDPOINT="cart:8080"), None)
+        self.assertEqual((runtime.outcome, runtime.endpoint), (ResolutionOutcome.RUNTIME, "cart:8080"))
+        stored = _binding("PDO_URL", _default("mysql", source=StaticDefaultSource.CODE), framework=ConfigFramework.ENV)
+        code = resolve_variable("PDO_URL", _config(stored), _env(), None)
+        self.assertEqual((code.outcome, code.endpoint), (ResolutionOutcome.STATIC_DEFAULT, "mysql"))
+
+    def test_a_bare_word_in_a_url_named_image_variable_is_no_address(self) -> None:
+        result = resolve_variable("ORDERS_URL", _config(ORDERS_URL="orders"), _env(), None)
+        self.assertIs(result.outcome, ResolutionOutcome.UNSET)
+
+
 class ResolutionPrecedenceTests(unittest.TestCase):
     def test_the_cluster_wins_and_matches_dotnet_names_case_insensitively(self) -> None:
         result = resolve_variable(

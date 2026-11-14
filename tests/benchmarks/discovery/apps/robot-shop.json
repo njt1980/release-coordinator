@@ -1,6 +1,6 @@
 {
  "app": "robot-shop",
- "split": "held_out",
+ "split": "tuned",
  "upstream": "https://github.com/instana/robot-shop",
  "gt_source": "docker-compose.yaml/docker-compose-load.yaml + .env, web/default.conf.template nginx proxy_pass with web/Dockerfile env defaults, and the env-with-default call sites in each service's source (cart/user/catalogue server.js, payment.py, dispatch main.go, shipping Controller/JpaConfig, ratings Kernel.php).",
  "repos": [

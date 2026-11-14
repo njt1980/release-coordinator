@@ -14,7 +14,12 @@ _ENDPOINT_ENV_SUFFIXES: Final[frozenset[str]] = frozenset(
     {"ADDR", "ADDRESS", "API", "BROKER", "BROKERS", "CONNECTION", "DSN", "ENDPOINT",
      "ENDPOINTS", "HOST", "HOSTNAME", "SERVER", "SERVERS", "URI", "URL", "URLS"}
 )
-_ENV_NAME_TOKEN_SPLIT: Final[re.Pattern[str]] = re.compile(
+# Final name tokens whose value may be a bare host[:port] (see names_host).
+_HOST_ENV_SUFFIXES: Final[frozenset[str]] = frozenset(
+    {"ADDR", "ADDRESS", "BROKER", "BROKERS", "ENDPOINT", "ENDPOINTS", "HOST", "HOSTNAME",
+     "SERVER", "SERVERS"}
+)
+_ENV_NAME_TOKEN_SPLIT:Final[re.Pattern[str]] = re.compile(
     r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])"
 )
 # .NET configuration sections whose every key is an address:
@@ -89,6 +94,20 @@ def is_endpoint_variable(name: str) -> bool:
     return bool(tokens) and tokens[-1].upper() in _ENDPOINT_ENV_SUFFIXES
 
 
+def names_host(name: str) -> bool:
+    """Return True for names whose value may be a bare ``host[:port]``.
+
+    Connection strings, and endpoint names ending in a host-like token
+    (``CART_HOST=cart``, ``DB_ADDR=mysql:3306``, ``CART_ENDPOINT=cart:8080``,
+    ``spring.data.mongodb.host``). ``*_URL``/``*_URI``/``*_API`` values must
+    carry a scheme: a bare word there is a path or version, not a host.
+    """
+    if is_connection_string_variable(name):
+        return True
+    tokens = _name_tokens(name)
+    return bool(tokens) and tokens[-1].upper() in _HOST_ENV_SUFFIXES
+
+
 def _host_port(raw: str) -> str | None:
     """Return ``host[:port]`` when ``raw`` is exactly that, lower-cased."""
     match = _HOST_PORT.match(raw.strip())
@@ -125,6 +144,8 @@ def _connection_string_fields(raw: str) -> dict[str, str]:
     for part in raw.split(";"):
         key, separator, value = part.partition("=")
         if separator:
+            # A PDO DSN prefixes its first field with the driver (mysql:host=db).
+            key = re.sub(r"^\s*[a-z]+:", "", key, flags=re.IGNORECASE)
             fields[re.sub(r"\s+", "", key).lower()] = value.strip()
     return fields
 
