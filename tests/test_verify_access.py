@@ -166,6 +166,7 @@ class KubernetesVerifyAccessTests(unittest.TestCase):
 class TelemetryVerifyAccessTests(unittest.TestCase):
     def _extractor(self, source: str) -> TelemetryExtractor:
         extractor = TelemetryExtractor.__new__(TelemetryExtractor)
+        extractor._additional_workspaces = []
         extractor._source = source
         extractor._client = MagicMock()
         extractor._workspace_id = "ws-1"
@@ -488,6 +489,7 @@ class DiscoveryNodeSkipTests(unittest.TestCase):
             {
                 "runtime_edges": [],
                 "telemetry_scope": None,
+                "telemetry_additional_workspaces": [],
                 "discovery_reports": [
                     DiscoveryStageReport(
                         source=DiscoveryMethod.RUNTIME_TELEMETRY,
@@ -496,7 +498,7 @@ class DiscoveryNodeSkipTests(unittest.TestCase):
                 ],
             },
         )
-        telemetry_cls.assert_called_once_with(workspace_id="ws-1")
+        telemetry_cls.assert_called_once_with(workspace_id="ws-1", additional_workspaces=[])
 
 
 if __name__ == "__main__":

@@ -119,6 +119,7 @@ class ScopedQueryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_unscoped_query(7, scope)
         extractor = TelemetryExtractor.__new__(TelemetryExtractor)
+        extractor._additional_workspaces = []
         extractor._source = "azure"
         extractor._workspace_id = "ws"
         extractor._client = MagicMock()

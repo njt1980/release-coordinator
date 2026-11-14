@@ -272,6 +272,7 @@ class TelemetryQueryTests(unittest.TestCase):
 
     def test_extractor_sends_the_filtered_query(self) -> None:
         extractor = TelemetryExtractor.__new__(TelemetryExtractor)
+        extractor._additional_workspaces = []
         extractor._workspace_id = "ws-1"
         extractor._source = "azure"
         extractor._runtime_metrics = {}

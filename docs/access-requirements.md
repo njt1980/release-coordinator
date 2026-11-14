@@ -41,6 +41,17 @@ before falling back to the developer's `az login`.
   `AppDependencies` (the Application Insights resource must be
   workspace-based). The workspace ID (`customerId`) is passed per
   onboarding request and PR webhook.
+- When the estate's Application Insights components send to several
+  workspaces, list the others in the policy's
+  `telemetry_additional_workspaces` (up to 99 workspace IDs) and grant the
+  same role on each. Every telemetry query reads all of them at once, so a
+  call whose caller and callee report to different workspaces is still
+  joined. A baseline that read other workspaces than the policy lists is
+  `BASELINE_SCOPE_MISMATCH`.
+- Sampling: a sampled row stands for `ItemCount` calls and is counted so.
+  When a radius service is unseen and the telemetry is sampled, the
+  explanation says so: a service called rarely may have no row in the
+  window while working.
 - Telemetry is scoped to the policy's cluster in one of two ways (or both):
   - `telemetry_cluster`: rows must carry a cluster attribute (by default
     `k8s.cluster.name` in `Properties`; Beyla and the OpenTelemetry

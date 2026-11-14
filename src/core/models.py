@@ -942,6 +942,29 @@ APP_COMPONENT_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 
 
+# A Log Analytics workspace ID (customerId). One query may read up to 100
+# workspaces (the primary and 99 more).
+WORKSPACE_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+MAX_ADDITIONAL_WORKSPACES: Final[int] = 99
+
+
+def normalize_workspace_ids(ids: Iterable[str]) -> List[str]:
+    """Return Log Analytics workspace IDs lower-cased, sorted, unique.
+
+    Raises:
+        ValueError: if an ID is not a workspace ID, or there are too many.
+    """
+    normalized = {raw.strip().lower() for raw in ids}
+    for workspace_id in normalized:
+        if not WORKSPACE_ID_PATTERN.match(workspace_id):
+            raise ValueError(f"not a Log Analytics workspace ID (a GUID): {workspace_id!r}")
+    if len(normalized) > MAX_ADDITIONAL_WORKSPACES:
+        raise ValueError(f"at most {MAX_ADDITIONAL_WORKSPACES} additional workspaces")
+    return sorted(normalized)
+
+
 def normalize_component_ids(ids: Iterable[str]) -> List[str]:
     """Return Application Insights component resource IDs lower-cased, sorted, unique.
 
@@ -1022,7 +1045,8 @@ class ScanContext(BaseModel):
     (None when unfiltered), ``telemetry_components`` the Application
     Insights components it was restricted to (see ``TelemetryScope``). Both
     are checked against the project policy, so the ``cluster`` label is
-    backed by what was really read.
+    backed by what was really read. ``telemetry_additional_workspaces`` are
+    the workspaces read together with ``telemetry_workspace_id``.
     """
 
     environment: str = Field(pattern=IDENTITY_SEGMENT_PATTERN)
@@ -1033,6 +1057,12 @@ class ScanContext(BaseModel):
     kubernetes_api_server: str = ""
     telemetry_cluster: Optional[TelemetryClusterFilter] = None
     telemetry_components: List[str] = Field(default_factory=list)
+    telemetry_additional_workspaces: List[str] = Field(default_factory=list)
+
+    @field_validator("telemetry_additional_workspaces")
+    @classmethod
+    def _normalize_workspaces(cls, workspaces: List[str]) -> List[str]:
+        return normalize_workspace_ids(workspaces)
 
     @field_validator("kubernetes_api_server")
     @classmethod
@@ -1461,6 +1491,11 @@ class LiveCoverage(BaseModel):
     to those protocols; ``accepted_unobservable`` lists those an active
     ``exemptions.unobservable`` entry covers for each protocol. A silent
     allowance never applies to an unobservable service.
+
+    ``sampled_sources`` maps telemetry sources whose rows were sampled to
+    the largest number of calls one row stood for (``ItemCount``): with
+    sampling, a service called rarely can have no row in the window while
+    working, so an uncovered verdict says so.
     """
 
     edge_count: int = Field(ge=0)
@@ -1474,6 +1509,7 @@ class LiveCoverage(BaseModel):
     unscoped_services: Dict[str, List[str]] = Field(default_factory=dict)
     unobservable_services: Dict[str, List[str]] = Field(default_factory=dict)
     accepted_unobservable: Dict[str, List[str]] = Field(default_factory=dict)
+    sampled_sources: Dict[str, int] = Field(default_factory=dict)
 
 
 class TelemetryStatus(BaseModel):

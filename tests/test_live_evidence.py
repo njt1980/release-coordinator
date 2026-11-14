@@ -230,6 +230,7 @@ def _table(rows: list[list[object]]) -> LogsTable:
 
 def _azure_extractor(response: object) -> TelemetryExtractor:
     extractor = TelemetryExtractor.__new__(TelemetryExtractor)
+    extractor._additional_workspaces = []
     extractor._workspace_id = WORKSPACE
     extractor._source = "azure"
     extractor._runtime_metrics = {}
