@@ -29,8 +29,8 @@ from pydantic import BaseModel
 
 from src.core.env_names import (
     endpoint_in_value,
-    is_connection_string_variable,
     is_loopback_endpoint,
+    names_host,
 )
 from src.core.models import (
     ConfigBinding,
@@ -356,7 +356,7 @@ def resolve_variable(
     binding = config.binding(variable) if config else None
     framework = binding.framework if binding else ConfigFramework.ENV
     case_insensitive = framework is ConfigFramework.DOTNET
-    connection_string = is_connection_string_variable(variable)
+    connection_string = names_host(variable)
 
     def lookup(name: str) -> LayerValue:
         names = spring_candidates(name) if framework is ConfigFramework.SPRING else [name]
@@ -392,7 +392,10 @@ def resolve_variable(
         return ConfigResolution(outcome=ResolutionOutcome.OPAQUE, detail=evaluated.detail)
     if evaluated.state is LayerState.UNSET or evaluated.value is None:
         return ConfigResolution(outcome=ResolutionOutcome.UNSET, detail=evaluated.detail)
-    endpoint = endpoint_in_value(evaluated.value, connection_string=connection_string)
+    # A default without placeholders was stored as the address it names
+    # (``storable_template``), possibly reduced to a bare host.
+    stored_address = "${" not in default.template
+    endpoint = endpoint_in_value(evaluated.value, connection_string=connection_string or stored_address)
     if evaluated.from_runtime:
         return ConfigResolution(outcome=ResolutionOutcome.RUNTIME, endpoint=endpoint or evaluated.value)
     origin = (

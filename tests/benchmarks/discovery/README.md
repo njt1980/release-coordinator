@@ -38,7 +38,7 @@ benchmark itself runs in CI through `.github/workflows/discovery-benchmark.yml`.
 Each app file has a `split`:
 
 - **`tuned`** (the original 7): the scanner was changed while looking at these apps' misses, so their numbers flatter it.
-- **`held_out`** (bank-of-anthos, piggymetrics, robot-shop, eShopOnContainers): never used to tune. Their ground truth was
+- **`held_out`**: never used to tune (bank-of-anthos, piggymetrics, robot-shop and eShopOnContainers were, until step 1h). Their ground truth was
   built by a separate agent that never saw the scanner or its output.
 
 Acceptance is judged on held-out apps only, per app (`acceptance.py`, agreed 2026-11-14):
@@ -56,6 +56,14 @@ re-measurement then needs new held-out apps. CI runs the ratchet, not acceptance
 **Result on 2026-11-14 (FAILED):** across the held-out apps, manifest-mode recall is 0.40 and precision 0.61, with 30
 silent misses. 38% of flagged causes point at a real miss. On the tuned apps the same scanner shows recall 0.73,
 precision 0.98 and 7 silent misses.
+
+**Step 1h (2026-11-14):** the scanner was then fixed by studying those four apps' misses, so they are now `tuned`
+(their numbers below flatter the scanner), and there is no held-out app until new ones are added. Fixed, in general
+form: bare-host defaults for host-named variables (`CART_HOST=cart`, `DB_HOST=mysql` in a Dockerfile, `|| 'redis'`,
+Go `LookupEnv` fallbacks, PHP `?:`, PDO DSNs); nginx and Envoy proxy configurations, including envsubst templates;
+Dockerfiles nested under `src/<group>/<service>`; Envoy-only gateways; environment reads through a literal list or
+a file-local wrapper. On the four apps: recall 0.66, precision 0.71, 16 silent misses (piggymetrics' Spring Cloud
+Config and Eureka wiring: 12; eShopOnContainers' external-hostname and browser-side calls: 3; a public SaaS URL: 1).
 
 ## What is measured
 

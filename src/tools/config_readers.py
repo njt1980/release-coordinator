@@ -20,7 +20,11 @@ Understood:
   ``@Value("${a.b:default}")`` and ``getProperty("a.b", default)``.
 - Defaults in code: ``os.getenv("X", "d")``, ``process.env.X || "d"``,
   ``System.getenv().getOrDefault("X", "d")``,
-  ``Environment.GetEnvironmentVariable("X") ?? "d"``, ``ENV.fetch("X", "d")``.
+  ``Environment.GetEnvironmentVariable("X") ?? "d"``, ``ENV.fetch("X", "d")``,
+  ``getenv("X") ?: "d"`` (PHP), ``os.getenv("X") or "d"`` and a Go variable
+  read with ``os.Getenv``/``os.LookupEnv`` then assigned a literal when
+  unset. A host-named variable (``*_HOST``, ``*_ADDR``...; see
+  ``names_host``) may default to a bare ``host[:port]``.
 - Dockerfile ``ENV`` in the final stage and the stages it builds on.
 
 Keys that configure the service's own listener (Kestrel, ``urls``,
@@ -46,6 +50,7 @@ from src.core.env_names import (
     endpoint_in_value,
     has_credential_field,
     is_endpoint_variable,
+    names_host,
 )
 from src.core.models import (
     ConfigBinding,
@@ -121,8 +126,19 @@ _ENV_DEFAULT_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
         # Ruby: ENV.fetch("X", "d"), ENV["X"] || "d"
         rf"(?<![\w.])ENV\.fetch\(\s*{_NAME}\s*,\s*{_STRING}",
         rf"(?<![\w.])ENV\[\s*{_NAME}\s*\]\s*\|\|\s*{_STRING}",
+        # PHP: getenv("X") ?: "d", getenv("X") ?? "d";
+        # Python: os.getenv("X") or "d", os.environ.get("X") or "d"
+        rf"(?<![\w$.])(?:os\.)?(?:getenv\(|environ\.get\()\s*{_NAME}\s*\)\s*(?:\?:|\?\?|or\b)\s*{_STRING}",
     )
 )
+# Go: a variable read from the environment, then given a literal when unset:
+#   host, ok := os.LookupEnv("X"); if !ok { host = "d" }
+#   host := os.Getenv("X"); if host == "" { host = "d" }
+_GO_ENV_READ: Final[re.Pattern[str]] = re.compile(
+    rf"\b(?P<var>[A-Za-z_]\w*)(?:\s*,\s*\w+)?\s*:?=\s*os\.(?:Getenv|LookupEnv)\(\s*{_NAME}\s*\)"
+)
+# How far after the read the fallback assignment may be.
+_GO_FALLBACK_LINES: Final[int] = 4
 _OPTIONAL_DEFAULT: Final[str] = rf"(?:\s*\?\?\s*{_STRING})?"
 # C# IConfiguration reads by literal key.
 _DOTNET_KEY_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
@@ -393,8 +409,9 @@ def _spring_binding(
     """A binding for a Spring property when it is (or holds) a dependency address."""
     if key.lower().startswith(_SPRING_LISTEN_PREFIXES):
         return None
-    template = storable_template(value, connection_string=False) if value else None
-    names_address = is_endpoint_variable(key.rsplit(".", 1)[-1])
+    last = key.rsplit(".", 1)[-1]
+    template = storable_template(value, connection_string=names_host(last)) if value else None
+    names_address = is_endpoint_variable(last)
     holds_address = bool(value) and (
         _spring_default_endpoint(value or "") is not None
         or any(is_endpoint_variable(name.rsplit(".", 1)[-1]) for name, *_ in placeholders(value or ""))
@@ -463,28 +480,54 @@ def env_default_bindings(content: str, file_path: str) -> list[ConfigBinding]:
     A variable counts when its name is endpoint-like or its default names
     an address.
     """
-    bindings: list[ConfigBinding] = []
+    found: list[tuple[str, str | None]] = []
     for pattern in _ENV_DEFAULT_PATTERNS:
         for match in pattern.finditer(content):
             groups = match.groupdict()
-            name = groups.get("name") or groups.get("name2") or ""
-            default = _string(match)
-            template = storable_template(default, connection_string=False) if default else None
-            if not name or not (template or is_endpoint_variable(name)):
-                continue
-            bindings.append(
-                ConfigBinding(
-                    variable=name,
-                    key=name,
-                    framework=ConfigFramework.ENV,
-                    defaults=[
-                        StaticDefault(template=template, source=StaticDefaultSource.CODE, file_path=file_path)
-                    ]
-                    if template
-                    else [],
-                )
-            )
-    return bindings
+            found.append((groups.get("name") or groups.get("name2") or "", _string(match)))
+    if file_path.endswith(".go"):
+        found.extend(go_env_fallbacks(content))
+    bindings = [env_binding(name, default, file_path) for name, default in found]
+    return [binding for binding in bindings if binding is not None]
+
+
+def env_binding(name: str, default: str | None, file_path: str) -> ConfigBinding | None:
+    """A binding for an environment read in code with an optional literal default.
+
+    None unless the name is endpoint-like or the default names an address.
+    """
+    template = storable_template(default, connection_string=names_host(name)) if default else None
+    if not name or not (template or is_endpoint_variable(name)):
+        return None
+    return ConfigBinding(
+        variable=name,
+        key=name,
+        framework=ConfigFramework.ENV,
+        defaults=[StaticDefault(template=template, source=StaticDefaultSource.CODE, file_path=file_path)]
+        if template
+        else [],
+    )
+
+
+def _go_fallback(content: str, read: re.Match[str]) -> str | None:
+    """The literal a Go variable read from the environment falls back to."""
+    following = content[read.end():].split("\n", _GO_FALLBACK_LINES + 1)[:_GO_FALLBACK_LINES + 1]
+    pattern = re.compile(rf"^\s*{re.escape(read.group('var'))}\s*=\s*\"(?P<dq>[^\"\\\n]*)\"")
+    for line in following[1:]:
+        match = pattern.match(line)
+        if match:
+            return match.group("dq")
+    return None
+
+
+def go_env_fallbacks(content: str) -> list[tuple[str, str]]:
+    """``(variable, default)`` for Go environment reads with a literal fallback."""
+    found: list[tuple[str, str]] = []
+    for read in _GO_ENV_READ.finditer(content):
+        default = _go_fallback(content, read)
+        if default is not None:
+            found.append((read.group("name"), default))
+    return found
 
 
 def merge_bindings(bindings: list[ConfigBinding]) -> list[ConfigBinding]:

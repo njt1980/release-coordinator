@@ -1,6 +1,6 @@
 {
  "app": "eShopOnContainers",
- "split": "held_out",
+ "split": "tuned",
  "upstream": "https://github.com/dotnet-architecture/eShopOnContainers",
  "gt_source": "dev branch (main is an archive stub): src/docker-compose.yml + docker-compose.override.yml + src/.env, Envoy configs in src/ApiGateways/Envoy/config, and Startup/Program wiring (AddGrpcClient, AddHttpClient, JwtBearer/OIDC Authority, EventBus, UseSqlServer, Redis) in each service; cross-checked with the README architecture diagram.",
  "repos": [
@@ -690,7 +690,9 @@
    "root:eShopOnContainers:src/ApiGateways/Mobile.Bff.Shopping/aggregator": "mobileshoppingagg",
    "root:eShopOnContainers:src/ApiGateways/Web.Bff.Shopping/aggregator": "webshoppingagg",
    "webhookclient": "webhooks-client",
-   "webstatus": "__optional__"
+   "webstatus": "__optional__",
+   "webshopping": "webshoppingapigw",
+   "mobileshopping": "mobileshoppingapigw"
   },
   "hosts": {},
   "workloads": {}
