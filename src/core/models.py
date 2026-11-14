@@ -19,11 +19,18 @@ T = TypeVar("T")
 
 
 class DiscoveryMethod(Enum):
-    """Source used to discover a dependency between services."""
+    """Source used to discover a dependency between services.
+
+    HUMAN_DECLARED is a dependency a coordinator declared in the project's
+    dependency review: it counts for the blast radius and deployment order,
+    but is no automated evidence source, so no discovery stage reports it
+    and a policy can never require it.
+    """
 
     STATIC_CODE = "STATIC_CODE"
     RUNTIME_TELEMETRY = "RUNTIME_TELEMETRY"
     K8S_MANIFEST = "K8S_MANIFEST"
+    HUMAN_DECLARED = "HUMAN_DECLARED"
 
 
 class DiscoveryStatus(str, Enum):

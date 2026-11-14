@@ -163,7 +163,7 @@ class PolicyStoreTests(unittest.TestCase):
 
         policy = loaded.policy
         self.assertEqual(policy.max_baseline_age_hours, 24)
-        self.assertEqual(set(policy.required_sources), set(DiscoveryMethod))
+        self.assertEqual(set(policy.required_sources), set(DiscoveryMethod) - {DiscoveryMethod.HUMAN_DECLARED})
         self.assertIs(policy.runtime_evidence, RuntimeEvidenceRequirement.LIVE)
         self.assertEqual(policy.exemptions.files, [])
         self.assertEqual(policy.exemptions.dependencies, [])

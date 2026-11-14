@@ -375,6 +375,8 @@ class ProjectPolicy(_StrictModel):
     def _sources_are_unique(self) -> Self:
         if len(set(self.required_sources)) != len(self.required_sources):
             raise ValueError("required_sources must not repeat a source")
+        if DiscoveryMethod.HUMAN_DECLARED in self.required_sources:
+            raise ValueError("HUMAN_DECLARED is not an automated source and can't be required")
         return self
 
     @model_validator(mode="after")

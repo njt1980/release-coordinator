@@ -34,9 +34,10 @@ from pydantic import (
     model_validator,
 )
 
-from src.core.models import GIT_COMMIT_SHA_PATTERN
+from src.core.models import GIT_COMMIT_SHA_PATTERN, DependencyEdge
 
-# Provenance label of a dependency a person declared (``DependencyEdge``).
+# Provenance label of a dependency a person declared (``DependencyEdge``);
+# its discovery method is ``DiscoveryMethod.HUMAN_DECLARED``.
 HUMAN_DECLARED_PROVENANCE: Final[str] = "human_declared"
 
 _EDGE_KEY_PREFIX: Final[str] = "edge:"
@@ -124,7 +125,12 @@ class ReviewSubject(_Frozen):
         return self
 
 
+REPOSITORY_ROOT: Final[str] = "/"
+
+
 def _valid_relative_path(path: str) -> str:
+    if path == REPOSITORY_ROOT:
+        return path
     if not path or path.startswith("/") or "\\" in path:
         raise ValueError(f"anchored path must be repository-relative: {path!r}")
     segments = path.removesuffix("/").split("/")
@@ -137,8 +143,8 @@ class ReviewAnchor(_Frozen):
     """Evidence one answer rests on, in one repository.
 
     ``paths`` are repository-relative files, or directories ending in
-    ``/`` (a service root: any change below it counts). Matching is exact
-    and case-sensitive, as in git.
+    ``/`` (a service root: any change below it counts); ``/`` alone is the
+    whole repository. Matching is exact and case-sensitive, as in git.
     """
 
     repository: str = Field(min_length=1, max_length=_MAX_NAME)
@@ -154,12 +160,17 @@ class ReviewAnchor(_Frozen):
         """The changed paths that fall on this anchor, sorted."""
         files = {path for path in self.paths if not path.endswith("/")}
         directories = [path for path in self.paths if path.endswith("/")]
+        everything = REPOSITORY_ROOT in directories
         return sorted(
             {
                 changed
                 for changed in (path.lstrip("/") for path in changed_paths)
-                if changed in files
-                or any(changed.startswith(directory) for directory in directories)
+                if changed
+                and (
+                    everything
+                    or changed in files
+                    or any(changed.startswith(directory) for directory in directories)
+                )
             }
         )
 
@@ -196,6 +207,9 @@ class ReviewAnswer(_Frozen):
     added edge for ADD, and at least one edge for CALLS; it is empty
     otherwise. ``linked_runtime_name`` is set exactly for LINK. Anchors
     are required except for LINK, which rests on names, not files.
+    ``evidence_seen`` is the evidence a dependency had when it was answered
+    (``edge_evidence``): a disagreed dependency that later shows evidence
+    outside it returns for review.
     """
 
     answer_id: str = Field(min_length=1, max_length=_MAX_NAME)
@@ -208,6 +222,12 @@ class ReviewAnswer(_Frozen):
     declared: tuple[DeclaredDependency, ...] = ()
     linked_runtime_name: str | None = Field(default=None, max_length=_MAX_NAME)
     anchors: tuple[ReviewAnchor, ...] = ()
+    evidence_seen: tuple[str, ...] = ()
+
+    @field_validator("evidence_seen")
+    @classmethod
+    def _sorted_evidence(cls, evidence: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(sorted(set(evidence)))
 
     @field_validator("reviewer", mode="before")
     @classmethod
@@ -244,10 +264,27 @@ class ReviewAnswer(_Frozen):
             raise ValueError("linked_runtime_name is set exactly for link")
         if verdict is not ReviewVerdict.LINK and not self.anchors:
             raise ValueError(f"{verdict.value} requires anchors")
+        if verdict is ReviewVerdict.DISAGREE and not self.evidence_seen:
+            raise ValueError("disagree records the evidence it was given (evidence_seen)")
+        if self.evidence_seen and self.subject.kind is not ReviewSubjectKind.DEPENDENCY:
+            raise ValueError("only a dependency answer records the evidence seen")
         repositories = [anchor.repository for anchor in self.anchors]
         if len(set(repositories)) != len(repositories):
             raise ValueError("anchors must list each repository once")
         return self
+
+
+def edge_evidence(edge: DependencyEdge) -> tuple[str, ...]:
+    """What a dependency's evidence consists of: its discovery methods and
+    the files citing it (``method:<name>``, ``file:<path>``)."""
+    return tuple(
+        sorted(
+            {
+                *(f"method:{method.value}" for method in edge.discovery_methods),
+                *(f"file:{path}" for path in edge.evidence_files or ()),
+            }
+        )
+    )
 
 
 def current_answers(answers: Iterable[ReviewAnswer]) -> dict[ReviewSubject, ReviewAnswer]:
