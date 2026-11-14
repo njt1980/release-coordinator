@@ -22,6 +22,21 @@ _WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet"}
 _PLACEHOLDER = re.compile(r"\$\{([A-Za-z_0-9]+)(?::?-([^}]*))?\}")
 
 
+class _ComposeLoader(yaml.SafeLoader):
+    """Safe YAML that reads Compose merge tags (``!override``, ``!reset``) as plain values."""
+
+
+def _untagged(loader: yaml.SafeLoader, _suffix: str, node: yaml.Node) -> Any:
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    return loader.construct_scalar(node)  # type: ignore[arg-type]
+
+
+_ComposeLoader.add_multi_constructor("!", _untagged)
+
+
 class WorkloadEnv(BaseModel):
     variables: dict[str, str] = Field(default_factory=dict)
     opaque: list[str] = Field(default_factory=list)
@@ -130,7 +145,7 @@ def compose_envs(paths: list[Path], dotenv: Path | None) -> dict[str, WorkloadEn
     defaults = {k: substitute(v, defaults) for k, v in defaults.items()}
     envs: dict[str, WorkloadEnv] = {}
     for path in paths:
-        services = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("services") or {}
+        services = (yaml.load(path.read_text(encoding="utf-8"), Loader=_ComposeLoader) or {}).get("services") or {}
         for name, service in services.items():
             env = envs.setdefault(name, WorkloadEnv())
             if service.get("env_file"):

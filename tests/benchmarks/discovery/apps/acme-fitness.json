@@ -1,0 +1,164 @@
+{
+ "app": "acme-fitness",
+ "split": "held_out",
+ "upstream": "https://github.com/vmwarecloudadvocacy/acme_fitness_demo",
+ "gt_source": "Read every service's source and config in the vmworld2019app monorepo (front_end app.js/services/*.js, cart.py, order.py, payment server.js, user and catalogsvc Go db.go/main.go, all Dockerfiles and entrypoint scripts) and reconciled them with the plain manifests in kubernetes/kubernetes-manifests (Helm chart not used).",
+ "repos": [
+  {
+   "name": "vmworld2019app",
+   "url": "https://github.com/hjgraca/vmworld2019app.git",
+   "sha": "39cd8ed8f25aead35e6cfcbc5775b0c1909f4604"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "k8s",
+   "paths": [
+    "vmworld2019app/kubernetes/kubernetes-manifests"
+   ]
+  }
+ ],
+ "observability": [
+  "zipkin"
+ ],
+ "services": {
+  "frontend": {
+   "kind": "service",
+   "lang": "node",
+   "source": true
+  },
+  "users": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "catalog": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "cart": {
+   "kind": "service",
+   "lang": "python",
+   "source": true
+  },
+  "order": {
+   "kind": "service",
+   "lang": "python",
+   "source": true
+  },
+  "payment": {
+   "kind": "service",
+   "lang": "node",
+   "source": true
+  },
+  "cart-redis": {
+   "kind": "infra",
+   "what": "redis"
+  },
+  "catalog-mongo": {
+   "kind": "infra",
+   "what": "mongodb"
+  },
+  "users-mongo": {
+   "kind": "infra",
+   "what": "mongodb"
+  },
+  "order-mongo": {
+   "kind": "infra",
+   "what": "mongodb"
+  }
+ },
+ "edges": [
+  {
+   "from": "frontend",
+   "to": "users",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Node/Express front_end mounts routers (app.js:22-25) that proxy with the 'request' library to endpoints built in services/services.js as util.format('http://%s:%d', process.env.{X}_HOST, process.env.{X}_PORT) (no host default; port default 80); usersUrl + '/login' and '/users/:id'; USERS_HOST='users', USERS_PORT='8081' in the frontend Deployment.",
+   "source": "front_end/services/users/index.js:26; front_end/services/users/index.js:69; front_end/services/services.js:3; kubernetes/kubernetes-manifests/frontend-total.yaml:46"
+  },
+  {
+   "from": "frontend",
+   "to": "catalog",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Node/Express front_end mounts routers (app.js:22-25) that proxy with the 'request' library to endpoints built in services/services.js as util.format('http://%s:%d', process.env.{X}_HOST, process.env.{X}_PORT) (no host default; port default 80); catalogUrl + '/products', '/products/:id' and piped '/static/images/:id'; CATALOG_HOST='catalog', CATALOG_PORT='8082'.",
+   "source": "front_end/services/catalog/index.js:14; front_end/services/catalog/index.js:46; front_end/services/catalog/index.js:78; front_end/services/services.js:4; kubernetes/kubernetes-manifests/frontend-total.yaml:48"
+  },
+  {
+   "from": "frontend",
+   "to": "cart",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Node/Express front_end mounts routers (app.js:22-25) that proxy with the 'request' library to endpoints built in services/services.js as util.format('http://%s:%d', process.env.{X}_HOST, process.env.{X}_PORT) (no host default; port default 80); cartUrl + '/cart/item/add|modify', '/cart/items', '/cart/clear', '/cart/total'; CART_HOST='cart', CART_PORT='5000'.",
+   "source": "front_end/services/cart/index.js:15; front_end/services/services.js:5; kubernetes/kubernetes-manifests/frontend-total.yaml:52"
+  },
+  {
+   "from": "frontend",
+   "to": "order",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Node/Express front_end mounts routers (app.js:22-25) that proxy with the 'request' library to endpoints built in services/services.js as util.format('http://%s:%d', process.env.{X}_HOST, process.env.{X}_PORT) (no host default; port default 80); orderUrl + '/order/add/:userid'; ORDER_HOST='order', ORDER_PORT='6000'.",
+   "source": "front_end/services/order/index.js:15; front_end/services/services.js:6; kubernetes/kubernetes-manifests/frontend-total.yaml:50"
+  },
+  {
+   "from": "order",
+   "to": "payment",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Python/Flask order.py builds paymenturi='http://'+PAYMENT_HOST+':'+PAYMENT_PORT (env, code default 'localhost':'9000', Dockerfile ENV localhost) and calls requests.get(paymenturi+'/live') and requests.post(paymenturi+'/pay'); PAYMENT_HOST='payment', PAYMENT_PORT='9000' in the order Deployment.",
+   "source": "order/order.py:343; order/order.py:137; order/order.py:108; kubernetes/kubernetes-manifests/order-total.yaml:60"
+  },
+  {
+   "from": "order",
+   "to": "order-mongo",
+   "proto": "mongodb",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Python pymongo MongoClient(host=ORDER_DB_HOST, port=ORDER_DB_PORT) at import time (exits on failure); entrypoint also waits on 'mongo --host $ORDER_DB_HOST'; ORDER_DB_HOST='order-mongo' in the order Deployment (code/Dockerfile default localhost).",
+   "source": "order/order.py:162; order/order.py:84; order/entrypoint/docker-entrypoint.sh:8; kubernetes/kubernetes-manifests/order-total.yaml:45"
+  },
+  {
+   "from": "cart",
+   "to": "cart-redis",
+   "proto": "redis",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Python redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT) + ping at startup (exits on failure); entrypoint loops on 'redis-cli -h $REDIS_HOST ping'; REDIS_HOST='cart-redis' in the cart Deployment (code/Dockerfile default localhost). Note: manifest sets REDIS_PASS while the code reads REDIS_PASSWORD, but the connection target is unaffected.",
+   "source": "cart/cart.py:91; cart/cart.py:51; cart/entrypoint/docker-entrypoint.sh:3; kubernetes/kubernetes-manifests/cart-total.yaml:45"
+  },
+  {
+   "from": "catalog",
+   "to": "catalog-mongo",
+   "proto": "mongodb",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Go mgo.Dial('mongodb://user:pass@'+GetEnv('CATALOG_DB_HOST','0.0.0.0')+':'+CATALOG_DB_PORT) at startup; entrypoint waits on 'mongo --host $CATALOG_DB_HOST'; CATALOG_DB_HOST='catalog-mongo' in the catalog Deployment.",
+   "source": "catalogsvc/db.go:33; catalogsvc/db.go:28; catalogsvc/entrypoint/docker-entrypoint.sh:10; kubernetes/kubernetes-manifests/catalog-total.yaml:45"
+  },
+  {
+   "from": "users",
+   "to": "users-mongo",
+   "proto": "mongodb",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Go mgo.Dial('mongodb://user:pass@'+GetEnv('USERS_DB_HOST','0.0.0.0')+':'+USERS_DB_PORT) at startup; entrypoint waits on 'mongo --host $USERS_DB_HOST'; USERS_DB_HOST='users-mongo' in the users Deployment.",
+   "source": "user/db.go:35; user/db.go:30; user/entrypoint/docker-entrypoint.sh:10; kubernetes/kubernetes-manifests/users-total.yaml:45"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "catalogsvc": "catalog",
+   "front-end": "frontend",
+   "user": "users"
+  },
+  "hosts": {},
+  "workloads": {}
+ }
+}

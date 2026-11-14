@@ -1,0 +1,403 @@
+{
+ "app": "ftgo",
+ "split": "held_out",
+ "upstream": "https://github.com/microservices-patterns/ftgo-application",
+ "gt_source": "Kubernetes manifests (deployment/kubernetes/** and */src/deployment/kubernetes/*.yml) reconciled with docker-compose*.yml, each service's application.properties, build.gradle and Spring @Import/messaging configuration, the API gateway route/proxy classes, the order-history DynamoDB config, the dynamodblocal-init scripts and the GraphQL gateway server.ts.",
+ "repos": [
+  {
+   "name": "ftgo",
+   "url": "https://github.com/microservices-patterns/ftgo-application.git",
+   "sha": "558dfc53b11d30a5f1d995c0c6d58d5106c28189"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "k8s",
+   "paths": [
+    "ftgo/deployment/kubernetes/stateful-services",
+    "ftgo/deployment/kubernetes/cdc-service",
+    "ftgo/ftgo-api-gateway/src/deployment/kubernetes",
+    "ftgo/ftgo-order-service/src/deployment/kubernetes",
+    "ftgo/ftgo-order-history-service/src/deployment/kubernetes",
+    "ftgo/ftgo-consumer-service/src/deployment/kubernetes",
+    "ftgo/ftgo-kitchen-service/src/deployment/kubernetes",
+    "ftgo/ftgo-restaurant-service/src/deployment/kubernetes",
+    "ftgo/ftgo-accounting-service/src/deployment/kubernetes"
+   ]
+  }
+ ],
+ "observability": [
+  "zipkin",
+  "prometheus"
+ ],
+ "services": {
+  "ftgo-api-gateway": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "ftgo-order-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "ftgo-order-history-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "ftgo-consumer-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "ftgo-kitchen-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "ftgo-restaurant-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "ftgo-accounting-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "ftgo-delivery-service": {
+   "kind": "service",
+   "lang": "java",
+   "source": true,
+   "optional": true
+  },
+  "ftgo-api-gateway-graphql": {
+   "kind": "service",
+   "lang": "typescript",
+   "source": true,
+   "optional": true
+  },
+  "ftgo-dynamodb-local-init": {
+   "kind": "service",
+   "lang": "shell",
+   "source": true
+  },
+  "ftgo-cdc-service": {
+   "kind": "service",
+   "lang": "java",
+   "what": "eventuate-cdc-service",
+   "source": false
+  },
+  "ftgo-mysql": {
+   "kind": "infra",
+   "what": "mysql",
+   "source": false
+  },
+  "ftgo-kafka": {
+   "kind": "infra",
+   "what": "kafka",
+   "source": false
+  },
+  "ftgo-zookeeper": {
+   "kind": "infra",
+   "what": "zookeeper",
+   "source": false
+  },
+  "ftgo-dynamodb-local": {
+   "kind": "infra",
+   "what": "dynamodb",
+   "source": false
+  }
+ },
+ "edges": [
+  {
+   "from": "ftgo-api-gateway",
+   "to": "ftgo-order-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Java Spring Cloud Gateway routes POST/PUT /orders(/**) to order.destinations.orderServiceUrl, plus WebClient GET {orderServiceUrl}/orders/{id} in OrderServiceProxy; URL from env ORDER_DESTINATIONS_ORDERSERVICEURL=http://ftgo-order-service:8080",
+   "source": "ftgo-api-gateway/src/main/java/net/chrisrichardson/ftgo/apiagateway/orders/OrderConfiguration.java:26; ftgo-api-gateway/src/main/java/net/chrisrichardson/ftgo/apiagateway/proxies/OrderServiceProxy.java:25; ftgo-api-gateway/src/deployment/kubernetes/ftgo-api-gateway.yml:47"
+  },
+  {
+   "from": "ftgo-api-gateway",
+   "to": "ftgo-order-history-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Java Spring Cloud Gateway route GET /orders to order.destinations.orderHistoryServiceUrl; env ORDER_DESTINATIONS_ORDERHISTORYSERVICEURL=http://ftgo-order-history-service:8080",
+   "source": "ftgo-api-gateway/src/main/java/net/chrisrichardson/ftgo/apiagateway/orders/OrderConfiguration.java:30; ftgo-api-gateway/src/deployment/kubernetes/ftgo-api-gateway.yml:49"
+  },
+  {
+   "from": "ftgo-api-gateway",
+   "to": "ftgo-consumer-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Java Spring Cloud Gateway routes POST/PUT /consumers to consumer.destinations.consumerServiceUrl; env CONSUMER_DESTINATIONS_CONSUMERSERVICEURL=http://ftgo-consumer-service:8080",
+   "source": "ftgo-api-gateway/src/main/java/net/chrisrichardson/ftgo/apiagateway/consumers/ConsumerConfiguration.java:17; ftgo-api-gateway/src/deployment/kubernetes/ftgo-api-gateway.yml:51"
+  },
+  {
+   "from": "ftgo-order-service",
+   "to": "ftgo-mysql",
+   "proto": "mysql",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Java Spring Boot JPA/JDBC datasource (also Eventuate Tram outbox/message tables); SPRING_DATASOURCE_URL=jdbc:mysql://ftgo-mysql/... in k8s manifest (application.properties default ${DOCKER_HOST_IP:localhost})",
+   "source": "ftgo-order-service/src/deployment/kubernetes/ftgo-order-service.yml:48; ftgo-order-service/src/main/resources/application.properties:17"
+  },
+  {
+   "from": "ftgo-order-service",
+   "to": "ftgo-kafka",
+   "proto": "kafka",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Eventuate Tram TramJdbcKafkaConfiguration (saga orchestrator: sends commands / receives replies and publishes order events); EVENTUATELOCAL_KAFKA_BOOTSTRAP_SERVERS=ftgo-kafka:9092",
+   "source": "ftgo-order-service/src/deployment/kubernetes/ftgo-order-service.yml:62; ftgo-order-service/src/main/java/net/chrisrichardson/ftgo/orderservice/main/OrderServiceMain.java:16"
+  },
+  {
+   "from": "ftgo-order-service",
+   "to": "ftgo-zookeeper",
+   "proto": "zookeeper",
+   "kind": "infra",
+   "status": "ambiguous",
+   "mechanism": "EVENTUATELOCAL_ZOOKEEPER_CONNECTION_STRING=ftgo-zookeeper:2181 is set in the manifest and application.properties, but no service code reads it and the Eventuate Tram/Kafka client libraries used (platform 2022.0) are not shown to use ZooKeeper; leader election is the CDC's job",
+   "source": "ftgo-order-service/src/deployment/kubernetes/ftgo-order-service.yml:64"
+  },
+  {
+   "from": "ftgo-consumer-service",
+   "to": "ftgo-mysql",
+   "proto": "mysql",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Java Spring Boot JPA/JDBC datasource (also Eventuate Tram outbox/message tables); SPRING_DATASOURCE_URL=jdbc:mysql://ftgo-mysql/... in k8s manifest (application.properties default ${DOCKER_HOST_IP:localhost})",
+   "source": "ftgo-consumer-service/src/deployment/kubernetes/ftgo-consumer-service.yml:40; ftgo-consumer-service/src/main/resources/application.properties:11"
+  },
+  {
+   "from": "ftgo-consumer-service",
+   "to": "ftgo-kafka",
+   "proto": "kafka",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Eventuate Tram TramJdbcKafkaConfiguration (saga participant: consumes commands, publishes replies/events); EVENTUATELOCAL_KAFKA_BOOTSTRAP_SERVERS=ftgo-kafka:9092",
+   "source": "ftgo-consumer-service/src/deployment/kubernetes/ftgo-consumer-service.yml:48; ftgo-consumer-service/src/main/java/net/chrisrichardson/ftgo/consumerservice/main/ConsumerServiceMain.java:11"
+  },
+  {
+   "from": "ftgo-consumer-service",
+   "to": "ftgo-zookeeper",
+   "proto": "zookeeper",
+   "kind": "infra",
+   "status": "ambiguous",
+   "mechanism": "EVENTUATELOCAL_ZOOKEEPER_CONNECTION_STRING=ftgo-zookeeper:2181 is set in the manifest and application.properties, but no service code reads it and the Eventuate Tram/Kafka client libraries used (platform 2022.0) are not shown to use ZooKeeper; leader election is the CDC's job",
+   "source": "ftgo-consumer-service/src/deployment/kubernetes/ftgo-consumer-service.yml:50"
+  },
+  {
+   "from": "ftgo-kitchen-service",
+   "to": "ftgo-mysql",
+   "proto": "mysql",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Java Spring Boot JPA/JDBC datasource (also Eventuate Tram outbox/message tables); SPRING_DATASOURCE_URL=jdbc:mysql://ftgo-mysql/... in k8s manifest (application.properties default ${DOCKER_HOST_IP:localhost})",
+   "source": "ftgo-kitchen-service/src/deployment/kubernetes/ftgo-kitchen-service.yml:40; ftgo-kitchen-service/src/main/resources/application.properties:12"
+  },
+  {
+   "from": "ftgo-kitchen-service",
+   "to": "ftgo-kafka",
+   "proto": "kafka",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Eventuate Tram TramJdbcKafkaConfiguration (saga participant + restaurant event subscriber; publishes ticket events); EVENTUATELOCAL_KAFKA_BOOTSTRAP_SERVERS=ftgo-kafka:9092",
+   "source": "ftgo-kitchen-service/src/deployment/kubernetes/ftgo-kitchen-service.yml:54; ftgo-kitchen-service/src/main/java/net/chrisrichardson/ftgo/kitchenservice/main/KitchenServiceMain.java:14"
+  },
+  {
+   "from": "ftgo-kitchen-service",
+   "to": "ftgo-zookeeper",
+   "proto": "zookeeper",
+   "kind": "infra",
+   "status": "ambiguous",
+   "mechanism": "EVENTUATELOCAL_ZOOKEEPER_CONNECTION_STRING=ftgo-zookeeper:2181 is set in the manifest and application.properties, but no service code reads it and the Eventuate Tram/Kafka client libraries used (platform 2022.0) are not shown to use ZooKeeper; leader election is the CDC's job",
+   "source": "ftgo-kitchen-service/src/deployment/kubernetes/ftgo-kitchen-service.yml:56"
+  },
+  {
+   "from": "ftgo-restaurant-service",
+   "to": "ftgo-mysql",
+   "proto": "mysql",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Java Spring Boot JPA/JDBC datasource (also Eventuate Tram outbox/message tables); SPRING_DATASOURCE_URL=jdbc:mysql://ftgo-mysql/... in k8s manifest (application.properties default ${DOCKER_HOST_IP:localhost})",
+   "source": "ftgo-restaurant-service/src/deployment/kubernetes/ftgo-restaurant-service.yml:41; ftgo-restaurant-service/src/main/resources/application.properties:12"
+  },
+  {
+   "from": "ftgo-restaurant-service",
+   "to": "ftgo-kafka",
+   "proto": "kafka",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Eventuate Tram TramJdbcKafkaConfiguration (publishes restaurant domain events (transactional outbox relayed to Kafka by CDC); no subscribers); EVENTUATELOCAL_KAFKA_BOOTSTRAP_SERVERS=ftgo-kafka:9092",
+   "source": "ftgo-restaurant-service/src/deployment/kubernetes/ftgo-restaurant-service.yml:55; ftgo-restaurant-service/src/main/java/net/chrisrichardson/ftgo/restaurantservice/RestaurantServiceMain.java:13"
+  },
+  {
+   "from": "ftgo-restaurant-service",
+   "to": "ftgo-zookeeper",
+   "proto": "zookeeper",
+   "kind": "infra",
+   "status": "ambiguous",
+   "mechanism": "EVENTUATELOCAL_ZOOKEEPER_CONNECTION_STRING=ftgo-zookeeper:2181 is set in the manifest and application.properties, but no service code reads it and the Eventuate Tram/Kafka client libraries used (platform 2022.0) are not shown to use ZooKeeper; leader election is the CDC's job",
+   "source": "ftgo-restaurant-service/src/deployment/kubernetes/ftgo-restaurant-service.yml:57"
+  },
+  {
+   "from": "ftgo-accounting-service",
+   "to": "ftgo-mysql",
+   "proto": "mysql",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Java Spring Boot JPA/JDBC datasource (also Eventuate Tram outbox/message tables); SPRING_DATASOURCE_URL=jdbc:mysql://ftgo-mysql/... in k8s manifest (application.properties default ${DOCKER_HOST_IP:localhost})",
+   "source": "ftgo-accounting-service/src/deployment/kubernetes/ftgo-accounting-service.yml:40; ftgo-accounting-service/src/main/resources/application.properties:11"
+  },
+  {
+   "from": "ftgo-accounting-service",
+   "to": "ftgo-kafka",
+   "proto": "kafka",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Eventuate Tram TramJdbcKafkaConfiguration (command/event subscriber plus Eventuate Local event sourcing (events table in MySQL, subscriptions via Kafka)); EVENTUATELOCAL_KAFKA_BOOTSTRAP_SERVERS=ftgo-kafka:9092",
+   "source": "ftgo-accounting-service/src/deployment/kubernetes/ftgo-accounting-service.yml:54; ftgo-accounting-service/src/main/java/net/chrisrichardson/ftgo/accountingservice/main/AccountingServiceMain.java:16"
+  },
+  {
+   "from": "ftgo-accounting-service",
+   "to": "ftgo-zookeeper",
+   "proto": "zookeeper",
+   "kind": "infra",
+   "status": "ambiguous",
+   "mechanism": "EVENTUATELOCAL_ZOOKEEPER_CONNECTION_STRING=ftgo-zookeeper:2181 is set in the manifest and application.properties, but no service code reads it and the Eventuate Tram/Kafka client libraries used (platform 2022.0) are not shown to use ZooKeeper; leader election is the CDC's job",
+   "source": "ftgo-accounting-service/src/deployment/kubernetes/ftgo-accounting-service.yml:56"
+  },
+  {
+   "from": "ftgo-order-history-service",
+   "to": "ftgo-kafka",
+   "proto": "kafka",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Eventuate Tram Kafka consumer (EventuateTramKafkaMessageConsumerConfiguration, DomainEventDispatcher for order/delivery events); EVENTUATELOCAL_KAFKA_BOOTSTRAP_SERVERS=ftgo-kafka:9092",
+   "source": "ftgo-order-history-service/src/deployment/kubernetes/ftgo-order-history-service.yml:54; ftgo-order-history-service/src/main/java/net/chrisrichardson/ftgo/cqrs/orderhistory/main/OrderHistoryServiceMain.java:17"
+  },
+  {
+   "from": "ftgo-order-history-service",
+   "to": "ftgo-zookeeper",
+   "proto": "zookeeper",
+   "kind": "infra",
+   "status": "ambiguous",
+   "mechanism": "EVENTUATELOCAL_ZOOKEEPER_CONNECTION_STRING set but not read by service code; library use unproven",
+   "source": "ftgo-order-history-service/src/deployment/kubernetes/ftgo-order-history-service.yml:56"
+  },
+  {
+   "from": "ftgo-order-history-service",
+   "to": "ftgo-dynamodb-local",
+   "proto": "http",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "AWS SDK AmazonDynamoDBClientBuilder with endpoint from aws.dynamodb.endpoint.url; env AWS_DYNAMODB_ENDPOINT_URL=http://ftgo-dynamodb-local:8000",
+   "source": "ftgo-order-history-service/src/deployment/kubernetes/ftgo-order-history-service.yml:58; ftgo-order-history-service/src/main/java/net/chrisrichardson/ftgo/cqrs/orderhistory/dynamodb/OrderHistoryDynamoDBConfiguration.java:21"
+  },
+  {
+   "from": "ftgo-cdc-service",
+   "to": "ftgo-mysql",
+   "proto": "mysql",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Eventuate CDC (third-party image) mysql-binlog reader; EVENTUATE_CDC_READER_READER1_DATASOURCEURL=jdbc:mysql://ftgo-mysql:3306/eventuate",
+   "source": "deployment/kubernetes/cdc-service/ftgo-cdc-service.yml:88"
+  },
+  {
+   "from": "ftgo-cdc-service",
+   "to": "ftgo-kafka",
+   "proto": "kafka",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Eventuate CDC publishes outbox/event rows to Kafka; EVENTUATELOCAL_KAFKA_BOOTSTRAP_SERVERS=ftgo-kafka:29092 (port mismatch with the 9092 Service in the manifest, but the host is ftgo-kafka)",
+   "source": "deployment/kubernetes/cdc-service/ftgo-cdc-service.yml:40"
+  },
+  {
+   "from": "ftgo-cdc-service",
+   "to": "ftgo-zookeeper",
+   "proto": "zookeeper",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Eventuate CDC leader election (LEADERSHIPLOCKPATH) via ZooKeeper; EVENTUATELOCAL_ZOOKEEPER_CONNECTION_STRING=ftgo-zookeeper:2181",
+   "source": "deployment/kubernetes/cdc-service/ftgo-cdc-service.yml:42; deployment/kubernetes/cdc-service/ftgo-cdc-service.yml:96"
+  },
+  {
+   "from": "ftgo-kafka",
+   "to": "ftgo-zookeeper",
+   "proto": "zookeeper",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "confluentinc/cp-kafka broker KAFKA_ZOOKEEPER_CONNECT=ftgo-zookeeper:2181",
+   "source": "deployment/kubernetes/stateful-services/ftgo-kafka-deployment.yml:34"
+  },
+  {
+   "from": "ftgo-dynamodb-local-init",
+   "to": "ftgo-dynamodb-local",
+   "proto": "http",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "k8s Job (msapatterns/dynamodblocal-init): aws CLI create-table --endpoint-url $AWS_DYNAMODB_ENDPOINT_URL=http://ftgo-dynamodb-local:8000",
+   "source": "deployment/kubernetes/stateful-services/ftgo-dynamodb-local.yml:63; dynamodblocal-init/create-dynamodb-tables.sh:10"
+  },
+  {
+   "from": "ftgo-delivery-service",
+   "to": "ftgo-mysql",
+   "proto": "mysql",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "Java Spring Boot JPA datasource; only deployed by docker-compose (SPRING_DATASOURCE_URL=jdbc:mysql://mysql/ftgo_delivery_service); no k8s manifest exists",
+   "source": "docker-compose.yml:208; ftgo-delivery-service/src/main/resources/application.properties:17"
+  },
+  {
+   "from": "ftgo-delivery-service",
+   "to": "ftgo-kafka",
+   "proto": "kafka",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "Eventuate Tram TramJdbcKafkaConfiguration + DomainEventDispatcher (subscribes to kitchen/order events); compose-only (kafka:29092)",
+   "source": "docker-compose.yml:212; ftgo-delivery-service/src/main/java/net/chrisrichardson/ftgo/deliveryservice/main/DeliveryServiceMain.java:15"
+  },
+  {
+   "from": "ftgo-api-gateway-graphql",
+   "to": "ftgo-order-history-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "Node/TypeScript GraphQL gateway fetch() proxy; base URL from process.env (docker-compose-api-gateway-graphql.yml overlay, not in default deployment or k8s)",
+   "source": "ftgo-api-gateway-graphql/src/server.ts:15; docker-compose-api-gateway-graphql.yml:8"
+  },
+  {
+   "from": "ftgo-api-gateway-graphql",
+   "to": "ftgo-consumer-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "Node/TypeScript GraphQL gateway fetch() proxy; base URL from process.env (docker-compose-api-gateway-graphql.yml overlay, not in default deployment or k8s)",
+   "source": "ftgo-api-gateway-graphql/src/server.ts:16; docker-compose-api-gateway-graphql.yml:9"
+  },
+  {
+   "from": "ftgo-api-gateway-graphql",
+   "to": "ftgo-restaurant-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "Node/TypeScript GraphQL gateway fetch() proxy; base URL from process.env (docker-compose-api-gateway-graphql.yml overlay, not in default deployment or k8s)",
+   "source": "ftgo-api-gateway-graphql/src/server.ts:17; docker-compose-api-gateway-graphql.yml:10"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "dynamodblocal-init": "ftgo-dynamodb-local-init",
+   "dynamodblocal": "ftgo-dynamodb-local",
+   "mysql": "ftgo-mysql"
+  },
+  "hosts": {},
+  "workloads": {}
+ }
+}

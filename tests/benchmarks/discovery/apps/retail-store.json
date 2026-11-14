@@ -1,0 +1,206 @@
+{
+ "app": "retail-store",
+ "split": "held_out",
+ "upstream": "https://github.com/aws-containers/retail-store-sample-app",
+ "gt_source": "src/app/docker-compose.yml (includes per-service src/*/docker-compose.yml) plus src/app/compose.override.yaml, cross-checked with src/app/helmfile.yaml values, and each service's config defaults and client/repository wiring (ui StoreServices/ProxyController/TopologyController + application.yml, cart DynamoDBConfiguration, catalog config.go/main.go/repository, checkout configuration.ts/checkout.module.ts, orders DataSourceConfig/RabbitMQMessagingConfig).",
+ "repos": [
+  {
+   "name": "retail-store",
+   "url": "https://github.com/aws-containers/retail-store-sample-app.git",
+   "sha": "d7a380b843e0759e58754f74188ea18252a51415"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "compose",
+   "paths": [
+    "retail-store/src/app/docker-compose.yml",
+    "retail-store/src/app/compose.override.yaml",
+    "retail-store/src/ui/docker-compose.yml",
+    "retail-store/src/catalog/docker-compose.yml",
+    "retail-store/src/cart/docker-compose.yml",
+    "retail-store/src/checkout/docker-compose.yml",
+    "retail-store/src/orders/docker-compose.yml"
+   ]
+  }
+ ],
+ "observability": [
+  "otel-collector",
+  "jaeger"
+ ],
+ "services": {
+  "ui": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "catalog": {
+   "kind": "service",
+   "lang": "go",
+   "source": true
+  },
+  "carts": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "checkout": {
+   "kind": "service",
+   "lang": "node",
+   "source": true
+  },
+  "orders": {
+   "kind": "service",
+   "lang": "java",
+   "source": true
+  },
+  "catalog-db": {
+   "kind": "infra",
+   "what": "mysql"
+  },
+  "carts-db": {
+   "kind": "infra",
+   "what": "dynamodb"
+  },
+  "checkout-redis": {
+   "kind": "infra",
+   "what": "redis"
+  },
+  "orders-db": {
+   "kind": "infra",
+   "what": "postgres"
+  },
+  "rabbitmq": {
+   "kind": "infra",
+   "what": "rabbitmq"
+  },
+  "opensearch": {
+   "kind": "infra",
+   "what": "opensearch",
+   "optional": true
+  },
+  "bedrock": {
+   "kind": "service",
+   "source": false,
+   "optional": true
+  }
+ },
+ "edges": [
+  {
+   "from": "ui",
+   "to": "catalog",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Java/Spring: Kiota CatalogClient over OkHttp with base URL retail.ui.endpoints.catalog (env RETAIL_UI_ENDPOINTS_CATALOG=http://catalog:8080 from compose override); also /proxy/catalog and /topology via WebClient",
+   "source": "src/ui/src/main/java/com/amazon/sample/ui/config/StoreServices.java:85; src/ui/src/main/java/com/amazon/sample/ui/web/ProxyController.java:41; src/app/compose.override.yaml:4"
+  },
+  {
+   "from": "ui",
+   "to": "carts",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Java/Spring: Kiota CartClient with base URL retail.ui.endpoints.carts (env RETAIL_UI_ENDPOINTS_CARTS=http://carts:8080; compose service 'cart' has hostname 'carts'); also /proxy/carts and /topology",
+   "source": "src/ui/src/main/java/com/amazon/sample/ui/config/StoreServices.java:102; src/ui/src/main/java/com/amazon/sample/ui/web/ProxyController.java:47; src/app/compose.override.yaml:5; src/cart/docker-compose.yml:5"
+  },
+  {
+   "from": "ui",
+   "to": "checkout",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Java/Spring: Kiota CheckoutClient with base URL retail.ui.endpoints.checkout (env RETAIL_UI_ENDPOINTS_CHECKOUT=http://checkout:8080); also /proxy/checkout and /topology",
+   "source": "src/ui/src/main/java/com/amazon/sample/ui/config/StoreServices.java:118; src/ui/src/main/java/com/amazon/sample/ui/web/ProxyController.java:54; src/app/compose.override.yaml:7"
+  },
+  {
+   "from": "ui",
+   "to": "orders",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Java/Spring Cloud Gateway ProxyExchange forwards /proxy/orders/** to retail.ui.endpoints.orders, and TopologyService WebClient polls it (env RETAIL_UI_ENDPOINTS_ORDERS=http://orders:8080)",
+   "source": "src/ui/src/main/java/com/amazon/sample/ui/web/ProxyController.java:60; src/ui/src/main/java/com/amazon/sample/ui/web/TopologyController.java:52; src/app/compose.override.yaml:6"
+  },
+  {
+   "from": "ui",
+   "to": "bedrock",
+   "proto": "https",
+   "kind": "svc",
+   "status": "optional",
+   "mechanism": "Java/Spring AI BedrockProxyChatModel (AWS SDK, region from retail.ui.chat.bedrock.region); only when retail.ui.chat.enabled=true and provider=bedrock (default disabled)",
+   "source": "src/ui/src/main/java/com/amazon/sample/ui/config/chat/BedrockChatConfig.java:55; src/ui/src/main/resources/application.yml:26"
+  },
+  {
+   "from": "catalog",
+   "to": "catalog-db",
+   "proto": "mysql",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Go GORM mysql driver; provider RETAIL_CATALOG_PERSISTENCE_PROVIDER=mysql, endpoint RETAIL_CATALOG_PERSISTENCE_ENDPOINT=catalog-db:3306 from compose (code default in-memory)",
+   "source": "src/catalog/repository/repository.go:34; src/catalog/config/config.go:28; src/catalog/docker-compose.yml:23"
+  },
+  {
+   "from": "catalog",
+   "to": "opensearch",
+   "proto": "http",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "Go opensearch-go client to RETAIL_CATALOG_SEARCH_OS_ENDPOINT=http://opensearch:9200; only when RETAIL_CATALOG_SEARCH_ENABLED (compose ${SEARCH_ENABLED:-false}, helm search.enabled false)",
+   "source": "src/catalog/main.go:85; src/catalog/repository/opensearch.go:70; src/catalog/docker-compose.yml:24"
+  },
+  {
+   "from": "carts",
+   "to": "carts-db",
+   "proto": "http",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Java AWS SDK DynamoDbClient with endpointOverride RETAIL_CART_PERSISTENCE_DYNAMODB_ENDPOINT=http://carts-db:8000 (dynamodb-local); provider dynamodb set in compose (code default in-memory)",
+   "source": "src/cart/src/main/java/com/amazon/sample/carts/config/DynamoDBConfiguration.java:54; src/cart/docker-compose.yml:19"
+  },
+  {
+   "from": "checkout",
+   "to": "checkout-redis",
+   "proto": "redis",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "NestJS/TypeScript ioredis RedisCheckoutRepository; RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL=redis://checkout-redis:6379 from compose (code default in-memory)",
+   "source": "src/checkout/src/checkout/checkout.module.ts:71; src/checkout/src/config/configuration.ts:23; src/checkout/docker-compose.yml:16"
+  },
+  {
+   "from": "checkout",
+   "to": "orders",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "NestJS/TypeScript HttpOrdersService (generated OrdersApi) with endpoint RETAIL_CHECKOUT_ENDPOINTS_ORDERS=http://orders:8080 (compose override; helm http://orders:80)",
+   "source": "src/checkout/src/checkout/checkout.module.ts:35; src/checkout/src/config/configuration.ts:30; src/app/compose.override.yaml:33"
+  },
+  {
+   "from": "orders",
+   "to": "orders-db",
+   "proto": "postgres",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Java Spring JDBC/Hikari jdbc:postgresql://<RETAIL_ORDERS_PERSISTENCE_ENDPOINT>/orders with endpoint orders-db:5432 from compose (code default in-memory)",
+   "source": "src/orders/src/main/java/com/amazon/sample/orders/config/DataSourceConfig.java:32; src/orders/docker-compose.yml:20"
+  },
+  {
+   "from": "orders",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Java Spring AMQP RabbitTemplate.convertAndSend to fanout exchange (and listener on its own queue); RETAIL_ORDERS_MESSAGING_RABBITMQ_ADDRESSES=rabbitmq:5672 from compose",
+   "source": "src/orders/src/main/java/com/amazon/sample/orders/messaging/rabbitmq/RabbitMQMessagingProvider.java:35; src/orders/src/main/java/com/amazon/sample/orders/config/messaging/RabbitMQMessagingConfig.java:47; src/orders/docker-compose.yml:25"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "cart": "carts",
+   "load-generator": "__optional__"
+  },
+  "hosts": {},
+  "workloads": {}
+ }
+}

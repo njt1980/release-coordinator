@@ -1,0 +1,361 @@
+{
+ "app": "reddog",
+ "split": "held_out",
+ "upstream": "https://github.com/Azure/reddog-code",
+ "gt_source": "Read every service's C# controllers/Program.cs/Startup.cs (Dapr app-ids, pubsub/state/binding/secret-store names), RedDog.UI vue.config.js server-side fetches, the CorporateTransferService function.json bindings, and the in-repo manifests (branch/base kustomization deployments + Dapr components, branch/dependencies, corporate overlay, local components), treating the branch kustomization as the default deployment.",
+ "repos": [
+  {
+   "name": "reddog-code",
+   "url": "https://github.com/Azure/reddog-code.git",
+   "sha": "fa46c0a24d34d089cbf6ff904a5bb2ae6f49c154"
+  }
+ ],
+ "env_sources": [
+  {
+   "type": "k8s",
+   "paths": [
+    "reddog-code/manifests/branch/base/deployments",
+    "reddog-code/manifests/branch/base/components",
+    "reddog-code/manifests/branch/dependencies/sql"
+   ]
+  }
+ ],
+ "observability": [
+  "zipkin"
+ ],
+ "services": {
+  "order-service": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true,
+   "optional": false
+  },
+  "make-line-service": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true,
+   "optional": false
+  },
+  "loyalty-service": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true,
+   "optional": false
+  },
+  "receipt-generation-service": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true,
+   "optional": false
+  },
+  "accounting-service": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true,
+   "optional": false
+  },
+  "virtual-worker": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true,
+   "optional": false
+  },
+  "virtual-customers": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true,
+   "optional": false
+  },
+  "bootstrapper": {
+   "kind": "service",
+   "lang": "csharp",
+   "source": true,
+   "optional": false
+  },
+  "ui": {
+   "kind": "service",
+   "lang": "node",
+   "source": true,
+   "optional": false
+  },
+  "corp-transfer-service": {
+   "kind": "service",
+   "lang": "node",
+   "source": true,
+   "optional": true
+  },
+  "rabbitmq": {
+   "kind": "infra",
+   "what": "RabbitMQ broker (Flux HelmRelease rabbitmq in namespace rabbitmq) behind Dapr pubsub component reddog.pubsub (pubsub.rabbitmq; host from Key Vault secret rabbitmq-connectionstring)",
+   "source": false,
+   "optional": false
+  },
+  "redis": {
+   "kind": "infra",
+   "what": "Redis (redis-cache-master.redis:6379, Flux HelmRelease redis) behind Dapr state components reddog.state.makeline and reddog.state.loyalty (state.redis)",
+   "source": false,
+   "optional": false
+  },
+  "mssql-deployment": {
+   "kind": "infra",
+   "what": "Microsoft SQL Server 2019 (k8s Deployment/Service mssql-deployment:1433); reached via EF Core with connection string from secret reddog-sql",
+   "source": false,
+   "optional": false
+  },
+  "reddogreceipts": {
+   "kind": "infra",
+   "what": "Azure Blob Storage account reddogreceipts, container receipts, behind Dapr output binding reddog.binding.receipt (bindings.azure.blobstorage)",
+   "source": false,
+   "optional": false
+  },
+  "reddog-kv-branch": {
+   "kind": "infra",
+   "what": "Azure Key Vault reddog-kv-branch behind Dapr secret store component reddog.secretstore (secretstores.azure.keyvault)",
+   "source": false,
+   "optional": false
+  },
+  "azure-service-bus": {
+   "kind": "infra",
+   "what": "Azure Service Bus (corporate deployment: Dapr pubsub reddog.pubsub of type pubsub.azure.servicebus; also the corp-transfer-service output queues)",
+   "source": false,
+   "optional": true
+  },
+  "reddogdemocorp-cosmosdb": {
+   "kind": "infra",
+   "what": "Azure Cosmos DB reddogdemocorp (db reddog, collection loyalty) behind the corporate Dapr state component reddog.state.loyalty (state.azure.cosmosdb)",
+   "source": false,
+   "optional": true
+  },
+  "reddog-kv-corp": {
+   "kind": "infra",
+   "what": "Azure Key Vault reddog-kv-corp behind the corporate Dapr secret store reddog.secretstore",
+   "source": false,
+   "optional": true
+  }
+ },
+ "edges": [
+  {
+   "from": "virtual-customers",
+   "to": "order-service",
+   "proto": "dapr-invoke",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Dapr service invocation to app-id order-service (const OrderServiceDaprId): GET product, POST order",
+   "source": "RedDog.VirtualCustomers/VirtualCustomers.cs:15; RedDog.VirtualCustomers/VirtualCustomers.cs:273; RedDog.VirtualCustomers/VirtualCustomers.cs:332"
+  },
+  {
+   "from": "virtual-worker",
+   "to": "make-line-service",
+   "proto": "dapr-invoke",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "Dapr service invocation to app-id make-line-service: GET orders/{storeId}, DELETE orders/{storeId}/{orderId} (driven by Dapr cron input binding 'orders', which is a trigger, not a dependency)",
+   "source": "RedDog.VirtualWorker/Controllers/VirtualWorkerController.cs:17; RedDog.VirtualWorker/Controllers/VirtualWorkerController.cs:99; RedDog.VirtualWorker/Controllers/VirtualWorkerController.cs:112"
+  },
+  {
+   "from": "order-service",
+   "to": "rabbitmq",
+   "proto": "dapr-pubsub",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Publishes topic 'orders' on Dapr pubsub component reddog.pubsub (pubsub.rabbitmq, defined in manifests/branch/base/components/reddog.pubsub.yaml)",
+   "source": "RedDog.OrderService/Controllers/OrderController.cs:22; RedDog.OrderService/Controllers/OrderController.cs:40; manifests/branch/base/components/reddog.pubsub.yaml:7"
+  },
+  {
+   "from": "make-line-service",
+   "to": "rabbitmq",
+   "proto": "dapr-pubsub",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Subscribes to 'orders' and publishes 'ordercompleted' on reddog.pubsub (pubsub.rabbitmq)",
+   "source": "RedDog.MakeLineService/Controllers/MakelineController.cs:21; RedDog.MakeLineService/Controllers/MakelineController.cs:33; RedDog.MakeLineService/Controllers/MakelineController.cs:87; manifests/branch/base/components/reddog.pubsub.yaml:7"
+  },
+  {
+   "from": "make-line-service",
+   "to": "redis",
+   "proto": "dapr-state",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Reads/writes per-store order queue in Dapr state store reddog.state.makeline (state.redis at redis-cache-master.redis:6379)",
+   "source": "RedDog.MakeLineService/Controllers/MakelineController.cs:22; RedDog.MakeLineService/Controllers/MakelineController.cs:132; RedDog.MakeLineService/Controllers/MakelineController.cs:49; manifests/branch/base/components/reddog.state.makeline.yaml:11"
+  },
+  {
+   "from": "loyalty-service",
+   "to": "rabbitmq",
+   "proto": "dapr-pubsub",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Subscribes to topic 'orders' on reddog.pubsub (pubsub.rabbitmq)",
+   "source": "RedDog.LoyaltyService/Controllers/LoyaltyController.cs:16; RedDog.LoyaltyService/Controllers/LoyaltyController.cs:28; manifests/branch/base/components/reddog.pubsub.yaml:7"
+  },
+  {
+   "from": "loyalty-service",
+   "to": "redis",
+   "proto": "dapr-state",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Reads/writes loyalty summaries in Dapr state store reddog.state.loyalty (state.redis at redis-cache-master.redis:6379)",
+   "source": "RedDog.LoyaltyService/Controllers/LoyaltyController.cs:17; RedDog.LoyaltyService/Controllers/LoyaltyController.cs:44; RedDog.LoyaltyService/Controllers/LoyaltyController.cs:54; manifests/branch/base/components/reddog.state.loyalty.yaml:11"
+  },
+  {
+   "from": "receipt-generation-service",
+   "to": "rabbitmq",
+   "proto": "dapr-pubsub",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Subscribes to topic 'orders' on reddog.pubsub (pubsub.rabbitmq)",
+   "source": "RedDog.ReceiptGenerationService/Controllers/ReceiptGenerationController.cs:17; RedDog.ReceiptGenerationService/Controllers/ReceiptGenerationController.cs:26; manifests/branch/base/components/reddog.pubsub.yaml:7"
+  },
+  {
+   "from": "receipt-generation-service",
+   "to": "reddogreceipts",
+   "proto": "dapr-binding",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "InvokeBindingAsync 'create' on Dapr output binding reddog.binding.receipt (bindings.azure.blobstorage, account reddogreceipts)",
+   "source": "RedDog.ReceiptGenerationService/Controllers/ReceiptGenerationController.cs:18; RedDog.ReceiptGenerationService/Controllers/ReceiptGenerationController.cs:36; manifests/branch/base/components/reddog.binding.receipt.yaml:7"
+  },
+  {
+   "from": "accounting-service",
+   "to": "rabbitmq",
+   "proto": "dapr-pubsub",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Subscribes to topics 'orders' and 'ordercompleted' on reddog.pubsub (pubsub.rabbitmq)",
+   "source": "RedDog.AccountingService/Controllers/AccountingController.cs:20; RedDog.AccountingService/Controllers/AccountingController.cs:32; RedDog.AccountingService/Controllers/AccountingController.cs:75; manifests/branch/base/components/reddog.pubsub.yaml:7"
+  },
+  {
+   "from": "accounting-service",
+   "to": "mssql-deployment",
+   "proto": "sql",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "EF Core UseSqlServer(Configuration['reddog-sql']); connection string loaded from Dapr secret store (env var reddog-sql not set in manifests); in-cluster SQL Server is mssql-deployment (exact host lives in Key Vault, not in repo)",
+   "source": "RedDog.AccountingService/Startup.cs:39; RedDog.AccountingService/Program.cs:53; manifests/branch/dependencies/sql/sql-server.yaml:45"
+  },
+  {
+   "from": "accounting-service",
+   "to": "reddog-kv-branch",
+   "proto": "dapr-secretstore",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "At startup config.AddDaprSecretStore('reddog.secretstore', ['reddog-sql']) reads the SQL connection string from the Key Vault-backed secret store",
+   "source": "RedDog.AccountingService/Program.cs:19; RedDog.AccountingService/Program.cs:68; manifests/branch/base/components/reddog.secretstore.yaml:7"
+  },
+  {
+   "from": "bootstrapper",
+   "to": "mssql-deployment",
+   "proto": "sql",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "Job runs EF Core migrations (UseSqlServer) against the accounting database",
+   "source": "RedDog.Bootstrapper/Program.cs:31; RedDog.Bootstrapper/Program.cs:33; manifests/branch/dependencies/sql/sql-server.yaml:45"
+  },
+  {
+   "from": "bootstrapper",
+   "to": "reddog-kv-branch",
+   "proto": "dapr-secretstore",
+   "kind": "infra",
+   "status": "core",
+   "mechanism": "daprClient.GetSecretAsync('reddog.secretstore','reddog-sql') when env var reddog-sql is unset (unset in manifests)",
+   "source": "RedDog.Bootstrapper/Program.cs:14; RedDog.Bootstrapper/Program.cs:107; manifests/branch/base/components/reddog.secretstore.yaml:7"
+  },
+  {
+   "from": "ui",
+   "to": "make-line-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "UI server (vue-cli-service serve devServer 'before' hook, run by 'npm run container') fetches MAKELINE_BASE_URL/orders/{STORE_ID} server-side for /orders/inflight; base URL from secret branch.config makeline_base_url; make-line-service exposed as LoadBalancer :8082 in services-for-ui.yaml",
+   "source": "RedDog.UI/vue.config.js:11; RedDog.UI/vue.config.js:70; manifests/branch/base/deployments/ui.yaml:40; manifests/branch/base/deployments/services-for-ui.yaml:4"
+  },
+  {
+   "from": "ui",
+   "to": "accounting-service",
+   "proto": "http",
+   "kind": "svc",
+   "status": "core",
+   "mechanism": "UI server-side fetches ACCOUNTING_BASE_URL /OrderMetrics, /Orders/Minute/..., /Corp/... ; base URL from secret branch.config accounting_base_url; accounting-service exposed as LoadBalancer :8083 in services-for-ui.yaml",
+   "source": "RedDog.UI/vue.config.js:12; RedDog.UI/vue.config.js:94; manifests/branch/base/deployments/ui.yaml:45; manifests/branch/base/deployments/services-for-ui.yaml:20"
+  },
+  {
+   "from": "corp-transfer-service",
+   "to": "rabbitmq",
+   "proto": "amqp",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "Azure Functions RabbitMQTrigger on queues corp-transfer-orders / corp-transfer-ordercompleted (connection rabbitMQConnectionAppSetting); deployment corp-transfer-fx.yaml is not listed in branch/base/kustomization.yaml",
+   "source": "RedDog.CorporateTransferService/RabbitOrdersFx/function.json:5; RedDog.CorporateTransferService/RabbitOrderCompletedFx/function.json:5; manifests/branch/base/deployments/corp-transfer-fx.yaml:59"
+  },
+  {
+   "from": "corp-transfer-service",
+   "to": "azure-service-bus",
+   "proto": "servicebus",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "Azure Functions serviceBus output binding to queues orders / ordercompleted (connection MyServiceBusConnection)",
+   "source": "RedDog.CorporateTransferService/RabbitOrdersFx/function.json:12; RedDog.CorporateTransferService/RabbitOrderCompletedFx/function.json:12"
+  },
+  {
+   "from": "loyalty-service",
+   "to": "azure-service-bus",
+   "proto": "dapr-pubsub",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "Corporate deployment only: reddog.pubsub is pubsub.azure.servicebus",
+   "source": "manifests/corporate/components/reddog.pubsub.yaml:7; RedDog.LoyaltyService/Controllers/LoyaltyController.cs:28"
+  },
+  {
+   "from": "loyalty-service",
+   "to": "reddogdemocorp-cosmosdb",
+   "proto": "dapr-state",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "Corporate deployment only: reddog.state.loyalty is state.azure.cosmosdb (note: corporate/kustomization.yaml does not list it or loyalty-service.yaml)",
+   "source": "manifests/corporate/components/reddog.state.loyalty.yaml:7; RedDog.LoyaltyService/Controllers/LoyaltyController.cs:44"
+  },
+  {
+   "from": "accounting-service",
+   "to": "azure-service-bus",
+   "proto": "dapr-pubsub",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "Corporate deployment only: reddog.pubsub is pubsub.azure.servicebus",
+   "source": "manifests/corporate/components/reddog.pubsub.yaml:7; RedDog.AccountingService/Controllers/AccountingController.cs:32"
+  },
+  {
+   "from": "accounting-service",
+   "to": "reddog-kv-corp",
+   "proto": "dapr-secretstore",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "Corporate deployment only: reddog.secretstore points at Key Vault reddog-kv-corp",
+   "source": "manifests/corporate/components/reddog.secretstore.yaml:11; RedDog.AccountingService/Program.cs:68"
+  },
+  {
+   "from": "bootstrapper",
+   "to": "reddog-kv-corp",
+   "proto": "dapr-secretstore",
+   "kind": "infra",
+   "status": "optional",
+   "mechanism": "Corporate deployment only: reddog.secretstore points at Key Vault reddog-kv-corp",
+   "source": "manifests/corporate/components/reddog.secretstore.yaml:11; RedDog.Bootstrapper/Program.cs:107"
+  }
+ ],
+ "mapping": {
+  "boundaries": {
+   "reddog-accountingservice": "accounting-service",
+   "reddog-bootstrapper": "bootstrapper",
+   "reddog-corporatetransferservice": "corp-transfer-service",
+   "reddog-loyaltyservice": "loyalty-service",
+   "reddog-makelineservice": "make-line-service",
+   "reddog-orderservice": "order-service",
+   "reddog-receiptgenerationservice": "receipt-generation-service",
+   "reddog-ui": "ui",
+   "reddog-virtualcustomers": "virtual-customers",
+   "reddog-virtualworker": "virtual-worker"
+  },
+  "hosts": {},
+  "workloads": {}
+ }
+}

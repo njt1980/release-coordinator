@@ -72,6 +72,28 @@ services share (`envFrom`) is no Kubernetes-environment edge on its own. Pooled:
 10 silent misses (piggymetrics 1). Trade-off: eShop's lab shares its event-bus ConfigMap, so one true edge
 (webapp to eventbus) is now a flagged miss instead of a K8S_ENV edge.
 
+**Step 1h-c: new held-out apps (2026-11-14, FAILED, much closer).** Four apps never used to tune, ground truth built
+by four separate agents that never saw the scanner, its tests or its output: retail-store
+(aws-containers/retail-store-sample-app; Java, Go, Node), ftgo (microservices-patterns/ftgo-application; Spring,
+Eventuate), reddog (Azure/reddog-code; C#, Dapr) and acme-fitness (ACME Fitness; Go, Python, Node; pinned from
+hjgraca/vmworld2019app, a 2019 copy with source and manifests, since VMware's repository has deployment files only).
+Their `mapping` only links scanner names to ground-truth names (directory vs deployed name), set from the inventory
+lists before looking at any missed edge.
+
+| | 1g held-out (old four) | 1h-c held-out (new four) |
+|---|---|---|
+| inventory P / R | 1.00 / 0.94 | 1.00 / 1.00 |
+| manifest recall / precision | 0.40 / 0.61 | 0.49 / 0.90 |
+| silent misses | 30 | 4 |
+| flagged causes pointing at a real miss | 38% | 73% |
+
+Per app: silent misses in retail-store 1 (AWS SDK `endpointOverride` from a Spring property), ftgo 1 (a shell
+`aws` CLI job), reddog 2 (UI server reading addresses from a Secret: the benchmark sees an unresolved read, which
+the product reports as a gap, so this class is over-counted here); flags are all false alarms in ftgo (1) and
+acme-fitness (2). Most remaining recall loss is flagged, not silent: Dapr service invocation, pub/sub and state
+(reddog, every service flagged), Spring `@ConfigurationProperties` endpoints (retail-store ui), and third-party
+images with no source (ftgo's CDC and Kafka).
+
 ## What is measured
 
 | Metric | Meaning |
@@ -119,3 +141,7 @@ Known caveats:
 | sock-shop | microservices-demo/* (archived; 9 repos) | Java, Go, Node; RabbitMQ |
 | spring-petclinic-microservices | spring-petclinic/spring-petclinic-microservices | Spring Cloud (Eureka, Gateway, Config) |
 | teastore | DescartesResearch/TeaStore | Java; registry-based discovery |
+| retail-store (held out) | aws-containers/retail-store-sample-app | Java/Spring, Go, Node; DynamoDB, RabbitMQ |
+| ftgo (held out) | microservices-patterns/ftgo-application | Spring, Eventuate CDC, Kafka |
+| reddog (held out) | Azure/reddog-code | C#/.NET, Dapr |
+| acme-fitness (held out) | hjgraca/vmworld2019app (ACME Fitness) | Go, Python, Node; MongoDB, Redis |
