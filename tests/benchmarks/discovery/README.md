@@ -94,6 +94,21 @@ acme-fitness (2). Most remaining recall loss is flagged, not silent: Dapr servic
 (reddog, every service flagged), Spring `@ConfigurationProperties` endpoints (retail-store ui), and third-party
 images with no source (ftgo's CDC and Kafka).
 
+**Step 1h close-out (2026-11-14): scanner tuning is frozen.** A missed edge whose caller has an environment read
+with an unknown value (a Secret, conflicting values, no value and no default) now counts as *flagged*: discovery
+records the read as an unresolved entity and the assessment reports it as a `DISCOVERY_GAP`, so the coordinator
+sees it. Held-out result: 2 silent misses, 75% of flagged services and 82% of causes useful; acceptance still
+fails on those 2 misses and on ftgo's and acme-fitness's few flags (1 and 2, all false alarms).
+
+Known silent-miss classes (documented limitations, not fixed, so the held-out apps stay honest):
+1. An SDK client whose address is a framework property the scanner doesn't treat as an address
+   (retail-store: AWS SDK `endpointOverride` from `retail.cart.persistence.dynamodb.endpoint`).
+2. A shell script or CLI job passing an address from the environment (ftgo: `aws ... --endpoint-url $X`).
+3. Public SaaS endpoints (not tracked as dependencies by design) and calls made from the browser.
+
+Next scanner changes come from corrections coordinators make on real projects (the project dependency review),
+not from these apps.
+
 ## What is measured
 
 | Metric | Meaning |
@@ -102,7 +117,7 @@ images with no source (ftgo's CDC and Kafka).
 | static P/R | Edges from literal URLs in code only. |
 | manifest P/R | Static edges plus env-variable references resolved against env read from the app's own deployment files. This emulates the Kubernetes source. |
 | missed flagged / silent / no-boundary | How each missed edge (manifest mode) shows up to a coordinator. |
-| flags useful (services, causes) | Of the services flagged incomplete (and of the causes, services sharing the same unread files), how many have a real missed edge; the rest are false alarms. |
+| flags useful (services, causes) | Of the services flagged (incomplete coverage, or an environment read whose value stays unknown), and of the causes (services sharing the same unread files; each unknown read), how many have a real missed edge; the rest are false alarms. |
 
 Edges are split into `svc` (service to service) and `infra` (service to database, cache or broker).
 Unresolved targets count as false positives in `all`.

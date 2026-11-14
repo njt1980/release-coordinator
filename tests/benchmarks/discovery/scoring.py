@@ -238,17 +238,52 @@ def _causes(match: ServiceMatch) -> dict[str, set[str]]:
     return causes
 
 
-def miss_accounting(match: ServiceMatch, missed: list[dict[str, object]]) -> MissAccounting:
+def unresolved_env_reads(match: ServiceMatch, envs: dict[str, WorkloadEnv]) -> dict[str, set[str]]:
+    """Ground-truth service -> environment reads whose value stays unknown
+    (OPAQUE: a Secret or conflicting values; UNSET: no value and no default).
+
+    Discovery records each as an unresolved entity, which an assessment
+    reports as a DISCOVERY_GAP for services in the radius: the coordinator
+    sees it, so a miss behind it is flagged, not silent. Only services whose
+    deployment env is emulated count (as in manifest mode).
+    """
+    found: dict[str, set[str]] = {}
+    for service in match.services:
+        env = envs.get(service.truth_name or "")
+        if env is None or service.truth_name is None:
+            continue
+        environment = _environment(service.truth_name, env)
+        for ref in service.scan.references:
+            if ref.kind is not ReferenceKind.ENV_VAR:
+                continue
+            outcome = resolve_variable(ref.endpoint, service.scan.config, environment, None).outcome
+            if outcome in (ResolutionOutcome.OPAQUE, ResolutionOutcome.UNSET):
+                found.setdefault(service.truth_name, set()).add(ref.endpoint)
+    return found
+
+
+def miss_accounting(
+    match: ServiceMatch, missed: list[dict[str, object]], unresolved_env: dict[str, set[str]] | None = None
+) -> MissAccounting:
+    """How misses present to a coordinator. A service is flagged when its
+    coverage is incomplete or it has an unresolved environment read
+    (``unresolved_env_reads``); each such read is a cause of its own."""
+    unresolved_env = unresolved_env or {}
     reasons: dict[str, set[str]] = {}
     for service in match.services:
         if service.truth_name:
             coverage = service.scan.coverage
             found = {u.reason.value for u in coverage.unscanned} if coverage else set()
+            if unresolved_env.get(service.truth_name):
+                found.add("ENV_UNRESOLVED")
             reasons.setdefault(service.truth_name, set()).update(found)
     incomplete = {name for name, r in reasons.items() if r}
     callers = [str(edge["from"]) for edge in missed]
     missing_callers = set(callers)
     causes = _causes(match)
+    for name, variables in unresolved_env.items():
+        for variable in variables:
+            causes.setdefault(f"env:{name}:{variable}", set()).add(name)
     return MissAccounting(
         services_scored=len(reasons),
         services_not_understood=sum("REFERENCES_NOT_UNDERSTOOD" in r for r in reasons.values()),
@@ -279,7 +314,7 @@ def score_app(
         app=truth.app,
         inventory=inventory_score(truth, match),
         edges=edges,
-        misses=miss_accounting(match, edges[EdgeMode.MANIFEST].missed),
+        misses=miss_accounting(match, edges[EdgeMode.MANIFEST].missed, unresolved_env_reads(match, by_service)),
     )
 
 

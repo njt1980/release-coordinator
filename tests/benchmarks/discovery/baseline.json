@@ -22,7 +22,7 @@
    "manifest_recall": 1.0,
    "missed_silent": 0,
    "missed_flagged": 0,
-   "services_flagged": 4,
+   "services_flagged": 6,
    "flag_precision": 0.0,
    "cause_precision": 0.0
   },
@@ -35,7 +35,7 @@
    "manifest_recall": 1.0,
    "missed_silent": 0,
    "missed_flagged": 0,
-   "services_flagged": 1,
+   "services_flagged": 5,
    "flag_precision": 0.0,
    "cause_precision": 0.0
   },
@@ -50,7 +50,7 @@
    "missed_flagged": 1,
    "services_flagged": 9,
    "flag_precision": 0.111,
-   "cause_precision": 0.167
+   "cause_precision": 0.2
   },
   "eShopOnContainers": {
    "inventory_precision": 1.0,
@@ -59,11 +59,11 @@
    "static_recall": 0.244,
    "manifest_precision": 0.577,
    "manifest_recall": 0.732,
-   "missed_silent": 3,
-   "missed_flagged": 8,
-   "services_flagged": 5,
-   "flag_precision": 0.4,
-   "cause_precision": 0.4
+   "missed_silent": 1,
+   "missed_flagged": 10,
+   "services_flagged": 12,
+   "flag_precision": 0.333,
+   "cause_precision": 0.419
   },
   "ftgo": {
    "inventory_precision": 1.0,
@@ -87,7 +87,7 @@
    "manifest_recall": 1.0,
    "missed_silent": 0,
    "missed_flagged": 0,
-   "services_flagged": 6,
+   "services_flagged": 11,
    "flag_precision": 0.0,
    "cause_precision": 0.0
   },
@@ -100,9 +100,9 @@
    "manifest_recall": 0.974,
    "missed_silent": 0,
    "missed_flagged": 1,
-   "services_flagged": 11,
-   "flag_precision": 0.091,
-   "cause_precision": 0.091
+   "services_flagged": 12,
+   "flag_precision": 0.083,
+   "cause_precision": 0.077
   },
   "piggymetrics": {
    "inventory_precision": 1.0,
@@ -124,9 +124,9 @@
    "static_recall": 0.0,
    "manifest_precision": 0.0,
    "manifest_recall": 0.0,
-   "missed_silent": 2,
-   "missed_flagged": 14,
-   "services_flagged": 8,
+   "missed_silent": 0,
+   "missed_flagged": 16,
+   "services_flagged": 9,
    "flag_precision": 1.0,
    "cause_precision": 1.0
   },
@@ -141,7 +141,7 @@
    "missed_flagged": 6,
    "services_flagged": 4,
    "flag_precision": 0.75,
-   "cause_precision": 0.75
+   "cause_precision": 0.875
   },
   "robot-shop": {
    "inventory_precision": 1.0,
@@ -163,11 +163,11 @@
    "static_recall": 0.0,
    "manifest_precision": 1.0,
    "manifest_recall": 0.267,
-   "missed_silent": 5,
-   "missed_flagged": 5,
-   "services_flagged": 1,
-   "flag_precision": 1.0,
-   "cause_precision": 1.0
+   "missed_silent": 0,
+   "missed_flagged": 10,
+   "services_flagged": 4,
+   "flag_precision": 0.75,
+   "cause_precision": 0.8
   },
   "spring-petclinic-microservices": {
    "inventory_precision": 1.0,
@@ -203,11 +203,11 @@
   "static_recall": 0.128,
   "manifest_precision": 0.871,
   "manifest_recall": 0.725,
-  "missed_silent": 14,
-  "missed_flagged": 56,
-  "services_flagged": 66,
-  "flag_precision": 0.424,
-  "cause_precision": 0.424
+  "missed_silent": 5,
+  "missed_flagged": 65,
+  "services_flagged": 89,
+  "flag_precision": 0.371,
+  "cause_precision": 0.416
  },
  "pooled_held_out": {
   "inventory_precision": 1.0,
@@ -216,10 +216,10 @@
   "static_recall": 0.164,
   "manifest_precision": 0.9,
   "manifest_recall": 0.491,
-  "missed_silent": 4,
-  "missed_flagged": 20,
-  "services_flagged": 15,
-  "flag_precision": 0.733,
-  "cause_precision": 0.733
+  "missed_silent": 2,
+  "missed_flagged": 22,
+  "services_flagged": 16,
+  "flag_precision": 0.75,
+  "cause_precision": 0.818
  }
 }
