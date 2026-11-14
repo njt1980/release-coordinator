@@ -59,6 +59,25 @@ class ChangedFilesTests(unittest.TestCase):
         )
 
 
+class SdkChangeEntryTests(unittest.TestCase):
+    def test_fields_kept_in_additional_properties_are_read(self) -> None:
+        # What azure-devops returns for an iteration change (seen live): the
+        # model declares neither changeType nor item, so both land in
+        # additional_properties.
+        from azure.devops.v7_1.git.models import GitPullRequestChange
+
+        entry = GitPullRequestChange(change_tracking_id=1)
+        entry.additional_properties = {
+            "changeType": "edit",
+            "changeId": 1,
+            "item": {"objectId": "746F", "path": "/src/cart/src/services/CartService.cs"},
+        }
+        self.assertEqual(
+            changed_files([entry]),
+            [PullRequestFile(path="src/cart/src/services/CartService.cs", change=FileChange.EDIT)],
+        )
+
+
 class BuildDiffTests(unittest.TestCase):
     TEXT = {
         ("a.txt", "base"): "one\ntwo\n",
