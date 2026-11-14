@@ -8,6 +8,7 @@ from typing import Final, Literal
 
 from pydantic import BaseModel
 
+from src.coordinator.coverage import radius_shape_findings, static_coverage_issues
 from src.coordinator.policy import decide_release, needs_model
 from src.coordinator.project_policy import (
     live_coverage,
@@ -39,6 +40,7 @@ from src.coordinator.sequencing import DeploymentPlan, sequence_deployment
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
 from src.core.models import (
+    REPOSITORY_METADATA_KEY,
     AssessmentEvidence,
     DependencyEdge,
     DiscoveryIncompleteError,
@@ -57,7 +59,7 @@ from src.core.models import (
     UnresolvedEntityKind,
     UnresolvedReach,
 )
-from src.core.service_ids import IdentityIndex
+from src.core.service_ids import IdentityIndex, parse_env_var_reference
 from src.tools.baseline_store import BaselineScope, StoredBaseline, default_store
 from src.tools.policy_store import (
     LoadedPolicy,
@@ -323,6 +325,47 @@ def explain_unset(reach: UnresolvedReach) -> UnresolvedReach:
     )
 
 
+def explain_pipeline(reach: UnresolvedReach, graph: KnowledgeGraph) -> UnresolvedReach:
+    """Say when the service's pipelines may set an unresolved variable.
+
+    Kubernetes didn't give the variable a readable value, but a build
+    pipeline of the service's repository defines it (or imports variables
+    we can't read), so the image may carry it. Pipeline values never
+    resolve the reference; they are shown for the reviewer.
+    """
+    entity = next((e for e in graph.unresolved_entities if e.entity_id == reach.node), None)
+    if entity is None or entity.kind is not UnresolvedEntityKind.ENVIRONMENT_VARIABLE:
+        return reach
+    parsed = parse_env_var_reference(entity.reference)
+    if parsed is None:
+        return reach
+    service_name, variable = parsed
+    repositories = {
+        str(service.metadata[REPOSITORY_METADATA_KEY]).lower()
+        for service in graph.services
+        if service.name.lower() == service_name and REPOSITORY_METADATA_KEY in service.metadata
+    }
+    notes: list[str] = []
+    for pipeline in graph.pipeline_variables or []:
+        if pipeline.repository.lower() not in repositories:
+            continue
+        names = [*pipeline.variables, *pipeline.withheld_variables, *pipeline.opaque_variables]
+        name = next((n for n in names if n.lower() == variable), variable)
+        if pipeline.may_define(name):
+            notes.append(pipeline.describe(name))
+    if not notes:
+        return reach
+    return reach.model_copy(
+        update={
+            "detail": (
+                f"{reach.detail}. Kubernetes gives it no readable value, but "
+                + "; ".join(notes)
+                + ": a build may bake it into the image, which discovery doesn't read"
+            )
+        }
+    )
+
+
 def policy_baseline_issues(
     policy: ProjectPolicy | None, baseline: StoredBaseline, now: datetime
 ) -> list[EvidenceIssue]:
@@ -542,6 +585,7 @@ def verify_revision_node(state: ReleaseGraphState) -> dict[str, object]:
         )
         return {"discovery_issues": issues, "revision_lag": lag}
     head_services = [scan for repo_scan in head.items for scan in repo_scan.services]
+    head_coverage = [repo_scan.coverage() for repo_scan in head.items]
     for service in missing_head_services(roots, head_services):
         issues.append(
             _revision_issue(
@@ -558,6 +602,7 @@ def verify_revision_node(state: ReleaseGraphState) -> dict[str, object]:
         "assessed_graph": topology.graph,
         "dependency_changes": topology,
         "revision_lag": lag,
+        "head_coverage": head_coverage,
     }
 
 
@@ -576,9 +621,10 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     dependency anywhere in the radius that the project policy does not
     exempt, a baseline relying on mock data, a baseline that did not scan
     the policy's environment and cluster, a baseline older than the policy
-    allows, a required evidence source that did not succeed, or commits
+    allows, a required evidence source that did not succeed, commits
     between the baseline and the base that change the release (see
-    ``RevisionLag``). The radius is walked over ``assessed_graph`` (the
+    ``RevisionLag``), or source files the static scan couldn't read (see
+    ``static_coverage_issues``). The radius is walked over ``assessed_graph`` (the
     head's dependencies) when the head was scanned, the baseline otherwise.
     """
     scope = _scope(state)
@@ -613,13 +659,17 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     gaps, exempted = unresolved_gaps(
         policy,
         [
-            explain_unset(reach) if reach.node in unset_kind else reach
+            explain_unset(reach) if reach.node in unset_kind else explain_pipeline(reach, graph)
             for reach in radius.unresolved
         ],
     )
     issues.extend(_gap(issue) for issue in target_issues)
     issues.extend(gaps)
     issues.extend(policy_baseline_issues(policy, baseline, utc_now()))
+    coverage_issues, unscanned_exempted = static_coverage_issues(
+        policy, baseline.graph, baseline.snapshot_id, state.get("head_coverage") or []
+    )
+    issues.extend(coverage_issues)
     if baseline.demo_mode:
         issues.append(
             EvidenceIssue(
@@ -637,6 +687,10 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         "matched_edges": radius.matched_edges,
         "discovery_issues": issues,
         "exempted_dependencies": exempted,
+        "exempted_unscanned_files": unscanned_exempted,
+        "shape_findings": radius_shape_findings(
+            baseline.graph, [*targets, *radius.upstream, *radius.downstream]
+        ),
         "baseline_snapshot_id": baseline.snapshot_id,
         "baseline_created_at": baseline.created_at,
         "baseline_demo_mode": baseline.demo_mode,
@@ -914,6 +968,8 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         head_scanned=changes is not None,
         dependencies_added=list(changes.added) if changes else [],
         dependencies_removed=list(changes.removed) if changes else [],
+        exempted_unscanned_files=list(state.get("exempted_unscanned_files", [])),
+        shape_findings=list(state.get("shape_findings", [])),
     )
 
 
@@ -977,7 +1033,15 @@ def _render_report(assessment: ReleaseAssessment, state: ReleaseGraphState) -> s
     )
     exemptions = [
         f"{item.subject} ({item.reason})"
-        for item in [*evidence.exempted_files, *evidence.exempted_dependencies]
+        for item in [
+            *evidence.exempted_files,
+            *evidence.exempted_dependencies,
+            *evidence.exempted_unscanned_files,
+        ]
+    ]
+    shape = [
+        f"{finding.namespace}/{finding.object} [{finding.kind.value}]: {finding.detail}"
+        for finding in evidence.shape_findings
     ]
     target = (
         f"{evidence.baseline_environment}/{evidence.baseline_cluster}"
@@ -1032,6 +1096,7 @@ def _render_report(assessment: ReleaseAssessment, state: ReleaseGraphState) -> s
         f"**Policy Exemptions:** {_list(exemptions)}\n\n"
         f"**Target Services:** {_list(state.get('target_services', []))}\n\n"
         f"**Unmapped Files:** {_list(evidence.unmapped_files)}\n\n"
+        f"**Out-of-Shape Kubernetes Objects in the Radius:** {_list(shape)}\n\n"
         "**Blast Radius:**\n"
         "- **Upstream (depend on the target, directly or transitively):** "
         f"{_list(state.get('upstream_services', []))}\n"

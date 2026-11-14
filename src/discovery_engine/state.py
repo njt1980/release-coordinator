@@ -5,7 +5,10 @@ from typing import TypedDict
 from src.core.models import (
     DependencyEdge,
     DiscoveryStageReport,
+    PipelineVariables,
+    RepositoryCoverage,
     ScannedRevision,
+    ShapeFinding,
     ServiceEnvironment,
     ServiceNode,
     TelemetryClusterFilter,
@@ -27,6 +30,10 @@ class DiscoveryGraphState(TypedDict):
     commit each repository was read at. ``kubernetes_api_server`` is the API
     server the manifest scan read and ``telemetry_cluster`` the cluster
     filter the telemetry query applied; both prove the ``cluster`` label.
+    ``static_coverage`` and ``pipeline_variables`` are recorded per scanned
+    repository, ``kubernetes_shape`` per out-of-shape namespace object, and
+    ``manifest_edges`` are dependencies the manifests declare (an
+    ExternalName Service's alias to its host).
     """
 
     tenant: str
@@ -48,3 +55,7 @@ class DiscoveryGraphState(TypedDict):
     baseline_snapshot_id: str
     kubernetes_api_server: str
     telemetry_cluster: TelemetryClusterFilter | None
+    static_coverage: list[RepositoryCoverage]
+    pipeline_variables: list[PipelineVariables]
+    kubernetes_shape: list[ShapeFinding]
+    manifest_edges: list[DependencyEdge]

@@ -13,9 +13,12 @@ from src.core.models import (
     DiscoveryStageReport,
     DiscoveryStatus,
     EvidenceIssue,
+    PipelineVariables,
+    RepositoryCoverage,
     RunEventStatus,
     RuntimeEvidenceState,
     ServiceIdentity,
+    ShapeFinding,
 )
 from src.orchestration.run_log import EventDraft
 
@@ -125,8 +128,82 @@ def _code_scan(before: State, update: State) -> list[EventDraft]:
             f"{_plural(services, 'service directory', 'service directories')}, "
             f"{_plural(report.item_count, 'dependency reference')} in code.",
             [f"{r.repository} @ {r.commit_sha[:12]} ({r.branch})" for r in revisions],
-        )
+        ),
+        *_coverage_events(stage, list(update.get("static_coverage") or [])),
+        *_pipeline_events(stage, list(update.get("pipeline_variables") or [])),
     ]
+
+
+def _coverage_events(stage: str, records: list[RepositoryCoverage]) -> list[EventDraft]:
+    """Say which service directories have source the scan couldn't read."""
+    gaps = [
+        f"{service.service_name} ({record.repository}/{service.root or '.'}): "
+        f"{len(service.unscanned)} unscanned, e.g. {service.unscanned[0].path}"
+        for record in records
+        for service in record.services
+        if service.unscanned
+    ]
+    unowned = [path for record in records for path in record.unowned_source_files]
+    events: list[EventDraft] = []
+    if gaps:
+        events.append(
+            _event(
+                stage,
+                RunEventStatus.WARNING,
+                f"{_plural(len(gaps), 'service has', 'services have')} source the scanner "
+                "can't read; releases are STATIC_COVERAGE_INCOMPLETE until reviewed "
+                "files are exempted.",
+                gaps,
+            )
+        )
+    elif records:
+        events.append(
+            _event(stage, RunEventStatus.PASSED, "Every service directory's source was scanned.")
+        )
+    if unowned:
+        events.append(
+            _event(
+                stage,
+                RunEventStatus.INFO,
+                f"{_plural(len(unowned), 'source file')} outside every service directory "
+                "(not read).",
+                unowned[:20],
+            )
+        )
+    return events
+
+
+def _pipeline_events(stage: str, pipelines: list[PipelineVariables]) -> list[EventDraft]:
+    """Summarize what each repository's pipelines define."""
+    events: list[EventDraft] = []
+    for pipeline in pipelines:
+        if not pipeline.readable:
+            events.append(
+                _event(
+                    stage,
+                    RunEventStatus.WARNING,
+                    f"Pipelines of {pipeline.repository} couldn't be read ({pipeline.error}); "
+                    "none of its variables can be shown unset.",
+                )
+            )
+            continue
+        named = {*pipeline.variables, *pipeline.withheld_variables, *pipeline.opaque_variables}
+        if named or pipeline.opaque_sources:
+            events.append(
+                _event(
+                    stage,
+                    RunEventStatus.INFO,
+                    f"Pipelines of {pipeline.repository} define "
+                    f"{_plural(len(named), 'variable')}"
+                    + (
+                        f" and import {_plural(len(pipeline.opaque_sources), 'source')} we can't read."
+                        if pipeline.opaque_sources
+                        else "."
+                    ),
+                    [*sorted(named), *pipeline.opaque_sources],
+                )
+            )
+    return events
 
 
 def _kubernetes(before: State, update: State) -> list[EventDraft]:
@@ -148,6 +225,17 @@ def _kubernetes(before: State, update: State) -> list[EventDraft]:
             + (f" from {server}." if server else "."),
         )
     ]
+    findings: list[ShapeFinding] = list(update.get("kubernetes_shape") or [])
+    if findings:
+        events.append(
+            _event(
+                stage,
+                RunEventStatus.INFO,
+                f"{_plural(len(findings), 'object')} outside the usual shape "
+                "(a Deployment or StatefulSet behind a Service).",
+                [f"{f.namespace}/{f.object} [{f.kind.value}]: {f.detail}" for f in findings],
+            )
+        )
     if not server:
         events.append(
             _event(

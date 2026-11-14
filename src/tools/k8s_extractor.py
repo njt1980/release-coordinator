@@ -2,15 +2,22 @@
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime, timezone
 from typing import Any, Final, NamedTuple
+
+from pydantic import BaseModel, Field
 
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
 from src.core.models import (
+    DependencyEdge,
+    DiscoveryMethod,
     DiscoveryResult,
     ServiceEnvironment,
     ServiceNode,
+    ShapeFinding,
+    ShapeFindingKind,
     normalize_api_server,
 )
 from src.core.service_ids import IdentityContext
@@ -30,6 +37,7 @@ class KubernetesExtractor:
     def __init__(self) -> None:
         self._core_v1_api: client.CoreV1Api | None = None
         self._apps_v1_api: client.AppsV1Api | None = None
+        self._batch_v1_api: client.BatchV1Api | None = None
         self._api_server = ""
         try:
             config.load_kube_config()  # type: ignore[no-untyped-call]
@@ -41,6 +49,7 @@ class KubernetesExtractor:
                 return
         self._core_v1_api = client.CoreV1Api()
         self._apps_v1_api = client.AppsV1Api()
+        self._batch_v1_api = client.BatchV1Api()
         self._api_server = _normalized_server(
             str(client.Configuration.get_default_copy().host or "")
         )
@@ -93,85 +102,33 @@ class KubernetesExtractor:
             )
             return False, str(error)
 
-    def get_namespace_services(
+    def get_namespace_topology(
         self, namespace: str, context: IdentityContext
-    ) -> DiscoveryResult[ServiceNode]:
-        """Return service nodes observed in a Kubernetes namespace.
+    ) -> DiscoveryResult["NamespaceTopology"]:
+        """Return a namespace's services, their environments and its shape.
 
-        This method is intended to read service metadata from the specified
-        namespace only. It must not create, update, or delete Kubernetes
-        resources. Each node's ``service_id`` is its FQURI, built from
-        ``context`` (tenant, environment, cluster) and the namespace.
-
-        Args:
-            namespace: Kubernetes namespace whose services to inspect.
-            context: Identity segments known for this discovery run.
+        Read-only: nothing is created, updated or deleted; Secrets are never
+        read. Services become nodes under FQURIs built from ``context``.
+        Pod templates come from Deployments, StatefulSets, DaemonSets,
+        CronJobs, and Jobs, ReplicaSets and Pods without an owner; pods
+        whose controller is another kind (an operator, Argo Rollouts) are
+        read from their running specs. Each Service gets the environment
+        of the templates it selects (see ``_service_environment``). A
+        long-running workload or CronJob that no Service selects is
+        registered as a service too (``exposed=false``), so its calls
+        count; an ExternalName Service gets a manifest edge to its host.
+        Objects outside the supported shape are reported as findings.
 
         Returns:
-            SUCCESS with the namespace's services, PARTIAL when some service
-            objects were unusable, or FAILED when the namespace could not be
-            listed.
-        """
-        if self._core_v1_api is None:
-            logger.error("Kubernetes API client is unavailable")
-            return DiscoveryResult[ServiceNode].failed(
-                f"{namespace}: Kubernetes client configuration could not be loaded"
-            )
-
-        try:
-            response = self._core_v1_api.list_namespaced_service(namespace)
-        except Exception as error:
-            logger.exception(
-                "Failed to list Kubernetes services in namespace %s", namespace
-            )
-            return DiscoveryResult[ServiceNode].failed(
-                f"{namespace}: failed to list services: {error}"
-            )
-
-        services: list[ServiceNode] = []
-        skipped = 0
-        for service in response.items:
-            metadata = service.metadata
-            if not metadata or not metadata.name:
-                logger.warning("Skipping Kubernetes service without a name")
-                skipped += 1
-                continue
-            services.append(
-                ServiceNode(
-                    service_id=context.identity(metadata.name, namespace).uri,
-                    name=metadata.name,
-                )
-            )
-        errors = (
-            [f"{namespace}: skipped {skipped} service(s) without a name"]
-            if skipped
-            else []
-        )
-        return DiscoveryResult[ServiceNode].from_items(services, errors)
-
-    def get_namespace_environments(
-        self, namespace: str, context: IdentityContext
-    ) -> DiscoveryResult[ServiceEnvironment]:
-        """Return the container environment variables of each namespace service.
-
-        Reads Deployments, StatefulSets and standalone Pods (Pods with no
-        owner, so ReplicaSet-managed Pods are not counted twice) and maps
-        each workload to every Service whose selector matches its pod
-        labels. Variables come from ``env[].value``,
-        ``env[].valueFrom.configMapKeyRef`` and ``envFrom[].configMapRef``;
-        other sources (Secrets, field refs) are not read. A variable with conflicting values
-        across one service's containers is dropped rather than guessed.
-        Read-only: nothing is created, updated or deleted.
-
-        Returns:
-            SUCCESS with one entry per selected service, PARTIAL when some
-            resource kinds could not be listed, or FAILED when the client is
-            unavailable or the namespace's services could not be listed.
+            SUCCESS with one ``NamespaceTopology``, PARTIAL when some kinds
+            couldn't be listed or a Service has no name, or FAILED when the
+            client is unavailable or the Services can't be listed.
         """
         core_v1_api = self._core_v1_api
         apps_v1_api = self._apps_v1_api
-        if core_v1_api is None or apps_v1_api is None:
-            return DiscoveryResult[ServiceEnvironment].failed(
+        batch_v1_api = self._batch_v1_api
+        if core_v1_api is None or apps_v1_api is None or batch_v1_api is None:
+            return DiscoveryResult[NamespaceTopology].failed(
                 f"{namespace}: Kubernetes client configuration could not be loaded"
             )
         errors: list[str] = []
@@ -180,50 +137,43 @@ class KubernetesExtractor:
             namespace, "services", errors,
         )
         if services is None:
-            return DiscoveryResult[ServiceEnvironment].failed(errors[0])
+            return DiscoveryResult[NamespaceTopology].failed(errors[0])
+
+        def listed(kind: str, request: Callable[[], Any]) -> list[Any]:
+            return _list_items(request, namespace, kind, errors) or []
+
         config_maps = _config_map_data(
-            _list_items(
-                lambda: core_v1_api.list_namespaced_config_map(namespace),
-                namespace, "config maps", errors,
-            )
-            or []
+            listed("config maps", lambda: core_v1_api.list_namespaced_config_map(namespace))
         )
-        templates: list[PodTemplate] = []
-        workload_listers: list[tuple[str, Callable[[], Any]]] = [
-            ("deployments", lambda: apps_v1_api.list_namespaced_deployment(namespace)),
-            (
-                "stateful sets",
-                lambda: apps_v1_api.list_namespaced_stateful_set(namespace),
+        templates, findings = _pod_templates(
+            namespace,
+            deployments=listed(
+                "deployments", lambda: apps_v1_api.list_namespaced_deployment(namespace)
             ),
-        ]
-        for kind, request in workload_listers:
-            for item in _list_items(request, namespace, kind, errors) or []:
-                if item.spec and item.spec.template:
-                    template = item.spec.template
-                    templates.append(
-                        PodTemplate(
-                            labels=_labels(template.metadata),
-                            workload=_workload_name(kind, item),
-                            spec=template.spec,
-                        )
-                    )
-        templates.extend(
-            PodTemplate(
-                labels=_labels(pod.metadata),
-                workload=_workload_name("pods", pod),
-                spec=pod.spec,
-            )
-            for pod in _list_items(
-                lambda: core_v1_api.list_namespaced_pod(namespace),
-                namespace, "pods", errors,
-            )
-            or []
-            if not (pod.metadata and pod.metadata.owner_references)
+            stateful_sets=listed(
+                "stateful sets", lambda: apps_v1_api.list_namespaced_stateful_set(namespace)
+            ),
+            daemon_sets=listed(
+                "daemon sets", lambda: apps_v1_api.list_namespaced_daemon_set(namespace)
+            ),
+            replica_sets=listed(
+                "replica sets", lambda: apps_v1_api.list_namespaced_replica_set(namespace)
+            ),
+            cron_jobs=listed(
+                "cron jobs", lambda: batch_v1_api.list_namespaced_cron_job(namespace)
+            ),
+            jobs=listed("jobs", lambda: batch_v1_api.list_namespaced_job(namespace)),
+            pods=listed("pods", lambda: core_v1_api.list_namespaced_pod(namespace)),
         )
-        environments = _service_environments(
-            services, templates, config_maps, namespace, context
-        )
-        return DiscoveryResult[ServiceEnvironment].from_items(environments, errors)
+        named = [item for item in services if item.metadata and item.metadata.name]
+        if len(named) < len(services):
+            logger.warning("Skipping Kubernetes service without a name")
+            errors.append(
+                f"{namespace}: skipped {len(services) - len(named)} service(s) without a name"
+            )
+        topology = _namespace_topology(namespace, context, named, templates, config_maps)
+        topology.findings[:0] = findings
+        return DiscoveryResult[NamespaceTopology].from_items([topology], errors)
 
 
 def _normalized_server(host: str) -> str:
@@ -364,88 +314,360 @@ def _selects(selector: Mapping[str, str], labels: Mapping[str, str]) -> bool:
     return bool(selector) and all(labels.get(k) == v for k, v in selector.items())
 
 
+class NamespaceTopology(BaseModel):
+    """What one namespace's manifests say, as discovery records it.
+
+    ``services`` are the namespace's Services plus its unexposed workloads;
+    ``environments`` the container environment each one's templates
+    receive; ``edges`` the dependencies manifests declare (an ExternalName
+    alias to its host); ``findings`` the objects outside the supported shape.
+    """
+
+    namespace: str
+    services: list[ServiceNode] = Field(default_factory=list)
+    environments: list[ServiceEnvironment] = Field(default_factory=list)
+    edges: list[DependencyEdge] = Field(default_factory=list)
+    findings: list[ShapeFinding] = Field(default_factory=list)
+
+
+MANIFEST_PROVENANCE: Final[str] = "kubernetes"
+# The Service every cluster creates for its own API server; not an app object.
+_API_SERVER_SERVICE: Final[tuple[str, str]] = ("default", "kubernetes")
+_EXPOSED_METADATA_KEY: Final[str] = "exposed"
+_WORKLOAD_METADATA_KEY: Final[str] = "workload"
+# Owner kinds whose pod templates are read directly.
+_READ_CONTROLLERS: Final[frozenset[str]] = frozenset(
+    {"Deployment", "StatefulSet", "DaemonSet", "CronJob"}
+)
+
+
 class PodTemplate(NamedTuple):
     """A pod spec some workload runs, with its labels and owner.
 
     ``workload`` is ``<kind>/<name>`` (for example ``deployment/orders``).
+    ``registrable`` is true for workloads that run continuously or on a
+    schedule (registered as a service when no Service selects them), false
+    for bare Jobs and Pods, which come and go.
     """
 
     labels: dict[str, str]
     workload: str
     spec: Any
+    registrable: bool = True
 
 
-_WORKLOAD_KINDS: Final[dict[str, str]] = {
-    "deployments": "deployment",
-    "stateful sets": "statefulset",
-    "pods": "pod",
-}
+def _name(item: Any) -> str:
+    return str(getattr(getattr(item, "metadata", None), "name", None) or "?")
 
 
-def _workload_name(kind: str, item: Any) -> str:
-    """Return ``<kind>/<name>`` for a listed workload."""
-    name = getattr(getattr(item, "metadata", None), "name", None) or "?"
-    return f"{_WORKLOAD_KINDS.get(kind, kind)}/{name}"
+def _owners(item: Any) -> list[Any]:
+    return list(getattr(getattr(item, "metadata", None), "owner_references", None) or [])
 
 
-def _service_environments(
-    services: Iterable[Any],
-    templates: list[PodTemplate],
-    config_maps: Mapping[str, Mapping[str, str]],
+def _controller(item: Any) -> tuple[str, str] | None:
+    """Return the (kind, name) of an object's controlling owner, if any."""
+    owners = _owners(item)
+    if not owners:
+        return None
+    owner = next((o for o in owners if getattr(o, "controller", None)), owners[0])
+    return str(getattr(owner, "kind", None) or "?"), str(getattr(owner, "name", None) or "?")
+
+
+def _template(kind: str, item: Any, template: Any, registrable: bool = True) -> PodTemplate | None:
+    if template is None:
+        return None
+    return PodTemplate(
+        labels=_labels(getattr(template, "metadata", None)),
+        workload=f"{kind}/{_name(item)}",
+        spec=getattr(template, "spec", None),
+        registrable=registrable,
+    )
+
+
+def _pod_templates(
     namespace: str,
-    context: IdentityContext,
-) -> list[ServiceEnvironment]:
-    """Build each service's env mapping from the pod templates it selects.
+    *,
+    deployments: list[Any],
+    stateful_sets: list[Any],
+    daemon_sets: list[Any],
+    replica_sets: list[Any],
+    cron_jobs: list[Any],
+    jobs: list[Any],
+    pods: list[Any],
+) -> tuple[list[PodTemplate], list[ShapeFinding]]:
+    """Return every pod template the namespace runs, and unread controllers.
 
-    Every service that selects at least one workload gets an entry, even
-    with no variables, so a variable can be proven unset. A variable with
-    conflicting values across the service's containers, or set opaquely by
-    any of them, is opaque: set, but not to one readable value. Each
-    readable value records the workload and container it came from.
+    Controllers are followed through ReplicaSets and Jobs: a pod whose
+    chain ends at a kind in ``_READ_CONTROLLERS`` (or at an owner-less
+    ReplicaSet or Job) is already covered by that template. Any other
+    chain ends at a controller we don't read; its running pods are used
+    and it is reported as UNREAD_CONTROLLER.
     """
-    environments: list[ServiceEnvironment] = []
-    for service in services:
-        if not (service.metadata and service.metadata.name):
-            continue
-        selector = dict(getattr(service.spec, "selector", None) or {})
-        selected = [
-            (template.workload, template.spec)
-            for template in templates
-            if _selects(selector, template.labels)
-        ]
-        if not selected:
-            continue
-        values: dict[str, set[str]] = {}
-        sources: dict[str, set[str]] = {}
-        opaque: set[str] = set()
-        has_opaque_sources = False
-        for workload, pod_spec in selected:
-            env = _container_env(pod_spec, config_maps)
-            for name, value, origin in env.pairs:
-                values.setdefault(name, set()).add(value)
-                sources.setdefault(name, set()).add(f"{workload}/{origin}")
-            opaque.update(env.opaque)
-            has_opaque_sources = has_opaque_sources or env.has_opaque_sources
-        conflicting = sorted(name for name, found in values.items() if len(found) > 1)
-        if conflicting:
-            logger.warning(
-                "Ignoring env vars with conflicting values for service %s/%s: %s",
-                namespace, service.metadata.name, conflicting,
+    templates: list[PodTemplate] = []
+    for kind, items in (
+        ("deployment", deployments),
+        ("statefulset", stateful_sets),
+        ("daemonset", daemon_sets),
+    ):
+        for item in items:
+            found = _template(kind, item, getattr(getattr(item, "spec", None), "template", None))
+            if found:
+                templates.append(found)
+    for item in cron_jobs:
+        job_spec = getattr(getattr(getattr(item, "spec", None), "job_template", None), "spec", None)
+        found = _template("cronjob", item, getattr(job_spec, "template", None))
+        if found:
+            templates.append(found)
+    for kind, items, registrable in (("replicaset", replica_sets, True), ("job", jobs, False)):
+        for item in items:
+            if _controller(item) is None:
+                found = _template(
+                    kind, item, getattr(getattr(item, "spec", None), "template", None), registrable
+                )
+                if found:
+                    templates.append(found)
+
+    parents = {
+        ("ReplicaSet", _name(item)): _controller(item) for item in replica_sets
+    } | {("Job", _name(item)): _controller(item) for item in jobs}
+    unread: dict[str, list[Any]] = {}
+    for pod in pods:
+        owner = _controller(pod)
+        if owner is None:
+            templates.append(
+                PodTemplate(_labels(pod.metadata), f"pod/{_name(pod)}", pod.spec, False)
             )
-        # A name is definite only when every container that sets it sets the
-        # same readable value; one opaque setting anywhere makes it opaque.
-        definite = {
-            name: next(iter(found))
-            for name, found in values.items()
-            if len(found) == 1 and name not in opaque
-        }
-        environments.append(
-            ServiceEnvironment(
-                service_id=context.identity(service.metadata.name, namespace).uri,
-                variables=definite,
-                variable_sources={name: sorted(sources[name]) for name in definite},
-                opaque_variables=sorted((opaque | set(conflicting)) - set(definite)),
-                has_opaque_sources=has_opaque_sources,
+            continue
+        top = _top_controller(owner, parents)
+        if top is not None:
+            unread.setdefault(f"{top[0]}/{top[1]}", []).append(pod)
+    findings: list[ShapeFinding] = []
+    for controller, owned in sorted(unread.items()):
+        templates.extend(
+            PodTemplate(_labels(pod.metadata), controller.lower(), pod.spec) for pod in owned
+        )
+        findings.append(
+            ShapeFinding(
+                namespace=namespace,
+                object=controller.lower(),
+                kind=ShapeFindingKind.UNREAD_CONTROLLER,
+                detail=(
+                    f"{len(owned)} pod(s) belong to a {controller.split('/')[0]}, a "
+                    "controller discovery doesn't read; their running specs were "
+                    "read instead, so it is invisible while scaled to zero"
+                ),
             )
         )
-    return environments
+    return templates, findings
+
+
+def _top_controller(
+    owner: tuple[str, str], parents: Mapping[tuple[str, str], tuple[str, str] | None]
+) -> tuple[str, str] | None:
+    """Follow ReplicaSet and Job owners up; return the controller if unread.
+
+    None when the chain ends at a read controller, at an owner-less
+    ReplicaSet or Job (read directly), or at one we didn't list (being
+    replaced, or its list failed, which is already an error).
+    """
+    seen: set[tuple[str, str]] = set()
+    while owner[0] in {"ReplicaSet", "Job"} and owner not in seen:
+        seen.add(owner)
+        if owner not in parents:
+            return None
+        parent = parents[owner]
+        if parent is None:
+            return None
+        owner = parent
+    return None if owner[0] in _READ_CONTROLLERS else owner
+
+
+def _service_environment(
+    service_id: str, selected: list[PodTemplate], config_maps: Mapping[str, Mapping[str, str]]
+) -> ServiceEnvironment:
+    """Build a service's env mapping from the pod templates it selects.
+
+    A variable with conflicting values across the service's containers, or
+    set opaquely by any of them, is opaque: set, but not to one readable
+    value. Each readable value records the workload and container it came
+    from.
+    """
+    values: dict[str, set[str]] = {}
+    sources: dict[str, set[str]] = {}
+    opaque: set[str] = set()
+    has_opaque_sources = False
+    for template in selected:
+        env = _container_env(template.spec, config_maps)
+        for name, value, origin in env.pairs:
+            values.setdefault(name, set()).add(value)
+            sources.setdefault(name, set()).add(f"{template.workload}/{origin}")
+        opaque.update(env.opaque)
+        has_opaque_sources = has_opaque_sources or env.has_opaque_sources
+    conflicting = sorted(name for name, found in values.items() if len(found) > 1)
+    if conflicting:
+        logger.warning(
+            "Ignoring env vars with conflicting values for service %s: %s",
+            service_id, conflicting,
+        )
+    # A name is definite only when every container that sets it sets the
+    # same readable value; one opaque setting anywhere makes it opaque.
+    definite = {
+        name: next(iter(found))
+        for name, found in values.items()
+        if len(found) == 1 and name not in opaque
+    }
+    return ServiceEnvironment(
+        service_id=service_id,
+        variables=definite,
+        variable_sources={name: sorted(sources[name]) for name in definite},
+        opaque_variables=sorted((opaque | set(conflicting)) - set(definite)),
+        has_opaque_sources=has_opaque_sources,
+    )
+
+
+def _finding(
+    namespace: str, obj: str, kind: ShapeFindingKind, detail: str, service_id: str | None
+) -> ShapeFinding:
+    return ShapeFinding(
+        namespace=namespace, object=obj, kind=kind, detail=detail, service_id=service_id
+    )
+
+
+def _namespace_topology(
+    namespace: str,
+    context: IdentityContext,
+    services: list[Any],
+    templates: list[PodTemplate],
+    config_maps: Mapping[str, Mapping[str, str]],
+) -> NamespaceTopology:
+    """Map Services and workloads to service nodes, environments and findings.
+
+    Every Service that selects a template gets an environment entry, even
+    with no variables, so a variable can be proven unset. Services that
+    can't (ExternalName, selectorless, selecting nothing) are still
+    registered, with a finding saying why their environment is unknown.
+    """
+    topology = NamespaceTopology(namespace=namespace)
+    selected_workloads: set[str] = set()
+    service_names: set[str] = set()
+    now = datetime.now(timezone.utc)
+    for service in services:
+        name = str(service.metadata.name)
+        service_names.add(name)
+        service_id = context.identity(name, namespace).uri
+        topology.services.append(ServiceNode(service_id=service_id, name=name))
+        spec = getattr(service, "spec", None)
+        external = str(getattr(spec, "external_name", None) or "").strip().rstrip(".").lower()
+        if getattr(spec, "type", None) == "ExternalName" and external:
+            topology.edges.append(
+                DependencyEdge(
+                    source_service_id=service_id,
+                    target_service_id=external,
+                    discovery_methods=[DiscoveryMethod.K8S_MANIFEST],
+                    confidence_score=1.0,
+                    last_observed_at=now,
+                    provenance=MANIFEST_PROVENANCE,
+                )
+            )
+            topology.findings.append(
+                _finding(
+                    namespace, f"service/{name}", ShapeFindingKind.EXTERNAL_NAME_SERVICE,
+                    f"a DNS alias for {external}; calls to it are calls to that host",
+                    service_id,
+                )
+            )
+            continue
+        selector = dict(getattr(spec, "selector", None) or {})
+        if not selector and (namespace, name) == _API_SERVER_SERVICE:
+            continue
+        if not selector:
+            topology.findings.append(
+                _finding(
+                    namespace, f"service/{name}", ShapeFindingKind.SELECTORLESS_SERVICE,
+                    "no selector: its backends are managed outside Kubernetes "
+                    "selectors, so their environment is unknown",
+                    service_id,
+                )
+            )
+            continue
+        selected = [t for t in templates if _selects(selector, t.labels)]
+        if not selected:
+            topology.findings.append(
+                _finding(
+                    namespace, f"service/{name}", ShapeFindingKind.SERVICE_SELECTS_NO_WORKLOAD,
+                    "its selector matches no workload discovery read, so its "
+                    "environment is unknown",
+                    service_id,
+                )
+            )
+            continue
+        selected_workloads.update(t.workload for t in selected)
+        topology.environments.append(_service_environment(service_id, selected, config_maps))
+    _add_unexposed(topology, context, templates, selected_workloads, service_names, config_maps)
+    return topology
+
+
+def _add_unexposed(
+    topology: NamespaceTopology,
+    context: IdentityContext,
+    templates: list[PodTemplate],
+    selected_workloads: set[str],
+    service_names: set[str],
+    config_maps: Mapping[str, Mapping[str, str]],
+) -> None:
+    """Register the workloads no Service selects, or report why not."""
+    namespace = topology.namespace
+    unexposed: dict[str, list[PodTemplate]] = {}
+    for template in templates:
+        if template.workload not in selected_workloads:
+            unexposed.setdefault(template.workload, []).append(template)
+    by_name: dict[str, list[str]] = {}
+    for workload, owned in sorted(unexposed.items()):
+        name = workload.split("/", 1)[1]
+        if not owned[0].registrable:
+            topology.findings.append(
+                _finding(
+                    namespace, workload, ShapeFindingKind.TRANSIENT_WORKLOAD,
+                    "no Service selects it and it is transient, so it is not "
+                    "registered; calls it makes are not attributed",
+                    None,
+                )
+            )
+        elif name in service_names:
+            topology.findings.append(
+                _finding(
+                    namespace, workload, ShapeFindingKind.NAME_COLLISION,
+                    f"no Service selects it, but Service {name} exists and selects "
+                    "other pods, so it is not registered",
+                    context.identity(name, namespace).uri,
+                )
+            )
+        else:
+            by_name.setdefault(name, []).append(workload)
+    for name, workloads in sorted(by_name.items()):
+        service_id = context.identity(name, namespace).uri
+        topology.services.append(
+            ServiceNode(
+                service_id=service_id,
+                name=name,
+                metadata={
+                    "source": DiscoveryMethod.K8S_MANIFEST.value,
+                    _WORKLOAD_METADATA_KEY: ",".join(workloads),
+                    _EXPOSED_METADATA_KEY: "false",
+                },
+            )
+        )
+        topology.environments.append(
+            _service_environment(
+                service_id, [t for w in workloads for t in unexposed[w]], config_maps
+            )
+        )
+        topology.findings.extend(
+            _finding(
+                namespace, workload, ShapeFindingKind.UNEXPOSED_WORKLOAD,
+                "no Service selects it; registered as a service so the calls it "
+                "makes count",
+                service_id,
+            )
+            for workload in workloads
+        )

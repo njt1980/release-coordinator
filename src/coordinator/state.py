@@ -12,9 +12,11 @@ from src.core.models import (
     Exemption,
     KnowledgeGraph,
     PullRequestPayload,
+    RepositoryCoverage,
     ReleaseAssessment,
     RiskAssessment,
     RuntimeEvidenceState,
+    ShapeFinding,
     TelemetryStatus,
 )
 from src.tools.policy_store import LoadedPolicy
@@ -54,7 +56,10 @@ class ReleaseGraphState(TypedDict, total=False):
     request's head (None when the head couldn't be verified and scanned);
     the radius is walked over it. ``dependency_changes`` records what the
     head added and removed; ``revision_lag`` what changed between the
-    baseline's scanned revision and the base.
+    baseline's scanned revision and the base. ``head_coverage`` is how
+    completely the head scan read the changed services;
+    ``exempted_unscanned_files`` the unscanned files the policy accepts, and
+    ``shape_findings`` the out-of-shape Kubernetes objects in the radius.
     """
 
     trigger_event: Required[dict[str, object]]
@@ -73,6 +78,9 @@ class ReleaseGraphState(TypedDict, total=False):
     assessed_graph: KnowledgeGraph | None
     revision_lag: RevisionLag | None
     dependency_changes: HeadTopology | None
+    head_coverage: list[RepositoryCoverage]
+    exempted_unscanned_files: list[Exemption]
+    shape_findings: list[ShapeFinding]
     pull_request: PullRequestPayload
     target_services: list[str]
     upstream_services: list[str]

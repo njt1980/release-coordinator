@@ -16,7 +16,7 @@ An application qualifies when all of these hold:
 
 | Assumption | What the platform relies on |
 | --- | --- |
-| Microservices on Kubernetes | Each service is a workload (Deployment or StatefulSet) with a Kubernetes Service in a known namespace. |
+| Microservices on Kubernetes | Each service is a workload (Deployment, StatefulSet, DaemonSet or CronJob) in a known namespace, usually behind a Kubernetes Service. A workload no Service selects (a queue worker, a CronJob) is registered under its own name so the calls it makes count. Other objects are reported as out of shape (see below). |
 | Services call each other by name | In-cluster DNS names (`order-service`, `order-service:3000`, `order-service.ns.svc.cluster.local`) or environment variables / ConfigMaps that hold them. |
 | Source in Git | One or more repositories. A service owns a directory: declared in a `release-coord.yaml` at the repository root, or inferred from a `Dockerfile`, `go.mod` or `package.json` (directly or under `apps/`, `cmd/`, `services/`, `src/`). |
 | One release target per project | A project releases to exactly one environment and cluster (its policy). Multiple clusters mean multiple projects. |
@@ -52,6 +52,38 @@ Identity is namespace-safe:
 - Telemetry names its source by the `service.name` and `k8s.namespace.name`
   resource attributes, so the same workload name in two namespaces stays
   two services.
+
+### Coverage and shape
+
+Discovery records what it could not see instead of hiding it in `SUCCESS`:
+
+- **Static coverage.** Every file in a service directory is accounted for:
+  scanned, excluded by design (vendored dependencies, build output,
+  documentation, lock files), not source (images, Markdown), or
+  **unscanned**: source in a language the scanner can't read (Rust, Kotlin,
+  C++...) or a file that couldn't be read. Any unscanned file, in any
+  service at the baseline or in a changed service at the pull request's
+  head, makes the assessment `STATIC_COVERAGE_INCOMPLETE`: an unread call
+  into a target would make its caller upstream, so every service counts,
+  and live traffic doesn't substitute. A project accepts reviewed files
+  with `exemptions.unscanned_files` (path globs, each with a reason).
+  Source outside every service directory is listed, not read.
+- **Pipeline variables.** Each repository's build pipelines are read at the
+  scanned commit: YAML `variables` at every level, definition variables and
+  variable groups. Secret, queue-time, macro and script-set variables,
+  variable groups and templates are opaque. Pipelines never resolve a
+  dependency (the live cluster's environment already reflects deploy-time
+  substitution), but a variable a pipeline defines, or may define, could be
+  baked into the image, so it is never treated as provably unset.
+- **Kubernetes shape.** Objects outside the shape are recorded and listed
+  in the report when they concern a radius service: an unexposed workload
+  (registered), a transient Job or Pod (not registered), pods from a
+  controller kind discovery doesn't read such as Argo Rollouts (read from
+  the running pods), a Service with no selector or selecting no workload
+  (environment unknown), an ExternalName Service (an edge to its host), and
+  a workload whose name is taken by a Service that doesn't select it.
+  Findings are advisory; their effects (unknown environments, unresolved
+  hosts) already block through the gaps they cause.
 
 ## 2. What a team provides
 
@@ -215,12 +247,12 @@ fit for an engineer-reviewed pilot, not for gating releases:
 | G13 | A live query with zero rows counted as live evidence; the reported runtime edges came from the baseline; real metrics were empty | "Live" didn't prove the radius was observed | Live evidence states (empty, stale, uncovered), live edges in the report, metrics from the query | Done (PR 2a-2) |
 | G14 | One PR-wide additive/breaking flag | A PR changes several interfaces, each with its own compatibility | Per-interface change classification, from contract analysis (G8) | After G8 |
 | G15 | The PR's base and head commits aren't verified, and the head isn't scanned for new dependencies; no evidence of what is deployed | The assessment may describe code other than what will ship | Verify base ancestry and scan the head; record deployed versions | **Partly done (PR 2b-1):** revisions verified against the policy's `source_control`, baseline-to-base lag checked, changed services scanned at the head. Deployed-version evidence is still open. |
-| G16 | The static scanner is heuristic and `SUCCESS` doesn't mean full coverage; pipeline variables are discarded | A missed reference looks like a missing dependency | Coverage accounting per service directory; read pipeline variables | PR 2b |
+| G16 | The static scanner is heuristic and `SUCCESS` doesn't mean full coverage; pipeline variables are discarded | A missed reference looks like a missing dependency | Coverage accounting per service directory; read pipeline variables | **Done (PR 2b-2)** for coverage accounting (`STATIC_COVERAGE_INCOMPLETE`, `exemptions.unscanned_files`) and pipeline variables (read at the scanned commit; they stop false "unset" claims). The scanner itself is still heuristic: config files, code defaults and non-HTTP schemes come in 2b-3. |
 | G17 | Jobs are in memory, not safe across replicas, and have no deadlines | Restarts lose assessments; runs can hang | Durable job store with deadlines | Planned |
 | G18 | Nothing enforces the verdict; an assessment never expires or yields to a newer head | A stale approval could be acted on | Required PR/CD check, superseded on a new head, expiry | Planned |
 | G19 | No policy on what is sent to the risk model and the Ask assistant | Customer code and topology leave the boundary | Model data-egress policy: what is sent, redaction, opt-out | Planned |
 | G20 | Packaging and operations; dependencies unpinned | Reproducible, supportable installs | Pinned dependencies, container image, runbooks | Planned |
-| G21 | Kubernetes coverage is Services, Deployments, StatefulSets and bare Pods | DaemonSets, Jobs/CronJobs, Ingress and ExternalName services carry dependencies too | Read the remaining workload and routing kinds | Planned |
+| G21 | Kubernetes coverage is Services, Deployments, StatefulSets and bare Pods | DaemonSets, Jobs/CronJobs, Ingress and ExternalName services carry dependencies too | Read the remaining workload and routing kinds | **Done (PR 2b-2)** except Ingress: DaemonSets, CronJobs, owner-less Jobs and ReplicaSets, pods of unread controllers, unexposed workloads, ExternalName edges, and out-of-shape findings. Ingress (an entry point, not a dependency) is still open. |
 
 ## 5. Acceptance gates
 
@@ -238,7 +270,8 @@ these holds. Until then it is advisory and reviewed by an engineer.
    are verified, the head is scanned, and a newer head supersedes the
    assessment, which also expires.
 5. **Static coverage is accounted for** (G16): every service directory was
-   scanned, and gaps are reported rather than hidden in `SUCCESS`.
+   scanned, and gaps are reported rather than hidden in `SUCCESS`
+   (`STATIC_COVERAGE_INCOMPLETE` unless a reviewed exemption covers them).
 6. **Compatibility is evidenced** (G8, G14) for every changed interface.
 7. **Access is controlled** (G10): authentication, tenant isolation, signed
    webhooks, and allowlisted organizations.

@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from src.coordinator.file_mapping import map_changed_files, normalize_changed_path
 from src.core.edge_resolution import (
+    pipeline_index,
     resolve_endpoint,
     service_environment_index,
     target_context,
@@ -179,6 +180,7 @@ def head_topology(
     """
     index = IdentityIndex(service.identity for service in graph.services)
     environments = service_environment_index(list(graph.service_environments or []))
+    pipelines = pipeline_index(graph.services, graph.pipeline_variables)
     unresolved: dict[str, UnresolvedEntity] = {
         entity.entity_id: entity for entity in graph.unresolved_entities
     }
@@ -197,6 +199,7 @@ def head_topology(
                 target_context(source, context),
                 environments,
                 unresolved,
+                pipelines,
             )
             if target != source:
                 head_edges[source].add(target)

@@ -15,9 +15,12 @@ from src.core.models import (
     UNKNOWN_LABEL,
     DependencyEdge,
     DiscoveryStageReport,
+    PipelineVariables,
+    RepositoryCoverage,
     RunEvent,
     ScannedRevision,
     ServiceNode,
+    ShapeFinding,
     UnresolvedEntity,
 )
 from src.discovery_engine.graph import discovery_app
@@ -140,6 +143,9 @@ class CrawlResults(BaseModel):
     ``environment``, ``cluster`` and ``scanned_revisions`` are what the
     snapshot scanned (None and empty for snapshots that predate scan
     recording); ``created_at`` is when it was written, if known.
+    ``static_coverage``, ``pipeline_variables`` and ``kubernetes_shape``
+    are the snapshot's coverage, pipeline and out-of-shape records (None
+    when it predates them).
     """
 
     tenant: str
@@ -157,6 +163,9 @@ class CrawlResults(BaseModel):
     edges: list[DependencyEdge]
     unresolved_entities: list[UnresolvedEntity]
     discovery: list[DiscoveryStageReport]
+    static_coverage: list[RepositoryCoverage] | None = None
+    pipeline_variables: list[PipelineVariables] | None = None
+    kubernetes_shape: list[ShapeFinding] | None = None
 
 
 class JobRecord(BaseModel):
@@ -272,6 +281,10 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
         "scanned_revisions": [],
         "kubernetes_api_server": "",
         "telemetry_cluster": None,
+        "static_coverage": [],
+        "pipeline_variables": [],
+        "kubernetes_shape": [],
+        "manifest_edges": [],
         "reconciled_graph": {},
         "baseline_snapshot_id": "",
     }
@@ -297,6 +310,9 @@ def summarize_baseline(baseline: StoredBaseline) -> CrawlResults:
         edges=graph.edges,
         unresolved_entities=graph.unresolved_entities,
         discovery=graph.discovery or [],
+        static_coverage=graph.static_coverage,
+        pipeline_variables=graph.pipeline_variables,
+        kubernetes_shape=graph.kubernetes_shape,
     )
 
 

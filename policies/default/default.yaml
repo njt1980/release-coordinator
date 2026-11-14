@@ -7,7 +7,7 @@
 # succeeded in a baseline under 24h old that scanned the environment and
 # cluster below, runtime evidence must come from a live telemetry query,
 # and nothing is exempt.
-policy_version: 5
+policy_version: 6
 tenant: default
 project_id: default
 
@@ -74,7 +74,11 @@ egress:
 #       reason: "Runs once a day"
 #       max_quiet_days: 2          # must still be seen within 2 days
 #       expires_on: 2026-12-31     # re-review by then; ignored afterwards
+#   unscanned_files:   # source the scanner can't read (e.g. Rust), reviewed
+#     - pattern: "src/product-service/**/*.rs"
+#       reason: "Reviewed: calls ai-service via AI_SERVICE_URL only"
 exemptions:
   files: []
   dependencies: []
   silent_services: []
+  unscanned_files: []
