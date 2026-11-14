@@ -1776,6 +1776,15 @@ class DependencyChange(BaseModel):
     target_id: str = Field(min_length=1)
 
 
+class TestScopeTier(BaseModel):
+    """One tier of the suggested test scope for a release (see ``coordinator.test_scope``)."""
+
+    tier: int = Field(ge=1)
+    title: str = Field(min_length=1)
+    why: str = Field(min_length=1)
+    services: List[str] = Field(min_length=1)
+
+
 class RegulatedImpact(BaseModel):
     """How a pull request touches one service the policy marks as regulated.
 
@@ -1884,6 +1893,8 @@ class AssessmentEvidence(BaseModel):
     review: Optional[AssessmentReview] = None
     # Regulated services this PR touches (see RegulatedImpact).
     regulated_impact: List[RegulatedImpact] = Field(default_factory=list)
+    # Suggested test scope by hop distance from the changed services.
+    test_scope: List[TestScopeTier] = Field(default_factory=list)
     # What was redacted, per kind, from what the advisory model was sent.
     advisory_redactions: Dict[str, int] = Field(default_factory=dict)
 

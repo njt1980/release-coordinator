@@ -96,6 +96,7 @@ from src.tools.devops_extractor import CommitComparison, DevOpsExtractor
 from src.tools.review_store import ReviewStoreCorruptError, default_review_store
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
 from src.coordinator.observability import observability_gaps
+from src.coordinator.test_scope import suggested_test_scope
 from src.tools.telemetry_extractor import TelemetryExtractor
 
 logger = logging.getLogger(__name__)
@@ -209,13 +210,16 @@ class BlastRadius(BaseModel):
     ``upstream`` and ``downstream`` hold registered services only, in
     breadth-first order (nearest first). ``matched_edges`` are every edge
     walked in either direction. ``unresolved`` holds one entry per
-    unresolved node reached.
+    unresolved node reached. ``upstream_hops``/``downstream_hops`` give
+    each of those services' shortest distance (in edges) from a target.
     """
 
     upstream: list[str]
     downstream: list[str]
     matched_edges: list[DependencyEdge]
     unresolved: list[UnresolvedReach]
+    upstream_hops: dict[str, int] = {}
+    downstream_hops: dict[str, int] = {}
 
 
 def _adjacency(
@@ -293,6 +297,7 @@ def traverse_blast_radius(graph: KnowledgeGraph, targets: list[str]) -> BlastRad
     entities = {e.entity_id: e for e in graph.unresolved_entities}
     walked: set[int] = set()
     radius: dict[Direction, list[str]] = {"upstream": [], "downstream": []}
+    distances: dict[Direction, dict[str, int]] = {"upstream": {}, "downstream": {}}
     unresolved: list[UnresolvedReach] = []
     reported: set[str] = set()
     for direction in ("downstream", "upstream"):
@@ -303,6 +308,7 @@ def traverse_blast_radius(graph: KnowledgeGraph, targets: list[str]) -> BlastRad
         for node in reached:
             if node in registered:
                 radius[direction].append(node)
+                distances[direction][node] = len(paths[node]) - 1
             elif node not in reported:
                 reported.add(node)
                 entity = entities.get(node)
@@ -323,6 +329,8 @@ def traverse_blast_radius(graph: KnowledgeGraph, targets: list[str]) -> BlastRad
         downstream=radius["downstream"],
         matched_edges=[graph.edges[position] for position in sorted(walked)],
         unresolved=unresolved,
+        upstream_hops=distances["upstream"],
+        downstream_hops=distances["downstream"],
     )
 
 
@@ -875,6 +883,8 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         "target_services": targets,
         "upstream_services": radius.upstream,
         "downstream_services": radius.downstream,
+        "upstream_hops": radius.upstream_hops,
+        "downstream_hops": radius.downstream_hops,
         "matched_edges": radius.matched_edges,
         "discovery_issues": issues,
         "assessment_review": review,
@@ -1204,6 +1214,11 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         shape_findings=list(state.get("shape_findings", [])),
         review=state.get("assessment_review"),
         advisory_redactions=dict(state.get("advisory_redactions") or {}),
+        test_scope=suggested_test_scope(
+            state.get("target_services", []),
+            state.get("upstream_hops") or {},
+            state.get("downstream_hops") or {},
+        ),
         regulated_impact=regulated_impact(
             loaded.policy if loaded else None,
             state.get("target_services", []),

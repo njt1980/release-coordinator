@@ -92,6 +92,8 @@ class ReleaseGraphState(TypedDict, total=False):
     pull_request: PullRequestPayload
     target_services: list[str]
     upstream_services: list[str]
+    upstream_hops: dict[str, int]
+    downstream_hops: dict[str, int]
     downstream_services: list[str]
     matched_edges: list[DependencyEdge]
     telemetry_status: TelemetryStatus

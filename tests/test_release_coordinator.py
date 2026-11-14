@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from src.coordinator.test_scope import suggested_test_scope
 from src.coordinator import nodes as coordinator_nodes
 from src.coordinator.policy import decide_release
 from src.coordinator.sequencing import DeploymentPlan
@@ -450,7 +451,10 @@ class CoordinatorNodeTests(unittest.TestCase):
                 ),
                 advisory_assessment=advisory,
                 evidence=AssessmentEvidence(
-                    pr_id="PR-1", baseline_snapshot_id="snap-1"
+                    pr_id="PR-1",
+                    baseline_snapshot_id="snap-1",
+                    # No hop distances in this state: only the changed service.
+                    test_scope=suggested_test_scope([TARGET], {}, {}),
                 ),
             ),
         )

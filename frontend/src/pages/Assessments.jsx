@@ -214,6 +214,28 @@ function Briefing({ jobId }) {
           </section>
         );
       })}
+      {briefing.test_scope?.length > 0 && (
+        <section aria-label="Suggested test scope">
+          <div className="flex flex-wrap items-center gap-2">
+            <h4 className="text-sm font-semibold text-slate-900">Suggested test scope</h4>
+            <OriginBadge origin="computed" />
+          </div>
+          <p className="text-xs text-slate-500">
+            By distance from the change in the dependency graph; only as complete as the graph.
+          </p>
+          <ol className="mt-2 space-y-2">
+            {briefing.test_scope.map((tier) => (
+              <li key={tier.tier} className="rounded-xl bg-white px-4 py-3 ring-1 ring-slate-200">
+                <p className="text-sm font-medium text-slate-900">
+                  {tier.tier}. {tier.title}
+                </p>
+                <p className="mt-1 text-sm text-slate-800 [overflow-wrap:anywhere]">{tier.services.join(", ")}</p>
+                <p className="mt-1 text-xs text-slate-500">{tier.why}</p>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
       {briefing.deployment.length > 0 && (
         <section aria-label="Deployment order">
           <h4 className="text-sm font-semibold text-slate-900">Deployment order</h4>
