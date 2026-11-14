@@ -53,6 +53,8 @@ _NOISE_COLUMN = "Noise"
 _CALLEE_COLUMN = "Callee"
 _CALLEE_NAMESPACE_COLUMN = "CalleeNamespace"
 _RESOLVED_CALLS_COLUMN = "ResolvedCalls"
+# Every (non-noise) call of the row's target inside the request-join window.
+_WINDOW_CALLS_COLUMN = "JoinWindowCalls"
 _MAX_ITEM_COUNT_COLUMN = "MaxItemCount"
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 # OpenTelemetry resource attributes, as Application Insights stores them in
@@ -487,8 +489,9 @@ def build_dependency_query(
     same operation (an HTTP server span, or a message consumer's processing
     span whose parent is the send). That join reads the last ``join_days``
     (at most ``days_back``) up to ``join_lag_minutes`` ago; ``ResolvedCalls``
-    is how many of the row's calls it matched. Rows to the Kubernetes API
-    are marked ``Noise``.
+    is how many of the row's calls it matched, ``JoinWindowCalls`` how many
+    calls the target had in that window. Rows to the Kubernetes API are
+    marked ``Noise``.
 
     A scope keeps only rows (dependencies and requests) from its components
     and/or whose cluster attribute equals its value; both are
@@ -512,9 +515,13 @@ def build_dependency_query(
         f"{_role_columns('Callee')}"
         "| where isnotempty(CalleeName) and isnotempty(ParentId)\n"
         "| distinct OperationId, ParentId, CalleeName, CalleeNamespace;\n"
-        "let resolved = deps\n"
+        "let joinable = deps\n"
         f"| where isempty({_NOISE_COLUMN}) and TimeGenerated between "
-        f"(ago({join_days}d) .. ago({join_lag_minutes}m))\n"
+        f"(ago({join_days}d) .. ago({join_lag_minutes}m));\n"
+        "let window = joinable\n"
+        f"| summarize {_WINDOW_CALLS_COLUMN} = sum(ItemCount)\n"
+        f"    by Source = SourceName, {_NAMESPACE_COLUMN} = SourceNamespace, Target, {_TYPE_COLUMN};\n"
+        "let resolved = joinable\n"
         "| project OperationId, Id, SourceName, SourceNamespace, Target, DependencyType, ItemCount\n"
         "| join kind=inner hint.strategy=shuffle (callees)\n"
         "    on $left.OperationId == $right.OperationId, $left.Id == $right.ParentId\n"
@@ -526,10 +533,11 @@ def build_dependency_query(
         f"    {_FAILURES_COLUMN} = sumif(ItemCount, Success == false), "
         f"{_MAX_ITEM_COUNT_COLUMN} = max(ItemCount)\n"
         f"    by Source = SourceName, {_NAMESPACE_COLUMN} = SourceNamespace, Target, {_TYPE_COLUMN}, {_NOISE_COLUMN}\n"
+        f"| join kind=leftouter (window) on Source, {_NAMESPACE_COLUMN}, Target, {_TYPE_COLUMN}\n"
         f"| join kind=leftouter (resolved) on Source, {_NAMESPACE_COLUMN}, Target, {_TYPE_COLUMN}\n"
         f"| project Source, {_NAMESPACE_COLUMN}, Target, {_TYPE_COLUMN}, {_NOISE_COLUMN}, "
         f"LastObservedAt, {_CALLS_COLUMN}, {_FAILURES_COLUMN}, {_MAX_ITEM_COUNT_COLUMN},\n"
-        f"    {_CALLEE_COLUMN}, {_CALLEE_NAMESPACE_COLUMN}, {_RESOLVED_CALLS_COLUMN}\n"
+        f"    {_CALLEE_COLUMN}, {_CALLEE_NAMESPACE_COLUMN}, {_RESOLVED_CALLS_COLUMN}, {_WINDOW_CALLS_COLUMN}\n"
     )
 
 
@@ -695,6 +703,30 @@ def _add_metrics(metrics: RuntimeMetrics, calls: dict[str, tuple[int, int]]) -> 
             metrics[source] = {"request_count": total, "error_rate": failures / total}
 
 
+def _fully_joined_targets(rows: Any, column_indexes: dict[str, int]) -> set[tuple[str, str, str]]:
+    """The (source, target, type) keys whose every call in the join window
+    was joined to a callee (see ``_parse_dependency_table``)."""
+    window_index = column_indexes.get(_WINDOW_CALLS_COLUMN)
+    resolved_index = column_indexes.get(_RESOLVED_CALLS_COLUMN)
+    callee_index = column_indexes.get(_CALLEE_COLUMN)
+    if window_index is None or resolved_index is None or callee_index is None:
+        return set()
+    window: dict[tuple[str, str, str], int] = {}
+    resolved: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        try:
+            reference = source_reference(
+                str(row[column_indexes["Source"]]), _text(row, column_indexes.get(_NAMESPACE_COLUMN))
+            )
+            key = (reference, str(row[column_indexes["Target"]]), _text(row, column_indexes.get(_TYPE_COLUMN)))
+        except (IndexError, ValueError, ValidationError):
+            continue
+        window[key] = max(window.get(key, 0), _count(row, window_index))
+        if _text(row, callee_index):
+            resolved[key] = resolved.get(key, 0) + _count(row, resolved_index)
+    return {key for key, total in window.items() if total > 0 and resolved.get(key, 0) >= total}
+
+
 def _parse_dependency_table(
     table: LogsTable,
     calls: dict[str, tuple[int, int]] | None = None,
@@ -713,8 +745,13 @@ def _parse_dependency_table(
     ``sampling``.
 
     Each (source, target, type) yields an edge to the target address
-    (``EdgeResolution.TARGET``); a row naming a ``Callee`` also yields an
-    edge to that callee (``REQUEST_JOIN``, namespaced when
+    (``EdgeResolution.TARGET``), unless the request join named a callee for
+    every one of its calls in the join window (``ResolvedCalls`` summed over
+    its callees reaches ``JoinWindowCalls``): then the callees say where the
+    calls went, and the target text (often a span name such as
+    ``HGET`` or ``pkg.Service/Method`` when an exporter has no address) only
+    travels as the callee edges' address detail. A row naming a ``Callee``
+    yields an edge to that callee (``REQUEST_JOIN``, namespaced when
     ``CalleeNamespace`` is known) carrying the address it was reached at.
     A target joined to several callees comes as several rows: its calls
     count once. Rows marked ``Noise`` yield no edge and are counted in
@@ -736,6 +773,7 @@ def _parse_dependency_table(
         )
 
     index_of = column_indexes.get
+    fully_joined = _fully_joined_targets(table.rows, column_indexes)
     edges: list[DependencyEdge] = []
     counted: set[tuple[str, str, str]] = set()
     bad_rows = 0
@@ -761,7 +799,8 @@ def _parse_dependency_table(
             if sampling is not None and item_count > 1:
                 sampling[reference] = max(sampling.get(reference, 0), item_count)
             if first_sighting:
-                edges.append(_runtime_edge(reference, str(target), observed_at, dependency_type))
+                if key not in fully_joined:
+                    edges.append(_runtime_edge(reference, str(target), observed_at, dependency_type))
                 if calls is not None:
                     total, failed = calls.get(reference, (0, 0))
                     calls[reference] = (total + row_calls, failed + row_failures)

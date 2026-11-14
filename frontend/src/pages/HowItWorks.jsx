@@ -156,7 +156,7 @@ const INTENDED_USE_LIMITS = [
 const LIMITS = [
   "Verdicts are advisory; a named person decides. A pull request that changes code can't be approved automatically under the default strict contract scope.",
   "Contracts: only .proto files are compared, and client links are recorded for .NET builds only. OpenAPI and message schemas aren't read yet.",
-  "Telemetry exported through the OpenTelemetry Collector's Azure Monitor exporter can carry span names instead of addresses as targets (gRPC, Redis, DNS); they show as unresolved unless the request join names the callee.",
+  "Telemetry exported through the OpenTelemetry Collector's Azure Monitor exporter can carry span names instead of addresses as targets (gRPC, Redis, DNS). When the request join names the callee of every such call the span name is dropped; calls to services without telemetry of their own (a cache, a database) stay unresolved.",
   "Code from Azure DevOps and telemetry from Azure Monitor only; GitHub, GitLab and other telemetry backends need adapters.",
   "Messaging is modeled as service to broker, not producer to queue or topic to consumer.",
   "Applications outside Kubernetes, executing deployments and database migrations are out of scope.",
