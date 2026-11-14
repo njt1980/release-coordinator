@@ -7,6 +7,7 @@ from src.coordinator.policy import ReleaseVerdict
 from src.coordinator.revision import HeadTopology, RevisionLag
 from src.coordinator.sequencing import DeploymentPlan
 from src.core.models import (
+    AssessmentReview,
     DependencyEdge,
     EvidenceIssue,
     Exemption,
@@ -19,6 +20,7 @@ from src.core.models import (
     ShapeFinding,
     TelemetryStatus,
 )
+from src.orchestration.review import ReviewInForce
 from src.tools.policy_store import LoadedPolicy
 
 
@@ -60,6 +62,9 @@ class ReleaseGraphState(TypedDict, total=False):
     completely the head scan read the changed services;
     ``exempted_unscanned_files`` the unscanned files the policy accepts, and
     ``shape_findings`` the out-of-shape Kubernetes objects in the radius.
+    ``review_in_force`` are the project's dependency review answers that
+    count for this release (None without answers), and
+    ``assessment_review`` how they shaped it.
     """
 
     trigger_event: Required[dict[str, object]]
@@ -81,6 +86,8 @@ class ReleaseGraphState(TypedDict, total=False):
     head_coverage: list[RepositoryCoverage]
     exempted_unscanned_files: list[Exemption]
     shape_findings: list[ShapeFinding]
+    review_in_force: ReviewInForce | None
+    assessment_review: AssessmentReview | None
     pull_request: PullRequestPayload
     target_services: list[str]
     upstream_services: list[str]
