@@ -120,4 +120,24 @@ REASON_EXPLANATIONS: Final[dict[ReasonCode, tuple[str, str]]] = {
         "Decide yourself from the evidence; or set external_ai: true in the policy if sending "
         "redacted PR content to the model is allowed.",
     ),
+    ReasonCode.DB_MIGRATION: (
+        "The pull request adds or changes a database migration (EF Core, Flyway, Liquibase). "
+        "A schema change doesn't roll back with the deployment, and old and new service "
+        "versions share the database while a rolling deployment runs.",
+        "Check that the migration is backward compatible with the running version (expand "
+        "first, contract in a later release) and that it has a tested rollback or forward fix.",
+    ),
+    ReasonCode.CONFIG_KEYS_CHANGED: (
+        "The pull request adds, removes or changes configuration keys (appsettings*.json, "
+        "application*.yml or .properties, .env files). Every environment must provide the new "
+        "keys, and a removed key may still be read elsewhere.",
+        "Check each listed key is set in every target environment (Key Vault, ConfigMaps, "
+        "pipeline variables) and that no other service reads a removed one.",
+    ),
+    ReasonCode.FEATURE_FLAGS_CHANGED: (
+        "The pull request changes a feature-flag section (FeatureManagement, features/togglz/"
+        "ff4j, FEATURE_* variables), which changes behaviour without a code change.",
+        "Confirm the flag's default and per-environment values are intended and that turning "
+        "it off is a tested rollback path.",
+    ),
 }

@@ -9,7 +9,9 @@ from typing import Final, Literal
 
 from pydantic import BaseModel
 
+from src.coordinator.change_flags import config_format, evaluate_change_flags, migration_stack
 from src.coordinator.contracts import (
+    FileReader,
     contract_consumers,
     contract_links,
     evaluate_contracts,
@@ -1163,6 +1165,21 @@ def _apply_runtime_policy(
     return {"telemetry_status": status, "discovery_issues": issues}
 
 
+def _source_reader(state: ReleaseGraphState) -> FileReader | None:
+    """A read-only file reader for the pull request's repository, through the
+    project policy's ``source_control`` (never a caller-supplied URL); None
+    without one or without the pull request's revisions."""
+    pull_request: PullRequestPayload = state["pull_request"]
+    policy = _policy(state)
+    source = policy.source_control if policy is not None else None
+    if source is None or not (pull_request.repository and pull_request.base_sha and pull_request.head_sha):
+        return None
+    extractor = DevOpsExtractor(
+        org_url=source.organization_url, project=source.project, repositories=[pull_request.repository]
+    )
+    return lambda path, commit: extractor.read_file(pull_request.repository, path, commit)
+
+
 def check_contracts_node(state: ReleaseGraphState) -> dict[str, object]:
     """Check the pull request's contract changes (see ``coordinator.contracts``).
 
@@ -1178,21 +1195,15 @@ def check_contracts_node(state: ReleaseGraphState) -> dict[str, object]:
     findings: list[ContractFinding] = []
     unreadable: dict[str, str] = {}
     if contract_files:
-        source = policy.source_control if policy is not None else None
-        if source is None or not (pull_request.repository and pull_request.base_sha and pull_request.head_sha):
+        read = _source_reader(state)
+        if read is None:
             unreadable = {
                 path: "couldn't be read: no source_control in the project policy, or no pull request revisions"
                 for path in contract_files
             }
         else:
-            extractor = DevOpsExtractor(
-                org_url=source.organization_url, project=source.project, repositories=[pull_request.repository]
-            )
             findings, unreadable = read_contract_diffs(
-                lambda path, commit: extractor.read_file(pull_request.repository, path, commit),
-                contract_files,
-                pull_request.base_sha,
-                pull_request.head_sha,
+                read, contract_files, pull_request.base_sha, pull_request.head_sha
             )
     graph = state.get("assessed_graph") or state.get("baseline_graph")
     targets = list(state.get("target_services", []))
@@ -1206,6 +1217,21 @@ def check_contracts_node(state: ReleaseGraphState) -> dict[str, object]:
         uncovered_callers(links, targets, graph.edges) if graph is not None else sorted(targets),
     )
     return {"contract_check": check}
+
+
+def check_change_flags_node(state: ReleaseGraphState) -> dict[str, object]:
+    """Flag migrations, configuration and feature-flag changes (see
+    ``coordinator.change_flags``); advisory, a person decides."""
+    pull_request: PullRequestPayload = state["pull_request"]
+    reads = any(config_format(path) or migration_stack(path) for path in pull_request.changed_files)
+    flags = evaluate_change_flags(
+        pull_request.changed_files,
+        pull_request.diff,
+        _source_reader(state) if reads else None,
+        pull_request.base_sha,
+        pull_request.head_sha,
+    )
+    return {"change_flags": flags}
 
 
 def sequence_deployment_node(state: ReleaseGraphState) -> dict[str, object]:
@@ -1268,7 +1294,13 @@ def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]
     return {
         "advisory_assessment": advisory,
         "advisory_redactions": redactions,
-        "verdict": decide_release(issues, plan, advisory, advisory_disabled=disabled),
+        "verdict": decide_release(
+            issues,
+            plan,
+            advisory,
+            advisory_disabled=disabled,
+            change_codes=flags.reason_codes if (flags := state.get("change_flags")) is not None else None,
+        ),
     }
 
 
@@ -1311,6 +1343,7 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         shape_findings=list(state.get("shape_findings", [])),
         review=state.get("assessment_review"),
         contract_check=state.get("contract_check"),
+        change_flags=state.get("change_flags"),
         advisory_redactions=dict(state.get("advisory_redactions") or {}),
         test_scope=suggested_test_scope(
             state.get("target_services", []),

@@ -17,6 +17,7 @@ from src.coordinator.file_mapping import ChangedFileMapping, map_changed_files
 from src.core.models import (
     TelemetryClusterFilter,
     AssessmentEvidence,
+    ChangeFlags,
     ContractCheckStatus,
     ContractChange,
     DependencyEdge,
@@ -531,6 +532,7 @@ class PrAssessmentWebhookTests(BaselineFixture):
                 head_scanned=True,
                 test_scope=assessment.evidence.test_scope,
                 contract_check=assessment.evidence.contract_check,
+                change_flags=ChangeFlags(),
             ),
         )
         # No contract file changed: the code change stays unverified.

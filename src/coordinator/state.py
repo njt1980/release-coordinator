@@ -8,6 +8,7 @@ from src.coordinator.revision import HeadTopology, RevisionLag
 from src.coordinator.sequencing import DeploymentPlan
 from src.core.models import (
     AssessmentReview,
+    ChangeFlags,
     ContractCheck,
     DependencyEdge,
     EvidenceIssue,
@@ -67,7 +68,9 @@ class ReleaseGraphState(TypedDict, total=False):
     ``review_in_force`` are the project's dependency review answers that
     count for this release (None without answers), and
     ``assessment_review`` how they shaped it. ``contract_check`` is the
-    contract compatibility evidence the plan's compatibility rests on.
+    contract compatibility evidence the plan's compatibility rests on;
+    ``change_flags`` the pull request's advisory migration, configuration
+    and feature-flag changes.
     """
 
     trigger_event: Required[dict[str, object]]
@@ -101,6 +104,7 @@ class ReleaseGraphState(TypedDict, total=False):
     telemetry_status: TelemetryStatus
     discovery_issues: list[EvidenceIssue]
     contract_check: ContractCheck
+    change_flags: ChangeFlags
     deployment_plan: DeploymentPlan
     deployment_sequence: list[str]
     advisory_assessment: RiskAssessment | None

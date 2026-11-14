@@ -93,6 +93,7 @@ def decide_release(
     plan: DeploymentPlan,
     advisory: RiskAssessment | None,
     advisory_disabled: bool = False,
+    change_codes: list[ReasonCode] | None = None,
 ) -> ReleaseVerdict:
     """Return the final policy verdict.
 
@@ -105,6 +106,11 @@ def decide_release(
     external model) a release whose evidence is complete is not approved
     (ADVISORY_DISABLED) but stays actionable: a person decides.
 
+    ``change_codes`` are the pull request's advisory change flags
+    (DB_MIGRATION, CONFIG_KEYS_CHANGED, FEATURE_FLAGS_CHANGED; see
+    ``coordinator.change_flags``): they keep the release from being
+    approved automatically without limiting actionability.
+
     Raises:
         ValueError: if ``advisory`` is missing although ``needs_model`` says
             the model had to be consulted and it isn't disabled.
@@ -112,7 +118,7 @@ def decide_release(
     disabled = advisory is None and advisory_disabled and needs_model(issues, plan)
     if advisory is None and needs_model(issues, plan) and not disabled:
         raise ValueError("an advisory assessment is required for this release")
-    codes =[issue.code for issue in issues] + plan_reason_codes(plan)
+    codes = [issue.code for issue in issues] + plan_reason_codes(plan) + list(change_codes or [])
     if advisory is not None and not advisory.approved:
         codes.append(ReasonCode.MODEL_REJECTED)
     if disabled:

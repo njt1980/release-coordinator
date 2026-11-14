@@ -30,6 +30,7 @@ from typing import Final, Self
 from pydantic import BaseModel, Field, model_validator
 
 from src.core.models import (
+    ChangeFlagKind,
     TestScopeTier,
     EvidenceIssue,
     IssueSubjectKind,
@@ -47,6 +48,18 @@ _DECISION_CODES: Final[frozenset[ReasonCode]] = frozenset(
         ReasonCode.MODEL_REJECTED,
         ReasonCode.BASELINE_DRIFT,
         ReasonCode.RUNTIME_UNOBSERVABLE,
+        ReasonCode.DB_MIGRATION,
+        ReasonCode.CONFIG_KEYS_CHANGED,
+        ReasonCode.FEATURE_FLAGS_CHANGED,
+    }
+)
+# Codes that leave a complete-evidence release to a person without finding a risk.
+_YOUR_CALL_CODES: Final[frozenset[ReasonCode]] = frozenset(
+    {
+        ReasonCode.ADVISORY_DISABLED,
+        ReasonCode.DB_MIGRATION,
+        ReasonCode.CONFIG_KEYS_CHANGED,
+        ReasonCode.FEATURE_FLAGS_CHANGED,
     }
 )
 # Unresolved entities a person must judge (is this dependency intended?),
@@ -83,6 +96,9 @@ _TITLES: Final[dict[ReasonCode, str]] = {
     ReasonCode.UNMAPPED_FILES: "Changed files belong to no service",
     ReasonCode.REVIEW_UNAVAILABLE: "The dependency review couldn't be read",
     ReasonCode.ADVISORY_DISABLED: "No advisory risk review: external AI is off for this project",
+    ReasonCode.DB_MIGRATION: "The change includes a database migration",
+    ReasonCode.CONFIG_KEYS_CHANGED: "Configuration keys changed",
+    ReasonCode.FEATURE_FLAGS_CHANGED: "Feature flags changed",
 }
 
 
@@ -416,6 +432,9 @@ def headline(assessment: ReleaseAssessment, decisions: int, fixes: int) -> str:
             "Your call: the evidence is complete; no advisory risk review was made "
             "(external AI is off for this project)."
         )
+    if assessment.actionable and set(assessment.reason_codes) <= _YOUR_CALL_CODES:
+        flagged = [_TITLES[code].lower() for code in assessment.reason_codes if code is not ReasonCode.ADVISORY_DISABLED]
+        return "Your call: the evidence is complete; a person reviews what the change flags: " + "; ".join(flagged) + "."
     if assessment.actionable:
         codes = ", ".join(code.value for code in assessment.reason_codes) or "risk review"
         return f"No-go: risk found ({codes})."
@@ -505,6 +524,37 @@ def _contract_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
     ]
 
 
+def _change_flag_groups(assessment: ReleaseAssessment) -> list[BriefingGroup]:
+    """One decision per kind of flagged change (migration, configuration, feature flags)."""
+    flags = assessment.evidence.change_flags
+    if flags is None:
+        return []
+    groups: list[BriefingGroup] = []
+    for kind in ChangeFlagKind:
+        listed = [flag for flag in flags.flags if flag.kind is kind]
+        code = kind.reason_code
+        if not listed or code not in assessment.reason_codes:
+            continue
+        why, how = REASON_EXPLANATIONS[code]
+        inexact = any(not flag.exact for flag in listed)
+        groups.append(
+            BriefingGroup(
+                root_key=f"decision:change-{kind.value.replace('_', '-')}",
+                rank=BriefingRank.DECISION,
+                title=_TITLES[code],
+                why_it_matters=why,
+                what_to_check=[
+                    *(flag.detail for flag in listed[:_LISTED]),
+                    *([f"and {len(listed) - _LISTED} more file(s)"] if len(listed) > _LISTED else []),
+                    *(f"{path}: {reason}" for path, reason in flags.unreadable.items() if inexact),
+                ],
+                how_to_close=[how],
+                reason_codes=[code],
+            )
+        )
+    return groups
+
+
 def _cycle_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
     """The dependency cycle, a plan finding that no evidence issue carries."""
     if ReasonCode.DEPENDENCY_CYCLE not in assessment.reason_codes:
@@ -535,6 +585,7 @@ def build_briefing(assessment: ReleaseAssessment) -> ReleaseBriefing:
         *_regulatory_group(assessment),
         *_cycle_group(assessment),
         *_contract_group(assessment),
+        *_change_flag_groups(assessment),
         *_groups(list(assessment.issues)),
     ]
     decisions = sum(1 for g in groups if g.rank is BriefingRank.DECISION)

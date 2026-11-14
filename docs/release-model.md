@@ -265,6 +265,7 @@ policy (G19) is required before anyone else's data goes through it.
 | `COMPATIBILITY_UNVERIFIED` | No contract evidence proves the change compatible. Only `.proto` files are read; under the default `contract_scope: strict` only a PR changing nothing but `.proto` files can be verified, under `interfaces` code changes count when every caller reaches each changed service through a `.proto` both builds compile |
 | `CONTRACT_BREAKING` | A changed `.proto` breaks compatibility (field removed, renamed or retyped, RPC removed or changed...). Fully evidenced, so the assessment stays actionable: a No-go a person may overrule in the decision record |
 | `DEMO_EVIDENCE`, `MODEL_REJECTED` | Mock data, or the risk model rejected the release |
+| `DB_MIGRATION`, `CONFIG_KEYS_CHANGED`, `FEATURE_FLAGS_CHANGED` | Advisory change flags (actionable; no automatic approval, a person decides). The PR adds or changes a database migration (EF Core `Migrations/*.cs`, Flyway `db/migration/V*__*`, Liquibase changelogs), adds/removes/changes keys in `appsettings*.json`, `application*`/`bootstrap*` `.yml`/`.properties` or `.env*` files, or changes a feature-flag section (`FeatureManagement`; `features`/`togglz`/`ff4j`; `FEATURE_*`/`FF_*`). Config files are read at base and head through `source_control` and compared by key path; only key names are kept, never values. Without source control the keys come from the diff lines and the flag says so |
 
 ### A person decides, and the decision is recorded
 
