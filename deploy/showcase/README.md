@@ -43,7 +43,9 @@ az ad app credential reset --id <signin appId> --query password -o tsv > <file>
 az keyvault secret set --vault-name <vault> -n signin-client-secret --file <file>
 
 # 3. Seed the share: policies (and baselines to show) under /data.
-az storage file upload-batch --account-name <storage> -d rcdata/policies -s policies
+for d in policies baselines; do
+  az storage file upload-batch --account-name <storage> --account-key <key> -d rcdata --destination-path $d -s $d
+done
 
 # 4. The app, with sign-in (same command plus):
 #      deployApp=true image=release-coordinator:showcase-<sha> signinClientId=<signin appId>
