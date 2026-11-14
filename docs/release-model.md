@@ -126,6 +126,14 @@ The policy's `cluster` is a label. Two fields prove it:
 A baseline that read another API server, or telemetry with another scope
 or none, is `BASELINE_SCOPE_MISMATCH`.
 
+`regulated_services` lists services (`<namespace>/<name>`, with an optional
+classification such as `IEC 62304 class B`) whose changes may need
+regulatory review. When a pull request changes one, or adds or removes a
+dependency to or from one, the briefing's first decision is "possible
+significant change: decide whether regulatory review is needed". The
+verdict is unchanged; whether the change is significant is the
+manufacturer's decision, recorded with the release decision.
+
 `source_control` (organization URL and project) is where pull request
 revisions are verified. It comes only from the policy, never from the
 caller; without it every assessment is `REVISION_UNVERIFIED`.

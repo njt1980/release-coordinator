@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from src.core import config
 from src.core.models import (
+    DependencyChange,
     DependencyEdge,
     DiscoveryMethod,
     DiscoveryStageReport,
@@ -23,6 +24,7 @@ from src.core.models import (
     LiveCoverage,
     ObservedEdge,
     ReasonCode,
+    RegulatedImpact,
     RuntimeEvidenceState,
     ScanContext,
     ServiceIdentity,
@@ -205,6 +207,45 @@ def _namespaced_name(service_id: str) -> str:
     except ValueError:
         return service_id
     return f"{identity.namespace}/{identity.service_name}"
+
+
+def regulated_impact(
+    policy: ProjectPolicy | None,
+    changed_services: Iterable[str],
+    added: Iterable[DependencyChange],
+    removed: Iterable[DependencyChange],
+) -> list[RegulatedImpact]:
+    """Regulated services a pull request touches, and how.
+
+    A service is touched when the PR changes it, or when the head adds or
+    removes a code dependency to or from it. Matched by
+    ``<namespace>/<name>`` against the policy's ``regulated_services``.
+    """
+    if policy is None or not policy.regulated_services:
+        return []
+    reasons: dict[str, list[str]] = {}
+
+    def note(service: str, reason: str) -> None:
+        if policy.regulated_service(_namespaced_name(service)) is not None:
+            reasons.setdefault(service, []).append(reason)
+
+    for service in changed_services:
+        note(service, "this pull request changes it")
+    for verb, changes in (("adds", added), ("removes", removed)):
+        for change in changes:
+            source, target = _namespaced_name(change.source_id), _namespaced_name(change.target_id)
+            note(change.target_id, f"this pull request {verb} a dependency on it from {source}")
+            note(change.source_id, f"this pull request {verb} its dependency on {target}")
+    impacts = []
+    for service, found in sorted(reasons.items()):
+        entry = policy.regulated_service(_namespaced_name(service))
+        assert entry is not None
+        impacts.append(
+            RegulatedImpact(
+                service=service, classification=entry.classification, reasons=list(dict.fromkeys(found))
+            )
+        )
+    return impacts
 
 
 def _live_window(policy: ProjectPolicy | None) -> timedelta:

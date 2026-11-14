@@ -1769,6 +1769,19 @@ class DependencyChange(BaseModel):
     target_id: str = Field(min_length=1)
 
 
+class RegulatedImpact(BaseModel):
+    """How a pull request touches one service the policy marks as regulated.
+
+    ``reasons`` say what touches it: the PR changes it, or adds or removes a
+    dependency to or from it. It flags a possible significant change for a
+    person's regulatory decision; it never changes the verdict.
+    """
+
+    service: str = Field(min_length=1)
+    classification: str = ""
+    reasons: List[str] = Field(min_length=1)
+
+
 class ReviewNote(BaseModel):
     """One dependency review answer an assessment used or set aside.
 
@@ -1862,6 +1875,8 @@ class AssessmentEvidence(BaseModel):
     exempted_unscanned_files: List[Exemption] = Field(default_factory=list)
     shape_findings: List[ShapeFinding] = Field(default_factory=list)
     review: Optional[AssessmentReview] = None
+    # Regulated services this PR touches (see RegulatedImpact).
+    regulated_impact: List[RegulatedImpact] = Field(default_factory=list)
 
 
 class ReleaseAssessment(BaseModel):
