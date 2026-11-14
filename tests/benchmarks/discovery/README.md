@@ -65,6 +65,13 @@ Dockerfiles nested under `src/<group>/<service>`; Envoy-only gateways; environme
 a file-local wrapper. On the four apps: recall 0.66, precision 0.71, 16 silent misses (piggymetrics' Spring Cloud
 Config and Eureka wiring: 12; eShopOnContainers' external-hostname and browser-side calls: 3; a public SaaS URL: 1).
 
+**Step 1h-b:** an in-repository Spring Cloud config server's served files (`native` `classpath:` search locations) are
+read as its clients' configuration; a YAML-nested `spring.cloud.config.uri` now flags the client when its server is
+not in the repository; Zuul `serviceId` routes are registry calls; a variable only imported from a ConfigMap several
+services share (`envFrom`) is no Kubernetes-environment edge on its own. Pooled: recall 0.78, precision 0.87,
+10 silent misses (piggymetrics 1). Trade-off: eShop's lab shares its event-bus ConfigMap, so one true edge
+(webapp to eventbus) is now a flagged miss instead of a K8S_ENV edge.
+
 ## What is measured
 
 | Metric | Meaning |

@@ -60,6 +60,34 @@ class EdgeTests(unittest.TestCase):
             [(CHECKOUT, CART, None), (CHECKOUT, PAYMENT, "http")],
         )
 
+    def test_a_variable_only_imported_from_a_shared_config_map_is_no_edge(self) -> None:
+        # bank-of-anthos: several workloads import one address book (envFrom);
+        # explicitly wired variables, and a config map only one service
+        # imports, are edges.
+        def sources(origin: str) -> list[str]:
+            return [f"deployment/checkout/server:{origin}"]
+
+        checkout = ServiceEnvironment(
+            service_id=CHECKOUT,
+            variables={"CART_SERVICE_ADDR": "cart:7070", "PAYMENT_URL": "http://payment/pay", "OTHER_URL": "http://other"},
+            variable_sources={
+                "CART_SERVICE_ADDR": sources("configMap/service-api-config"),
+                "PAYMENT_URL": sources("configMapKeyRef/service-api-config"),
+                "OTHER_URL": sources("configMap/checkout-config"),
+            },
+        )
+        cart = ServiceEnvironment(
+            service_id=CART,
+            variables={"CART_SERVICE_ADDR": "cart:7070"},
+            variable_sources={"CART_SERVICE_ADDR": ["deployment/cart/server:configMap/service-api-config"]},
+        )
+        index = IdentityIndex(
+            node.identity
+            for node in (_k8s("shop", "checkout"), _k8s("shop", "cart"), _k8s("shop", "payment"), _k8s("shop", "other"))
+        )
+        found = environment_edges({CHECKOUT: checkout, CART: cart}, index, self.context, NOW)
+        self.assertEqual(sorted(e.target_service_id for e in found), sorted([PAYMENT, OTHER]))
+
     def test_unknown_self_and_non_endpoint_values_add_nothing(self) -> None:
         self.assertEqual(
             self.edges({"LEGACY_URL": "http://mainframe", "SELF_URL": "http://checkout", "APP_NAME": "cart"}),

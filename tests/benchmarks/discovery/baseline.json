@@ -18,7 +18,7 @@
    "inventory_recall": 1.0,
    "static_precision": null,
    "static_recall": 0.0,
-   "manifest_precision": 0.75,
+   "manifest_precision": 0.923,
    "manifest_recall": 1.0,
    "missed_silent": 0,
    "missed_flagged": 0,
@@ -32,12 +32,12 @@
    "static_precision": 1.0,
    "static_recall": 0.16,
    "manifest_precision": 1.0,
-   "manifest_recall": 0.88,
+   "manifest_recall": 0.84,
    "missed_silent": 0,
-   "missed_flagged": 0,
+   "missed_flagged": 1,
    "services_flagged": 9,
-   "flag_precision": 0.0,
-   "cause_precision": 0.0
+   "flag_precision": 0.111,
+   "cause_precision": 0.167
   },
   "eShopOnContainers": {
    "inventory_precision": 1.0,
@@ -81,13 +81,13 @@
   "piggymetrics": {
    "inventory_precision": 1.0,
    "inventory_recall": 1.0,
-   "static_precision": 0.75,
-   "static_recall": 0.091,
-   "manifest_precision": 0.75,
-   "manifest_recall": 0.273,
-   "missed_silent": 12,
-   "missed_flagged": 8,
-   "services_flagged": 2,
+   "static_precision": 1.0,
+   "static_recall": 0.182,
+   "manifest_precision": 0.871,
+   "manifest_recall": 0.818,
+   "missed_silent": 1,
+   "missed_flagged": 1,
+   "services_flagged": 1,
    "flag_precision": 1.0,
    "cause_precision": 1.0
   },
@@ -147,15 +147,15 @@
  "pooled": {
   "inventory_precision": 0.961,
   "inventory_recall": 0.98,
-  "static_precision": 0.703,
-  "static_recall": 0.107,
-  "manifest_precision": 0.847,
-  "manifest_recall": 0.708,
-  "missed_silent": 21,
-  "missed_flagged": 42,
-  "services_flagged": 52,
-  "flag_precision": 0.327,
-  "cause_precision": 0.311
+  "static_precision": 0.744,
+  "static_recall": 0.119,
+  "manifest_precision": 0.867,
+  "manifest_recall": 0.778,
+  "missed_silent": 10,
+  "missed_flagged": 36,
+  "services_flagged": 51,
+  "flag_precision": 0.333,
+  "cause_precision": 0.318
  },
  "pooled_held_out": null
 }

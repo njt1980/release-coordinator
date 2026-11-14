@@ -26,8 +26,11 @@ class WorkloadEnv(BaseModel):
     variables: dict[str, str] = Field(default_factory=dict)
     opaque: list[str] = Field(default_factory=list)
     has_opaque_sources: bool = False
+    # Name -> the ConfigMap it is only imported from as a whole (envFrom).
+    bulk: dict[str, str] = Field(default_factory=dict)
 
     def merge(self, other: WorkloadEnv) -> None:
+        self.bulk = {k: v for k, v in self.bulk.items() if k not in other.variables} | other.bulk
         self.variables.update(other.variables)
         self.opaque.extend(other.opaque)
         self.has_opaque_sources = self.has_opaque_sources or other.has_opaque_sources
@@ -59,9 +62,11 @@ def _container_env(container: dict[str, Any], maps: dict[str, dict[str, str]], e
         name = (source.get("configMapRef") or {}).get("name")
         if name in maps:
             env.variables.update(maps[name])
+            env.bulk.update({variable: name for variable in maps[name]})
         else:
             env.has_opaque_sources = True
     for entry in container.get("env") or []:
+        env.bulk.pop(entry["name"], None)
         if "value" in entry:
             env.variables[entry["name"]] = str(entry["value"])
             continue
