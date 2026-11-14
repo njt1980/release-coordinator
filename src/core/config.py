@@ -11,6 +11,9 @@ Deployment settings come from environment variables (read once, at import):
   set it where clients reach the server directly.
 - ``RC_ADO_ORG_ALLOWLIST``: comma-separated Azure DevOps organization URLs
   the server may read; unset allows any (local pilot).
+- ``RC_DECISION_ROLE``: with ``RC_TRUST_PRINCIPAL_HEADER``, the Entra app
+  role a signed-in user needs to record release decisions; unset, any
+  signed-in user may.
 - ``RC_DISABLE_RAW_WEBHOOK=1``: refuse ``POST /api/v1/webhooks/pr-assessment``
   (caller-supplied changed files and diff); PR intake reads them from ADO.
 - ``RC_FRONTEND_DIST``: directory of the built frontend to serve at ``/``.
@@ -39,6 +42,7 @@ DATA_ROOT: Final[Path] = (
     Path(os.environ["RC_DATA_DIR"].strip()) if DATA_DIR_SET else REPOSITORY_ROOT
 )
 TRUST_PRINCIPAL_HEADER: Final[bool] = _flag("RC_TRUST_PRINCIPAL_HEADER")
+DECISION_ROLE: Final[str] = os.environ.get("RC_DECISION_ROLE", "").strip()
 ADO_ORG_ALLOWLIST: Final[frozenset[str]] = frozenset(
     url.strip().rstrip("/").lower()
     for url in os.environ.get("RC_ADO_ORG_ALLOWLIST", "").split(",")
@@ -66,6 +70,11 @@ POLICIES_DIR: Final[str] = "policies"
 # database holding project dependency review answers (not checked in).
 REVIEWS_DIR: Final[str] = "reviews"
 REVIEWS_DB_NAME: Final[str] = "reviews.sqlite3"
+
+# Directory and file name of the SQLite database holding release decision
+# records (append-only, hash-chained; not checked in).
+DECISIONS_DIR: Final[str] = "decisions"
+DECISIONS_DB_NAME: Final[str] = "decisions.sqlite3"
 
 # Upper bound on a policy's ``max_baseline_age_hours``: a project may demand
 # fresher baselines, never older ones.
