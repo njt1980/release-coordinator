@@ -23,6 +23,7 @@ from typing import Final
 
 from pydantic import BaseModel, Field
 
+from src.core.messaging import build_channels
 from src.core.edge_resolution import K8S_ENV_PROVENANCE
 from src.core.models import (
     IDENTITY_LINK_METADATA_KEY,
@@ -413,7 +414,14 @@ def confirmed_map(graph: KnowledgeGraph, in_force: ReviewInForce) -> ConfirmedMa
     for answer in (a for a in answers if a.verdict is ReviewVerdict.NOTHING_HIDDEN):
         result.accepted[answer.subject.key] = answer
 
-    result.graph = graph.model_copy(update={"services": services, "edges": edges})
+    channels = graph.channels
+    if channels is not None and result.renamed:
+        channels = build_channels(
+            item.model_copy(update={"service_id": result.rename(item.service_id)})
+            for channel in channels
+            for item in channel.uses
+        )
+    result.graph = graph.model_copy(update={"services": services, "edges": edges, "channels": channels})
     KnowledgeGraph.model_validate(result.graph.model_dump())  # Joins still hold.
     return result
 

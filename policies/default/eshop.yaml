@@ -67,6 +67,17 @@ egress:
   - host: registry.npmjs.org
     reason: "npm's update check when a Node.js container starts"
 
+# Message channels (queues, topics, exchanges, integration events). A changed
+# service publishing to a channel no scanned service consumes blocks
+# (CHANNEL_CONSUMERS_UNKNOWN); "advisory" makes it a person's decision
+# instead (CHANNEL_CONSUMERS_UNCONFIRMED). Channels read elsewhere can be
+# declared with a reason:
+#   external_consumers:
+#     - channel: eventbus/OrderStartedIntegrationEvent
+#       reason: "Read by the billing project"
+messaging:
+  unknown_consumers: block
+
 # Explicit, justified allowlist. Example entries:
 #   files:
 #     - pattern: "docs/**"       # '*' and '?' stay within one path segment;

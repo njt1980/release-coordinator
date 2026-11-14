@@ -24,7 +24,7 @@ const DECISION_STEPS = [
   ["Mapping", "Map each changed file to the service whose directory is deepest; a shared library's files belong to every service using it.", "UNMAPPED_FILES"],
   ["Revisions", "With Azure DevOps: the base is an ancestor of the head, the file list matches the commits, the baseline's scanned commit relates to the base. The changed services are re-scanned at the head, so the dependencies that will ship are assessed.", "REVISION_UNVERIFIED · BASELINE_REVISION_MISMATCH"],
   ["Review", "Apply the dependency review's answers; an answer counts only while the files it rests on are unchanged.", "REVIEW_UNAVAILABLE"],
-  ["Radius", "Walk every upstream caller and downstream dependency, counting hops. Check every unresolved node, the baseline's age and scope, required sources, unlinked identities, and code coverage across the whole project (an unread file anywhere could be an unseen caller).", "DISCOVERY_GAP · BASELINE_STALE · STATIC_COVERAGE_INCOMPLETE · IDENTITY_UNLINKED"],
+  ["Radius", "Walk every upstream caller and downstream dependency, counting hops; a message channel links its consumers to its producers. Check every unresolved node, the baseline's age and scope, required sources, unlinked identities, channels a changed service publishes to with no known consumer, and code coverage across the whole project (an unread file anywhere could be an unseen caller).", "DISCOVERY_GAP · BASELINE_STALE · STATIC_COVERAGE_INCOMPLETE · IDENTITY_UNLINKED · CHANNEL_CONSUMERS_UNKNOWN"],
   ["Live check", "Query telemetry now: every service in the radius must be seen within the policy's window, and a live edge the baseline lacks is drift.", "REQUIRED_SOURCE_MISSING · BASELINE_DRIFT · RUNTIME_UNOBSERVABLE"],
   ["Contracts", "Compare changed .proto files at base and head. A breaking difference blocks; a compatible one verifies the order when nothing else changed (or every caller shares a contract, if the policy allows).", "CONTRACT_BREAKING · COMPATIBILITY_UNVERIFIED"],
   ["Change flags", "Flag database migrations (EF Core, Flyway, Liquibase), added, removed or changed configuration keys (appsettings, application.yml/.properties, .env) and feature-flag sections. Config files are compared key by key at base and head; values are never kept.", "DB_MIGRATION · CONFIG_KEYS_CHANGED · FEATURE_FLAGS_CHANGED"],
@@ -96,6 +96,7 @@ const REASONS = [
   ["REVISION_UNVERIFIED, BASELINE_REVISION_MISMATCH", "The pull request's commits can't be verified, or the baseline doesn't match its base", true],
   ["STATIC_COVERAGE_INCOMPLETE", "Source files the scanner couldn't read or understand", true],
   ["IDENTITY_UNLINKED, RUNTIME_UNOBSERVABLE", "Code that matches no running service, or a service the telemetry can't see", true],
+  ["CHANNEL_CONSUMERS_UNKNOWN", "A changed service publishes to a queue, topic or event no scanned service consumes (the policy can make this advisory)", true],
   ["DEPENDENCY_CYCLE", "No safe deployment order exists", true],
   ["COMPATIBILITY_UNVERIFIED", "No contract evidence proves the change compatible (only .proto contracts are read; by default only contract-only pull requests can be verified)", true],
   ["REVIEW_UNAVAILABLE, DEMO_EVIDENCE", "The dependency review couldn't be read, or mock data was used", true],
@@ -103,6 +104,7 @@ const REASONS = [
   ["MODEL_REJECTED", "The advisory risk review rejected the release", false],
   ["ADVISORY_DISABLED", "External AI is off for the project; a person decides", false],
   ["DB_MIGRATION, CONFIG_KEYS_CHANGED, FEATURE_FLAGS_CHANGED", "The change includes a migration, configuration keys or feature flags; a person decides", false],
+  ["CHANNEL_CONSUMERS_UNCONFIRMED", "Messages go to a channel with no known consumer, under messaging.unknown_consumers: advisory; a person decides", false],
 ];
 
 const ACCESS = [

@@ -28,6 +28,7 @@ from src.core.models import (
     ConfigBinding,
     ConfigFramework,
     DiscoveryResult,
+    ChannelUse,
     IdentityDeclaration,
     OpaqueReferenceKind,
     OpaqueReferenceSite,
@@ -79,6 +80,7 @@ from src.tools.spring_cloud import (
 )
 from src.tools.devops_pull_requests import PullRequestDetails, read_pull_request
 from src.tools.proxy_configs import ProxyRead, is_envoy_config, proxy_upstreams, template_suffix
+from src.tools.message_channels import channel_uses
 from src.tools.config_readers import (
     ConfigFileKind,
     ConfigParseError,
@@ -327,6 +329,9 @@ class ServiceScan(BaseModel):
     # Names and images build files declare for the service (identity only;
     # see ``declared_identity``).
     identity_declarations: list[IdentityDeclaration] = Field(default_factory=list)
+    # Message channels the service's files produce to or consume from
+    # (see ``message_channels``); never dependency references.
+    channel_uses: list[ChannelUse] = Field(default_factory=list)
 
 
 class RepositoryScan(BaseModel):
@@ -848,7 +853,8 @@ class FileRead(BaseModel):
     ``image`` the ``ENV`` of a Dockerfile. ``sites`` are references read
     but not understood and ``sections`` configuration sections bound as a
     whole (see ``reference_sites``); ``config_keys`` every key a framework
-    configuration file declares, by framework.
+    configuration file declares, by framework. ``channels`` are the message
+    channels it produces to or consumes from (see ``message_channels``).
     """
 
     references: list[EndpointReference] = Field(default_factory=list)
@@ -857,9 +863,22 @@ class FileRead(BaseModel):
     sites: list[OpaqueReferenceSite] = Field(default_factory=list)
     sections: list[BoundSection] = Field(default_factory=list)
     config_keys: dict[ConfigFramework, list[str]] = Field(default_factory=dict)
+    channels: list[ChannelUse] = Field(default_factory=list)
 
 
 def read_source_file(content: str, service_name: str, path: str) -> FileRead:
+    """Read one file a service owns: its references and configuration (see
+    ``_read_file``) and its message channels (see ``message_channels``).
+
+    Raises:
+        ConfigParseError: if a framework configuration file can't be parsed.
+    """
+    read = _read_file(content, service_name, path)
+    uses = channel_uses(content, path)
+    return read.model_copy(update={"channels": uses}) if uses else read
+
+
+def _read_file(content: str, service_name: str, path: str) -> FileRead:
     """Read one file a service owns.
 
     Framework configuration files (appsettings*.json, application*.yml)
@@ -2094,6 +2113,7 @@ class DevOpsExtractor:
             return
         try:
             read = spring_config_read(content, clients[0].boundary.name, path, served.profile)
+            read = read.model_copy(update={"channels": channel_uses(content, path, spring_config=True)})
         except ConfigParseError as error:
             logger.warning("Cannot parse %s in %s: %s", path, repo_name, error)
             for client in clients:
@@ -2170,6 +2190,7 @@ class _ServiceAccumulator:
         # Its config server is a service of this repository whose served
         # files are read, so importing from it hides nothing.
         self.config_served_in_repository = False
+        self.channels: list[ChannelUse] = []
 
     def unscanned(self, path: str, reason: UnscannedReason) -> None:
         """Record a file whose references are unknown."""
@@ -2211,6 +2232,7 @@ class _ServiceAccumulator:
             self.sections.setdefault(relative, []).extend(read.sections)
         for framework, keys in read.config_keys.items():
             self.keys.setdefault(framework, set()).update(keys)
+        self.channels.extend(use for use in read.channels if use not in self.channels)
 
     def finish(self, repository: str, commit_sha: str) -> ServiceScan:
         """Return the service's scan, with bound sections checked against its keys."""
@@ -2240,5 +2262,9 @@ class _ServiceAccumulator:
         ]
         found.extend(binding_references(self.boundary.name, config.bindings, found))
         return ServiceScan(
-            service=self.boundary, references=found, coverage=self.coverage, config=config
+            service=self.boundary,
+            references=found,
+            coverage=self.coverage,
+            config=config,
+            channel_uses=list(self.channels),
         )

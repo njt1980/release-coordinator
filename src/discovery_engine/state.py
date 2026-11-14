@@ -11,6 +11,7 @@ from src.core.models import (
     ShapeFinding,
     ServiceEnvironment,
     ServiceNode,
+    ServiceChannelUse,
     ServiceStaticConfig,
     TelemetryScope,
 )
@@ -45,6 +46,9 @@ class DiscoveryGraphState(TypedDict):
     each scanned service's source declares as configuration defaults
     (image ``ENV``, framework configuration files, defaults in code), used
     when the runtime environment provably doesn't set a variable.
+    ``channel_uses`` are the message channel uses each scanned service's
+    files declare, keyed by the service's source-code ID until
+    reconciliation resolves it (see ``core.messaging``).
     """
 
     tenant: str
@@ -75,3 +79,4 @@ class DiscoveryGraphState(TypedDict):
     kubernetes_shape: list[ShapeFinding]
     manifest_edges: list[DependencyEdge]
     static_config: list[ServiceStaticConfig]
+    channel_uses: list[ServiceChannelUse]

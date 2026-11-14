@@ -1375,6 +1375,89 @@ def merge_evidence_files(
     return sorted({*(first or []), *(second or [])})
 
 
+class ChannelBroker(str, Enum):
+    """The messaging system a channel lives in (plan item 4a).
+
+    A channel is matched across services by broker and name only, so a
+    producer and a consumer meet only when both are read as the same
+    broker. EVENT_BUS is the eShop-style ``IEventBus`` (an integration
+    event's type name routes it); MASSTRANSIT routes by message type too.
+    SPRING_CLOUD_STREAM is a binding destination whose binder (Kafka or
+    RabbitMQ) the configuration file doesn't name.
+    """
+
+    SERVICE_BUS = "servicebus"
+    RABBITMQ = "rabbitmq"
+    KAFKA = "kafka"
+    EVENT_BUS = "eventbus"
+    MASSTRANSIT = "masstransit"
+    SPRING_CLOUD_STREAM = "spring-cloud-stream"
+
+
+class ChannelKind(str, Enum):
+    """What a channel is: a queue, a topic, an exchange, or a message type
+    that a type-routed bus (eShop EventBus, MassTransit) delivers by name."""
+
+    QUEUE = "queue"
+    TOPIC = "topic"
+    EXCHANGE = "exchange"
+    MESSAGE_TYPE = "message_type"
+
+
+class ChannelRole(str, Enum):
+    PRODUCER = "producer"
+    CONSUMER = "consumer"
+
+
+class ChannelUse(BaseModel, frozen=True):
+    """One literal produce or consume site a service's code or configuration
+    declares (see ``tools.message_channels``). ``via`` names what was
+    read (``AddSubscription<T, H>``, ``@KafkaListener``...)."""
+
+    broker: ChannelBroker
+    kind: ChannelKind
+    name: str = Field(min_length=1)
+    role: ChannelRole
+    file_path: str = Field(min_length=1)
+    line: int = Field(ge=1)
+    via: str = Field(min_length=1)
+
+
+class ServiceChannelUse(BaseModel, frozen=True):
+    """A ``ChannelUse`` attributed to the service (FQURI, or an ambiguous
+    service's entity ID) whose files declare it."""
+
+    service_id: str = Field(min_length=1)
+    use: ChannelUse
+
+
+CHANNEL_ID_PREFIX: Final[str] = "channel:"
+
+
+def channel_id(broker: ChannelBroker, name: str) -> str:
+    """``channel:<broker>/<name>``: the channel's node ID."""
+    return f"{CHANNEL_ID_PREFIX}{broker.value}/{name}"
+
+
+class MessageChannel(BaseModel):
+    """A queue, topic, exchange or message type, as a typed graph node.
+
+    ``producers`` and ``consumers`` are derived from ``uses`` (sorted,
+    unique). A channel with producers but no consumers has unknown
+    consumers: whoever reads it was not found in the scanned code. Channel
+    links are never dependency edges (``KnowledgeGraph.edges``); the
+    release radius walks them separately (see ``core.messaging``).
+    """
+
+    channel_id: str = Field(pattern=r"^channel:[a-z-]+/.+$")
+    broker: ChannelBroker
+    kind: ChannelKind
+    name: str = Field(min_length=1)
+    producers: List[str] = Field(default_factory=list)
+    consumers: List[str] = Field(default_factory=list)
+    uses: List[ServiceChannelUse] = Field(default_factory=list)
+
+
 class KnowledgeGraph(BaseModel):
     """Shape of one persisted discovery baseline snapshot.
 
@@ -1396,7 +1479,9 @@ class KnowledgeGraph(BaseModel):
     supported shape, ``static_config`` the configuration defaults each
     service's source declares, and ``static_defaults_used`` the
     dependencies resolved from those defaults; each is None in snapshots
-    written before it was.
+    written before it was. ``channels`` are the message channels (queues,
+    topics, exchanges, message types) the code declares, with their
+    producers and consumers; None in snapshots written before they were.
     """
 
     services: List[ServiceNode]
@@ -1410,6 +1495,7 @@ class KnowledgeGraph(BaseModel):
     kubernetes_shape: Optional[List[ShapeFinding]] = None
     static_config: Optional[List[ServiceStaticConfig]] = None
     static_defaults_used: Optional[List[StaticDefaultUse]] = None
+    channels: Optional[List[MessageChannel]] = None
 
     @model_validator(mode="after")
     def _services_match_scan(self) -> Self:
@@ -1821,10 +1907,17 @@ class ReasonCode(str, Enum):
     FEATURE_FLAGS_CHANGED: the pull request changes a feature-flag section
         (FeatureManagement, features/togglz/ff4j, FEATURE_* variables);
         advisory, a person decides.
+    CHANNEL_CONSUMERS_UNKNOWN: a changed service publishes to a message
+        channel no scanned service consumes, so whoever reads it is missing
+        from the release radius. Blocks by default; the policy's
+        ``messaging.unknown_consumers: advisory`` turns it into
+        CHANNEL_CONSUMERS_UNCONFIRMED.
+    CHANNEL_CONSUMERS_UNCONFIRMED: the same finding under
+        ``messaging.unknown_consumers: advisory``; a person decides.
 
-    Every code except MODEL_REJECTED, ADVISORY_DISABLED, CONTRACT_BREAKING
-    and the change flags (DB_MIGRATION, CONFIG_KEYS_CHANGED,
-    FEATURE_FLAGS_CHANGED) makes the
+    Every code except MODEL_REJECTED, ADVISORY_DISABLED, CONTRACT_BREAKING,
+    CHANNEL_CONSUMERS_UNCONFIRMED and the change flags (DB_MIGRATION,
+    CONFIG_KEYS_CHANGED, FEATURE_FLAGS_CHANGED) makes the
     assessment non-actionable: the evidence is insufficient to rely on the
     verdict, which is different from a fully evidenced verdict that the
     release is too risky or that a person must judge.
@@ -1854,6 +1947,8 @@ class ReasonCode(str, Enum):
     DB_MIGRATION = "DB_MIGRATION"
     CONFIG_KEYS_CHANGED = "CONFIG_KEYS_CHANGED"
     FEATURE_FLAGS_CHANGED = "FEATURE_FLAGS_CHANGED"
+    CHANNEL_CONSUMERS_UNKNOWN = "CHANNEL_CONSUMERS_UNKNOWN"
+    CHANNEL_CONSUMERS_UNCONFIRMED = "CHANNEL_CONSUMERS_UNCONFIRMED"
 
     @property
     def limits_actionability(self) -> bool:
@@ -1865,6 +1960,7 @@ class ReasonCode(str, Enum):
             ReasonCode.DB_MIGRATION,
             ReasonCode.CONFIG_KEYS_CHANGED,
             ReasonCode.FEATURE_FLAGS_CHANGED,
+            ReasonCode.CHANNEL_CONSUMERS_UNCONFIRMED,
         )
 
 
@@ -2109,6 +2205,61 @@ class ContractCheck(BaseModel):
         return [finding for finding in self.findings if finding.breaking]
 
 
+class UnknownConsumersMode(str, Enum):
+    """What a channel with unknown consumers does to a release (policy
+    ``messaging.unknown_consumers``).
+
+    BLOCK (the default): a CHANNEL_CONSUMERS_UNKNOWN evidence issue; the
+        assessment is not actionable.
+    ADVISORY: CHANNEL_CONSUMERS_UNCONFIRMED; the assessment stays
+        actionable but is never approved automatically; a person decides.
+    """
+
+    BLOCK = "block"
+    ADVISORY = "advisory"
+
+
+class ChannelReach(BaseModel):
+    """A message channel one of the release's services produces to or
+    consumes from.
+
+    ``changed_producers`` are the pull request's changed services among its
+    producers. ``consumers_unknown`` is true when a changed service
+    produces to it and no scanned service consumes it; ``accepted`` is the
+    policy's reason when ``messaging.external_consumers`` says who does.
+    """
+
+    channel_id: str = Field(min_length=1)
+    broker: ChannelBroker
+    kind: ChannelKind
+    name: str = Field(min_length=1)
+    producers: List[str] = Field(default_factory=list)
+    consumers: List[str] = Field(default_factory=list)
+    changed_producers: List[str] = Field(default_factory=list)
+    consumers_unknown: bool = False
+    accepted: str = ""
+
+
+class MessagingCheck(BaseModel):
+    """The message channels the release touches (see ``core.messaging``)."""
+
+    unknown_consumers: UnknownConsumersMode = UnknownConsumersMode.BLOCK
+    channels: List[ChannelReach] = Field(default_factory=list)
+
+    @property
+    def unknown(self) -> List[ChannelReach]:
+        """Channels whose consumers are unknown and not accepted by policy."""
+        return [c for c in self.channels if c.consumers_unknown and not c.accepted]
+
+    @property
+    def reason_codes(self) -> List[ReasonCode]:
+        """The advisory code, under ``unknown_consumers: advisory`` only (in
+        block mode the finding is an evidence issue instead)."""
+        if self.unknown_consumers is UnknownConsumersMode.ADVISORY and self.unknown:
+            return [ReasonCode.CHANNEL_CONSUMERS_UNCONFIRMED]
+        return []
+
+
 class AssessmentEvidence(BaseModel):
     """The exact inputs one release assessment was computed from.
 
@@ -2173,6 +2324,8 @@ class AssessmentEvidence(BaseModel):
     contract_check: Optional[ContractCheck] = None
     # Migrations, configuration and feature-flag changes (None for older records).
     change_flags: Optional[ChangeFlags] = None
+    # The message channels the release touches (None: predates 4a).
+    messaging: Optional[MessagingCheck] = None
 
 
 class ReleaseAssessment(BaseModel):

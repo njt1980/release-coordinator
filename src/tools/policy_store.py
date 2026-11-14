@@ -30,10 +30,12 @@ from src.core.models import (
     IDENTITY_SEGMENT_PATTERN,
     UNKNOWN_LABEL,
     UNRESOLVED_ID_PREFIX,
+    ChannelBroker,
     ContractScope,
     DiscoveryMethod,
     TelemetryClusterFilter,
     TelemetryScope,
+    UnknownConsumersMode,
     normalize_api_server,
     normalize_component_ids,
     normalize_workspace_ids,
@@ -334,6 +336,56 @@ class SourceControl(_StrictModel):
         return value.rstrip("/")
 
 
+class ExternalConsumers(_StrictModel):
+    """A message channel whose consumers live outside the scanned code
+    (another project, a vendor), so the scan can't find them.
+
+    ``channel`` is ``<broker>/<name>`` as an assessment names it
+    (``servicebus/orders``, ``eventbus/OrderStartedIntegrationEvent``).
+    """
+
+    channel: str = Field(min_length=3)
+    reason: str = Field(min_length=1)
+
+    @field_validator("channel")
+    @classmethod
+    def _known_broker(cls, value: str) -> str:
+        broker, separator, name = value.partition("/")
+        if not separator or not name or broker not in {b.value for b in ChannelBroker}:
+            raise ValueError(
+                "channel must be <broker>/<name> with broker one of "
+                + ", ".join(b.value for b in ChannelBroker)
+            )
+        return value
+
+
+class MessagingPolicy(_StrictModel):
+    """How message channels count (see ``core.messaging``).
+
+    ``unknown_consumers`` decides what a changed service publishing to a
+    channel no scanned service consumes does: ``block`` (the default) makes
+    it a CHANNEL_CONSUMERS_UNKNOWN evidence issue; ``advisory`` makes it
+    CHANNEL_CONSUMERS_UNCONFIRMED, which keeps the assessment actionable
+    but leaves the decision to a person. ``external_consumers`` names
+    channels whose consumers are known to live elsewhere; they are
+    accepted with their reason in either mode.
+    """
+
+    unknown_consumers: UnknownConsumersMode = UnknownConsumersMode.BLOCK
+    external_consumers: list[ExternalConsumers] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _channels_are_unique(self) -> Self:
+        channels = [entry.channel for entry in self.external_consumers]
+        if len(set(channels)) != len(channels):
+            raise ValueError("messaging.external_consumers channels must be unique")
+        return self
+
+    def external_reasons(self) -> dict[str, str]:
+        """Channel ID -> the reason its consumers are external."""
+        return {f"channel:{entry.channel}": entry.reason for entry in self.external_consumers}
+
+
 class Exemptions(_StrictModel):
     """Explicit allowlist of evidence gaps a project accepts, each justified.
 
@@ -397,7 +449,8 @@ class ProjectPolicy(_StrictModel):
     in the inventory and/or whose role instance is a scanned pod's name. It
     is a filter, not a scope: it does not prove which cluster the rows came
     from, so it never satisfies the ``telemetry_cluster``/``telemetry_components``
-    requirement (see ``core.telemetry_roles``).
+    requirement (see ``core.telemetry_roles``). ``messaging`` decides how a
+    message channel with unknown consumers counts (see ``MessagingPolicy``).
     """
 
     policy_version: int = Field(ge=1)
@@ -433,6 +486,7 @@ class ProjectPolicy(_StrictModel):
     contract_scope: ContractScope = ContractScope.STRICT
     telemetry_collector_source: CollectorSource = CollectorSource.OTEL_SDK
     telemetry_role_filter: TelemetryRoleFilter = Field(default_factory=TelemetryRoleFilter)
+    messaging: MessagingPolicy = Field(default_factory=MessagingPolicy)
 
     @field_validator("kubernetes_api_server")
     @classmethod

@@ -22,6 +22,7 @@ from src.core.models import (
     RunEvent,
     ScannedRevision,
     ServiceNode,
+    MessageChannel,
     ShapeFinding,
     UnresolvedEntity,
 )
@@ -159,8 +160,8 @@ class CrawlResults(BaseModel):
     snapshot scanned (None and empty for snapshots that predate scan
     recording); ``created_at`` is when it was written, if known.
     ``static_coverage``, ``pipeline_variables`` and ``kubernetes_shape``
-    are the snapshot's coverage, pipeline and out-of-shape records (None
-    when it predates them).
+    are the snapshot's coverage, pipeline and out-of-shape records, and
+    ``channels`` its message channels (None when it predates them).
     """
 
     tenant: str
@@ -181,6 +182,7 @@ class CrawlResults(BaseModel):
     static_coverage: list[RepositoryCoverage] | None = None
     pipeline_variables: list[PipelineVariables] | None = None
     kubernetes_shape: list[ShapeFinding] | None = None
+    channels: list[MessageChannel] | None = None
 
 
 class JobRecord(BaseModel):
@@ -361,6 +363,7 @@ def build_discovery_state(payload: OnboardingPayload) -> DiscoveryGraphState:
         "kubernetes_shape": [],
         "manifest_edges": [],
         "static_config": [],
+        "channel_uses": [],
         "reconciled_graph": {},
         "baseline_snapshot_id": "",
     }
@@ -389,6 +392,7 @@ def summarize_baseline(baseline: StoredBaseline) -> CrawlResults:
         static_coverage=graph.static_coverage,
         pipeline_variables=graph.pipeline_variables,
         kubernetes_shape=graph.kubernetes_shape,
+        channels=graph.channels,
     )
 
 

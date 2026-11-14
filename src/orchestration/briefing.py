@@ -51,6 +51,8 @@ _DECISION_CODES: Final[frozenset[ReasonCode]] = frozenset(
         ReasonCode.DB_MIGRATION,
         ReasonCode.CONFIG_KEYS_CHANGED,
         ReasonCode.FEATURE_FLAGS_CHANGED,
+        ReasonCode.CHANNEL_CONSUMERS_UNKNOWN,
+        ReasonCode.CHANNEL_CONSUMERS_UNCONFIRMED,
     }
 )
 # Codes that leave a complete-evidence release to a person without finding a risk.
@@ -60,6 +62,7 @@ _YOUR_CALL_CODES: Final[frozenset[ReasonCode]] = frozenset(
         ReasonCode.DB_MIGRATION,
         ReasonCode.CONFIG_KEYS_CHANGED,
         ReasonCode.FEATURE_FLAGS_CHANGED,
+        ReasonCode.CHANNEL_CONSUMERS_UNCONFIRMED,
     }
 )
 # Unresolved entities a person must judge (is this dependency intended?),
@@ -99,6 +102,8 @@ _TITLES: Final[dict[ReasonCode, str]] = {
     ReasonCode.DB_MIGRATION: "The change includes a database migration",
     ReasonCode.CONFIG_KEYS_CHANGED: "Configuration keys changed",
     ReasonCode.FEATURE_FLAGS_CHANGED: "Feature flags changed",
+    ReasonCode.CHANNEL_CONSUMERS_UNKNOWN: "Messages go to a channel with no known consumer",
+    ReasonCode.CHANNEL_CONSUMERS_UNCONFIRMED: "Messages go to a channel with no known consumer",
 }
 
 
@@ -245,6 +250,13 @@ def _unscanned_draft(files: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _external_consumers_draft(channels: list[str]) -> str:
+    lines = ["messaging:", "  external_consumers:"]
+    for channel in channels:
+        lines += [f"    - channel: {channel}", "      reason: <who consumes it, outside this project - reviewer>"]
+    return "\n".join(lines)
+
+
 def _describe_group(group: BriefingGroup) -> None:
     """Fill a group's title, checks and closing steps from its cause."""
     key, issues = group.root_key, group.issues
@@ -280,6 +292,11 @@ def _describe_group(group: BriefingGroup) -> None:
         group.what_to_check = [f"Read {_listed([f.split(':', 1)[-1] for f in files])}: do they call another service?"]
         group.how_to_close = [fix] if fix else []
         group.policy_draft = _unscanned_draft(files)
+    elif key.startswith("channel:"):
+        group.title = f"{key.removeprefix('channel:')}: no scanned service consumes these messages"
+        group.what_to_check = [issue.detail for issue in issues]
+        group.how_to_close = [fix] if fix else []
+        group.policy_draft = _external_consumers_draft([key.removeprefix("channel:")])
     elif key.startswith("identity:"):
         group.title = f"{key.removeprefix('identity:')}: source code not linked to a running service"
         group.what_to_check = [issue.detail for issue in issues]
@@ -555,6 +572,63 @@ def _change_flag_groups(assessment: ReleaseAssessment) -> list[BriefingGroup]:
     return groups
 
 
+def _channel_groups(assessment: ReleaseAssessment) -> list[BriefingGroup]:
+    """Message channels: a decision under ``unknown_consumers: advisory``
+    (block mode reports evidence issues instead), and the channels the
+    release touches as context."""
+    check = assessment.evidence.messaging
+    if check is None or not check.channels:
+        return []
+    groups: list[BriefingGroup] = []
+    code = ReasonCode.CHANNEL_CONSUMERS_UNCONFIRMED
+    if code in assessment.reason_codes:
+        why, how = REASON_EXPLANATIONS[code]
+        unknown = check.unknown
+        groups.append(
+            BriefingGroup(
+                root_key="decision:channels",
+                rank=BriefingRank.DECISION,
+                title=_TITLES[code],
+                why_it_matters=why,
+                what_to_check=[
+                    f"{', '.join(short_name(s) for s in reach.changed_producers)} publishes to "
+                    f"{reach.broker.value} {reach.kind.value.replace('_', ' ')} {reach.name}"
+                    for reach in unknown[:_LISTED]
+                ],
+                how_to_close=[how],
+                policy_draft=_external_consumers_draft(
+                    [reach.channel_id.removeprefix("channel:") for reach in unknown]
+                ),
+                services=sorted({s for reach in unknown for s in reach.changed_producers}),
+                reason_codes=[code],
+            )
+        )
+    groups.append(
+        BriefingGroup(
+            root_key="info:channels",
+            rank=BriefingRank.INFO,
+            title=f"{len(check.channels)} message channel(s) the release's services use",
+            why_it_matters=(
+                "Consumers of a changed producer's channels are in the radius as its dependents; "
+                "channel links don't order deployments."
+            ),
+            what_to_check=[
+                f"{reach.broker.value} {reach.kind.value.replace('_', ' ')} {reach.name}: "
+                f"from {', '.join(short_name(s) for s in reach.producers) or 'no known producer'} "
+                f"to {', '.join(short_name(s) for s in reach.consumers) or 'no known consumer'}"
+                + (f" (consumers external: {reach.accepted})" if reach.accepted else "")
+                for reach in check.channels[: _LISTED * 2]
+            ]
+            + (
+                [f"and {len(check.channels) - _LISTED * 2} more"]
+                if len(check.channels) > _LISTED * 2
+                else []
+            ),
+        )
+    )
+    return groups
+
+
 def _cycle_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
     """The dependency cycle, a plan finding that no evidence issue carries."""
     if ReasonCode.DEPENDENCY_CYCLE not in assessment.reason_codes:
@@ -587,6 +661,7 @@ def build_briefing(assessment: ReleaseAssessment) -> ReleaseBriefing:
         *_contract_group(assessment),
         *_change_flag_groups(assessment),
         *_groups(list(assessment.issues)),
+        *_channel_groups(assessment),
     ]
     decisions = sum(1 for g in groups if g.rank is BriefingRank.DECISION)
     fixes = sum(1 for g in groups if g.rank is BriefingRank.FIX_EVIDENCE)

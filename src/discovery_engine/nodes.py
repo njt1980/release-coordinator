@@ -23,6 +23,7 @@ from src.core.models import (
     KnowledgeGraph,
     ScanContext,
     ScannedRevision,
+    ServiceChannelUse,
     ServiceIdentity,
     ServiceNode,
     StaticDefaultUse,
@@ -47,6 +48,7 @@ from src.core.edge_resolution import (
     target_context,
 )
 from src.core.identity_links import IdentityFacts, image_repository, link_identities
+from src.core.messaging import build_channels
 from src.core.telemetry_capability import wire_protocol
 from src.core.telemetry_roles import role_allow_list
 from src.core.service_ids import (
@@ -164,6 +166,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
     static_coverage = list(state.get("static_coverage", []))
     pipeline_variables = list(state.get("pipeline_variables", []))
     static_config = list(state.get("static_config", []))
+    channel_uses = list(state.get("channel_uses", []))
     statuses: list[DiscoveryStatus] = []
     errors: list[str] = []
     edge_count = 0
@@ -214,6 +217,9 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
                         identity_declarations=scan.identity_declarations or None,
                     )
                 )
+            channel_uses.extend(
+                ServiceChannelUse(service_id=source_id, use=use) for use in scan.channel_uses
+            )
             for reference in scan.references:
                 target_service_id = reference.dependency_target()
                 if not target_service_id:
@@ -252,6 +258,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
         "static_coverage": static_coverage,
         "pipeline_variables": pipeline_variables,
         "static_config": static_config,
+        "channel_uses": channel_uses,
         "discovery_reports": _append_report(state, report),
     }
 
@@ -815,6 +822,20 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
         existing_edge = merged_edges.get(edge_key)
         merged_edges[edge_key] = edge if existing_edge is None else _merge_edge(existing_edge, edge)
 
+    channel_uses = [
+        item.model_copy(
+            update={
+                "service_id": entity.entity_id
+                if (entity := ambiguous.get(item.service_id))
+                else resolve_endpoint(
+                    renames.get(item.service_id, item.service_id),
+                    index, context, environments, unresolved, pipelines, configs,
+                )
+            }
+        )
+        for item in state.get("channel_uses", [])
+    ]
+
     # Zombie service identification will be added here.
     return {
         "reconciled_graph": {
@@ -822,6 +843,7 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
             "edges": drop_reversed_sightings(merged_edges),
             "unresolved_entities": list(unresolved.values()),
             "static_defaults_used": list(defaults_used.values()),
+            "channels": build_channels(channel_uses),
         }
     }
 
@@ -892,6 +914,7 @@ def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
             "kubernetes_shape": list(state.get("kubernetes_shape", [])),
             "static_config": list(state.get("static_config", [])),
             "static_defaults_used": reconciled_graph.get("static_defaults_used", []),
+            "channels": reconciled_graph.get("channels", []),
         }
     )
     scope = BaselineScope(

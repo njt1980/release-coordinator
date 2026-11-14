@@ -14,6 +14,7 @@ from typing import Any
 from collections.abc import Iterable
 
 from src.core.models import (
+    ChannelUse,
     ContractLink,
     DiscoveryResult,
     RepositoryCoverage,
@@ -90,6 +91,7 @@ class FakeDevOps:
         head_unscanned: dict[str, list[UnscannedFile]] | None = None,
         files: dict[tuple[str, str], str] | None = None,
         head_contracts: dict[str, list[ContractLink]] | None = None,
+        head_channels: dict[str, list[ChannelUse]] | None = None,
     ) -> None:
         self.history = [sha(c) for c in history]
         self.branch = [sha(c) for c in branch or []]
@@ -101,6 +103,7 @@ class FakeDevOps:
         self.missing_roots = missing_roots or set()
         self.head_unscanned = head_unscanned or {}
         self.head_contracts = head_contracts or {}
+        self.head_channels = head_channels or {}
         # (path, commit) -> content; a missing key is a file absent there.
         self.files = {(path, sha(commit)): text for (path, commit), text in (files or {}).items()}
         self.scanned: list[tuple[ScannedRevision | None, set[str] | None]] = []
@@ -164,6 +167,7 @@ class FakeDevOps:
                     unscanned=self.head_unscanned.get(root, []),
                     contracts=self.head_contracts.get(root, []),
                 ),
+                channel_uses=self.head_channels.get(root, []),
             )
             for root in sorted(only_roots or set())
             if root not in self.missing_roots
