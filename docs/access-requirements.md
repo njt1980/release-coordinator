@@ -35,6 +35,11 @@ before falling back to the developer's `az login`.
   principals, managed identities and native tenant members are not
   affected.
 
+- Onboarding lists the organization's projects and a project's repositories
+  (`POST /api/discover/devops/projects`, `/repositories`) so they can be
+  picked instead of typed; disabled and empty repositories are not offered.
+  Same read identity and organization allowlist; no extra permission.
+
 ## Log Analytics (runtime telemetry)
 
 - Role **Log Analytics Reader**, scoped to the workspace that holds

@@ -129,6 +129,132 @@ async function postJson(url, body) {
   return data;
 }
 
+/** Lists the organization's projects and a project's repositories, and fills the fields from a pick. */
+function DevOpsPicker({ orgUrl, project, repos, onProject, onRepos, disabled }) {
+  const [projects, setProjects] = useState(null);
+  const [repositories, setRepositories] = useState(null);
+  const [filter, setFilter] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const chosen = new Set(splitList(repos));
+
+  const run = async (action) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const listProjects = () =>
+    run(async () => setProjects(await postJson("/api/discover/devops/projects", { devops_org_url: orgUrl.trim() })));
+  const listRepositories = () =>
+    run(async () =>
+      setRepositories(
+        await postJson("/api/discover/devops/repositories", {
+          devops_org_url: orgUrl.trim(),
+          devops_project: project.trim(),
+        }),
+      ),
+    );
+  const readable = (repositories ?? []).filter((r) => !r.disabled && !r.empty);
+  const shown = readable.filter((r) => r.name.toLowerCase().includes(filter.trim().toLowerCase()));
+  const toggle = (name) => {
+    const next = new Set(chosen);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    onRepos([...next].sort().join(", "));
+  };
+
+  return (
+    <div className="rounded-lg bg-slate-50 p-3 ring-1 ring-slate-200">
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={listProjects}
+          disabled={disabled || busy || !orgUrl.trim()}
+          className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50 disabled:opacity-50"
+        >
+          List projects
+        </button>
+        <button
+          type="button"
+          onClick={listRepositories}
+          disabled={disabled || busy || !orgUrl.trim() || !project.trim()}
+          className="rounded-md bg-white px-3 py-1.5 text-xs font-medium text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50 disabled:opacity-50"
+        >
+          List repositories
+        </button>
+        {busy && <span className="self-center text-xs text-slate-500">Reading Azure DevOps…</span>}
+      </div>
+      {error && (
+        <p role="alert" className="mt-2 text-xs text-red-700 [overflow-wrap:anywhere]">
+          {error}
+        </p>
+      )}
+      {projects && (
+        <label className="mt-3 block">
+          <span className="text-xs font-medium text-slate-600">Project ({projects.length} readable)</span>
+          <select
+            value={project}
+            onChange={(e) => {
+              onProject(e.target.value);
+              setRepositories(null);
+            }}
+            className="mt-1 block w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"
+          >
+            <option value="">Choose a project</option>
+            {projects.map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {repositories && (
+        <fieldset className="mt-3">
+          <legend className="text-xs font-medium text-slate-600">
+            Repositories: {chosen.size} of {readable.length} chosen
+            {repositories.length > readable.length ? ` (${repositories.length - readable.length} disabled or empty, not listed)` : ""}
+          </legend>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            {readable.length > 8 && (
+              <input
+                aria-label="Filter repositories"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Filter"
+                className="w-40 rounded-md border border-slate-300 px-2 py-1 text-xs"
+              />
+            )}
+            <button type="button" onClick={() => onRepos(readable.map((r) => r.name).join(", "))} className="text-xs font-medium text-brand-600 hover:text-brand-700">
+              Choose all
+            </button>
+            <button type="button" onClick={() => onRepos("")} className="text-xs font-medium text-brand-600 hover:text-brand-700">
+              Clear
+            </button>
+          </div>
+          <ul className="mt-2 max-h-56 space-y-1 overflow-y-auto">
+            {shown.map((r) => (
+              <li key={r.name}>
+                <label className="flex items-center gap-2 text-sm text-slate-800">
+                  <input type="checkbox" checked={chosen.has(r.name)} onChange={() => toggle(r.name)} />
+                  <span className="[overflow-wrap:anywhere]">{r.name}</span>
+                  <span className="text-xs text-slate-400">{r.default_branch}</span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        </fieldset>
+      )}
+    </div>
+  );
+}
+
 async function getJson(url) {
   const response = await fetch(url);
   const data = await response.json().catch(() => null);
@@ -686,7 +812,15 @@ export default function Onboarding() {
                 value={config.devopsRepos}
                 onChange={update("devopsRepos")}
                 placeholder="payments-api, orders-service"
-                hint="Comma-separated repository names."
+                hint="Comma-separated repository names, or pick them below."
+              />
+              <DevOpsPicker
+                orgUrl={config.devopsOrgUrl}
+                project={config.devopsProject}
+                repos={config.devopsRepos}
+                onProject={update("devopsProject")}
+                onRepos={update("devopsRepos")}
+                disabled={isCrawling}
               />
             </ScopeInputCard>
 
