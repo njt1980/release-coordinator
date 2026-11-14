@@ -1,6 +1,7 @@
 """Node functions for the release orchestration graph."""
 
 import logging
+import sqlite3
 from collections import deque
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
@@ -37,6 +38,13 @@ from src.coordinator.runtime_drift import (
     resolve_live_edges,
     unbaselined_edges,
     workspace_mismatch_issue,
+)
+from src.coordinator.review import (
+    assessment_review,
+    needed_comparisons,
+    pending_changes,
+    review_unavailable,
+    to_changes,
 )
 from src.coordinator.sequencing import DeploymentPlan, sequence_deployment
 from src.coordinator.state import ReleaseGraphState
@@ -76,7 +84,10 @@ from src.tools.policy_store import (
     ProjectPolicy,
     default_policy_store,
 )
+from src.core.review import RepositoryChanges
+from src.orchestration.review import answers_in_force, confirmed_map, split_accepted
 from src.tools.devops_extractor import CommitComparison, DevOpsExtractor
+from src.tools.review_store import ReviewStoreCorruptError, default_review_store
 from src.tools.risk_reasoner import RiskAssessmentRequest, RiskReasoner
 from src.tools.telemetry_extractor import TelemetryExtractor
 
@@ -84,6 +95,7 @@ logger = logging.getLogger(__name__)
 
 BASELINE_STORE = default_store()
 POLICY_STORE = default_policy_store()
+REVIEW_STORE = default_review_store()
 
 UNRESOLVED_DEPENDENCY_ISSUE: Final[str] = "Unresolved dependency in critical path"
 
@@ -668,6 +680,58 @@ def verify_revision_node(state: ReleaseGraphState) -> dict[str, object]:
     }
 
 
+def load_review_node(state: ReleaseGraphState) -> dict[str, object]:
+    """Decide which of the project's dependency review answers count.
+
+    Each answer is checked against the baseline's scanned commits: source
+    control (the policy's ``source_control``) reports what changed since
+    the commit the answer was given at, and the pull request's own changed
+    files count as changes too (see ``answers_in_force``). An answer that
+    can't be checked doesn't count. A review store that can't be read is
+    REVIEW_UNAVAILABLE: declared dependencies may be missing from the order.
+    """
+    baseline, _ = load_baseline(_scope(state), state.get("baseline_snapshot_id"))
+    if baseline is None:
+        return {"review_in_force": None}
+    try:
+        answers = REVIEW_STORE.answers(_scope(state))
+    except (ReviewStoreCorruptError, sqlite3.Error, OSError) as error:
+        logger.warning("Dependency review unreadable: %s", error)
+        return {
+            "review_in_force": None,
+            "discovery_issues": [*state.get("discovery_issues", []), review_unavailable(str(error))],
+        }
+    if not answers:
+        return {"review_in_force": None}
+    scan = baseline.graph.scan
+    current = {r.repository: r.commit_sha for r in scan.scanned_revisions} if scan else {}
+    needed = needed_comparisons(answers, current)
+    policy = _policy(state)
+    changes: list[RepositoryChanges] = []
+    if needed and policy is not None and policy.source_control is not None:
+        source = policy.source_control
+        extractor = DevOpsExtractor(
+            org_url=source.organization_url,
+            project=source.project,
+            repositories=sorted({repository for repository, _, _ in needed}),
+        )
+        for repository, anchored, scanned in needed:
+            compared = extractor.compare_commits(repository, anchored, scanned)
+            if compared.errors:
+                logger.warning("Review anchors in %s unchecked: %s", repository, compared.errors)
+            changes.extend(to_changes(comparison) for comparison in compared.items)
+    pull_request: PullRequestPayload = state["pull_request"]
+    in_force = answers_in_force(
+        state.get("assessed_graph") or baseline.graph,
+        answers,
+        current,
+        changes,
+        pending_changes(pull_request.repository, pull_request.changed_files, current),
+        utc_now(),
+    )
+    return {"review_in_force": in_force}
+
+
 def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     """Compute the full transitive blast radius of the target services.
 
@@ -688,7 +752,9 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     ``RevisionLag``), source files the static scan couldn't read (see
     ``static_coverage_issues``), or a service in the radius known only from
     source code (see ``identity_issues``). The radius is walked over ``assessed_graph`` (the
-    head's dependencies) when the head was scanned, the baseline otherwise.
+    head's dependencies) when the head was scanned, the baseline otherwise, with
+    the project's dependency review applied (``confirmed_map``); issues an
+    answered question covers become context in ``assessment_review``.
     """
     scope = _scope(state)
     policy = _policy(state)
@@ -706,7 +772,13 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         }
 
     graph = state.get("assessed_graph") or baseline.graph
-    targets, target_issues = resolve_targets(graph, list(state.get("target_services", [])))
+    in_force = state.get("review_in_force")
+    confirmed = confirmed_map(graph, in_force) if in_force is not None else None
+    requested = list(state.get("target_services", []))
+    if confirmed is not None:
+        graph = confirmed.graph
+        requested = [confirmed.rename(target) for target in requested]
+    targets, target_issues = resolve_targets(graph, requested)
     radius = traverse_blast_radius(graph, targets)
     lag = state.get("revision_lag")
     lag_issue = (
@@ -744,12 +816,17 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
                 ),
             )
         )
+    review = None
+    if confirmed is not None and in_force is not None:
+        issues, accepted = split_accepted(issues, confirmed.accepted)
+        review = assessment_review(confirmed, in_force, accepted, radius.matched_edges)
     return {
         "target_services": targets,
         "upstream_services": radius.upstream,
         "downstream_services": radius.downstream,
         "matched_edges": radius.matched_edges,
         "discovery_issues": issues,
+        "assessment_review": review,
         "exempted_dependencies": exempted,
         "exempted_unscanned_files": unscanned_exempted,
         "shape_findings": radius_shape_findings(
@@ -1044,6 +1121,7 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         dependencies_removed=list(changes.removed) if changes else [],
         exempted_unscanned_files=list(state.get("exempted_unscanned_files", [])),
         shape_findings=list(state.get("shape_findings", [])),
+        review=state.get("assessment_review"),
     )
 
 

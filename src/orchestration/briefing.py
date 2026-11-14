@@ -78,6 +78,7 @@ _TITLES: Final[dict[ReasonCode, str]] = {
     ReasonCode.RUNTIME_UNOBSERVABLE: "Telemetry can't see some services' protocols",
     ReasonCode.STATIC_COVERAGE_INCOMPLETE: "Source not fully read or understood",
     ReasonCode.UNMAPPED_FILES: "Changed files belong to no service",
+    ReasonCode.REVIEW_UNAVAILABLE: "The dependency review couldn't be read",
 }
 
 
@@ -290,6 +291,7 @@ def _context_groups(assessment: ReleaseAssessment) -> list[BriefingGroup]:
                 what_to_check=accepted,
             )
         )
+    groups.extend(_review_groups(assessment))
     if evidence.shape_findings:
         groups.append(
             BriefingGroup(
@@ -300,6 +302,47 @@ def _context_groups(assessment: ReleaseAssessment) -> list[BriefingGroup]:
                 what_to_check=[
                     f"{f.kind.value}: {f.namespace}/{f.object}: {f.detail}"
                     for f in evidence.shape_findings[:_LISTED]
+                ],
+            )
+        )
+    return groups
+
+
+def _review_groups(assessment: ReleaseAssessment) -> list[BriefingGroup]:
+    """What the project's dependency review contributed, and what the
+    deployment order rests on."""
+    review = assessment.evidence.review
+    if review is None:
+        return []
+    rests_on = (
+        f"The order rests on {len(review.confirmed)} confirmed, {len(review.declared)} "
+        f"declared and {review.unreviewed} unreviewed dependencies in the radius, "
+        f"{len(review.accepted_issues)} accepted gap(s), and the declared change type."
+    )
+    answered = [
+        f"{note.reviewer} on {note.answered_at:%Y-%m-%d}: {note.detail}"
+        + (f" ({note.reason})" if note.reason else "")
+        for note in review.applied
+    ]
+    groups = [
+        BriefingGroup(
+            root_key="info:review",
+            rank=BriefingRank.INFO,
+            title="Dependency review",
+            why_it_matters=rests_on,
+            what_to_check=[*answered[:_LISTED], *review.unapplied[:_LISTED]],
+        )
+    ]
+    if review.needs_rereview:
+        groups.append(
+            BriefingGroup(
+                root_key="info:review-stale",
+                rank=BriefingRank.INFO,
+                title=f"{len(review.needs_rereview)} review answer(s) need re-review",
+                why_it_matters="Their evidence changed, so they no longer count; what they covered is back above.",
+                what_to_check=[
+                    f"{note.subject} ({note.verdict} by {note.reviewer}): {note.detail}"
+                    for note in review.needs_rereview[:_LISTED]
                 ],
             )
         )

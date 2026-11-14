@@ -98,4 +98,9 @@ REASON_EXPLANATIONS: Final[dict[ReasonCode, tuple[str, str]]] = {
         "Check the listed files by hand; exempt reviewed ones under "
         "exemptions.unscanned_files, or declare the dependency.",
     ),
+    ReasonCode.REVIEW_UNAVAILABLE: (
+        "The project's dependency review answers couldn't be read, so dependencies a "
+        "coordinator declared may be missing from the deployment order.",
+        "Check the review database (reviews/reviews.sqlite3) and re-run the assessment.",
+    ),
 }

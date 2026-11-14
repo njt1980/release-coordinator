@@ -32,7 +32,18 @@ from src.core.models import (
     ServiceNode,
 )
 from src.tools.baseline_store import BaselineScope, BaselineStore, new_snapshot_id
+from src.core.review import (
+    DeclaredDependency,
+    ReviewAnchor,
+    ReviewAnswer,
+    ReviewSubject,
+    ReviewSubjectKind,
+    ReviewVerdict,
+    edge_key,
+)
 from src.tools.policy_store import LoadedPolicy, PolicyStore
+from src.orchestration.briefing import build_briefing
+from src.tools.review_store import ReviewStore
 from src.webhooks import PrAssessmentJob, PullRequestWebhook
 from src.core.models import ShapeFinding, ShapeFindingKind, UnscannedFile, UnscannedReason
 from tests.fake_devops import FakeDevOps, coverage_for, sha, url
@@ -240,6 +251,12 @@ class PrAssessmentWebhookTests(unittest.TestCase):
             policy_patch.start()
             self.addCleanup(policy_patch.stop)
         self.policy = self._write_policy(POLICY_YAML)
+        reviews = tempfile.TemporaryDirectory()
+        self.addCleanup(reviews.cleanup)
+        self.review_path = Path(reviews.name) / "reviews.sqlite3"
+        review_patch = patch.object(coordinator_nodes, "REVIEW_STORE", ReviewStore(self.review_path))
+        review_patch.start()
+        self.addCleanup(review_patch.stop)
 
     def _write_policy(self, text: str) -> LoadedPolicy:
         path = self.policy_store.policy_path(self.scope)
@@ -406,6 +423,67 @@ class PrAssessmentWebhookTests(unittest.TestCase):
             reasoner_cls.return_value.assess.return_value = verdict
             final = webhooks.coordinator_app.invoke(state)
         return final, reasoner_cls
+
+    def _declare(self, source: str, target: str, anchored: str) -> ReviewAnswer:
+        answer = ReviewAnswer(
+            answer_id=f"declare-{source}",
+            subject=ReviewSubject(kind=ReviewSubjectKind.DEPENDENCY, key=edge_key(_id(source), _id(target))),
+            verdict=ReviewVerdict.ADD,
+            reviewer="Dana",
+            answered_at=datetime(2026, 11, 14, tzinfo=timezone.utc),
+            snapshot_id="snap-1",
+            reason="payments calls orders through the gateway",
+            declared=(DeclaredDependency(source_id=_id(source), target_id=_id(target)),),
+            anchors=(ReviewAnchor(repository="Shop", commit_sha=BASE, paths=(anchored,)),),
+        )
+        ReviewStore(self.review_path).append(self.scope, answer)
+        return answer
+
+    def test_declared_dependency_joins_radius_and_order(self) -> None:
+        self._write_baseline()
+        self._declare("payments-api", "order-service", "services/payments/api/")
+        verdict = RiskAssessment(risk_score=0.2, approved=True, justification="why")
+        payload = _payload(changed_files=["src/order-service/routes/root.js"])
+
+        final, _ = self._run_graph(payload, verdict)
+
+        self.assertIn(_id("payments-api"), final["upstream_services"])
+        assessment = final["release_assessment"]
+        self.assertIn(_id("payments-api"), assessment.deployment_sequence)
+        review = assessment.evidence.review
+        self.assertEqual(
+            [(d.source_id, d.target_id) for d in review.declared],
+            [(_id("payments-api"), _id("order-service"))],
+        )
+        self.assertEqual(review.needs_rereview, [])
+        self.assertEqual(review.applied[0].reviewer, "Dana")
+        group = next(g for g in build_briefing(assessment).groups if g.root_key == "info:review")
+        self.assertIn("1 declared", group.why_it_matters)
+
+    def test_answer_anchored_to_changed_files_does_not_count(self) -> None:
+        self._write_baseline()
+        self._declare("payments-api", "order-service", "src/order-service/")
+        verdict = RiskAssessment(risk_score=0.2, approved=True, justification="why")
+        payload = _payload(changed_files=["src/order-service/routes/root.js"])
+
+        final, _ = self._run_graph(payload, verdict)
+
+        self.assertNotIn(_id("payments-api"), final["upstream_services"])
+        review = final["release_assessment"].evidence.review
+        self.assertEqual(review.declared, [])
+        (stale,) = review.needs_rereview
+        self.assertIn("this pull request changes 1 anchored file", stale.detail)
+
+    def test_unreadable_review_blocks(self) -> None:
+        self._write_baseline()
+        self.review_path.write_text("not a database", encoding="utf-8")
+        verdict = RiskAssessment(risk_score=0.2, approved=True, justification="why")
+
+        final, _ = self._run_graph(_payload(changed_files=["src/order-service/routes/root.js"]), verdict)
+
+        assessment = final["release_assessment"]
+        self.assertIn(ReasonCode.REVIEW_UNAVAILABLE, assessment.reason_codes)
+        self.assertFalse(assessment.actionable)
 
     def test_end_to_end_graph_uses_deterministic_sequence(self) -> None:
         snapshot_id = self._write_baseline()

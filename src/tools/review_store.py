@@ -110,6 +110,8 @@ class ReviewStore:
             ReviewStoreCorruptError: if a stored row no longer validates or
                 was stored under another scope or subject than it names.
         """
+        if not self.path.exists():
+            return []  # Nothing answered yet; reading never creates the file.
         query = (
             "SELECT answer_id, subject_kind, subject_key, record FROM review_answers "
             "WHERE tenant = ? AND project_id = ?"

@@ -253,6 +253,10 @@ class ReviewStoreTests(unittest.TestCase):
         self.assertEqual(self.store.answers(self.scope, EDGE), [_answer(), later])
         self.assertEqual(self.store.answers(BaselineScope(tenant="acme", project_id="none")), [])
 
+    def test_reading_never_creates_the_file(self) -> None:
+        self.assertEqual(self.store.answers(self.scope), [])
+        self.assertFalse(self.path.exists())
+
     def test_duplicate_answer_id_rejected(self) -> None:
         self.store.append(self.scope, _answer())
         with self.assertRaises(DuplicateAnswerError):
@@ -273,14 +277,14 @@ class ReviewStoreTests(unittest.TestCase):
             self.store.answers(self.scope, ReviewSubject(kind=EDGE.kind, key="edge:x->y"))
 
     def test_unknown_schema_version_refused(self) -> None:
-        self.store.answers(self.scope)
+        self.store.append(self.scope, _answer())
         with sqlite3.connect(self.path) as connection:
             connection.execute("PRAGMA user_version = 99")
         with self.assertRaisesRegex(ReviewStoreCorruptError, "schema version"):
             self.store.answers(self.scope)
 
     def test_uses_rollback_journal(self) -> None:
-        self.store.answers(self.scope)
+        self.store.append(self.scope, _answer())
         with sqlite3.connect(self.path) as connection:
             mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
         self.assertEqual(mode, "delete")

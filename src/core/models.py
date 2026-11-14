@@ -1342,6 +1342,9 @@ class ReasonCode(str, Enum):
     IDENTITY_UNLINKED: a service in the radius exists in source code but
         matches no running service (by name, or by name up to case and
         separators), so its runtime calls and callers are unknown.
+    REVIEW_UNAVAILABLE: the project's dependency review answers couldn't be
+        read, so dependencies a coordinator declared may be missing from
+        the deployment order.
 
     Every code except MODEL_REJECTED makes the assessment non-actionable: the
     evidence is insufficient to rely on the verdict, which is different from
@@ -1366,6 +1369,7 @@ class ReasonCode(str, Enum):
     STATIC_COVERAGE_INCOMPLETE = "STATIC_COVERAGE_INCOMPLETE"
     IDENTITY_UNLINKED = "IDENTITY_UNLINKED"
     RUNTIME_UNOBSERVABLE = "RUNTIME_UNOBSERVABLE"
+    REVIEW_UNAVAILABLE = "REVIEW_UNAVAILABLE"
 
     @property
     def limits_actionability(self) -> bool:
@@ -1436,6 +1440,45 @@ class DependencyChange(BaseModel):
     target_id: str = Field(min_length=1)
 
 
+class ReviewNote(BaseModel):
+    """One dependency review answer an assessment used or set aside.
+
+    ``subject`` is the answer's subject key, ``detail`` what it did here
+    (or why it no longer counts).
+    """
+
+    answer_id: str = Field(min_length=1)
+    subject: str = Field(min_length=1)
+    verdict: str = Field(min_length=1)
+    reviewer: str = Field(min_length=1)
+    answered_at: datetime
+    reason: Optional[str] = None
+    detail: str = ""
+
+
+class AssessmentReview(BaseModel):
+    """How the project's dependency review shaped one assessment.
+
+    ``applied`` are the answers in force that changed the map or closed a
+    question; ``accepted_issues`` the issues those answers turned into
+    context; ``needs_rereview`` answers that no longer count (the gap or
+    edge they covered is back in the evidence). In the release radius,
+    ``confirmed`` / ``declared`` / ``unreviewed`` are the dependencies a
+    coordinator agreed with, declared, or never reviewed; ``removed``
+    those a coordinator removed. ``unapplied`` are answers that couldn't
+    be applied, with why.
+    """
+
+    applied: List[ReviewNote] = Field(default_factory=list)
+    accepted_issues: List[EvidenceIssue] = Field(default_factory=list)
+    needs_rereview: List[ReviewNote] = Field(default_factory=list)
+    confirmed: List[DependencyChange] = Field(default_factory=list)
+    declared: List[DependencyChange] = Field(default_factory=list)
+    removed: List[DependencyChange] = Field(default_factory=list)
+    unreviewed: int = 0
+    unapplied: List[str] = Field(default_factory=list)
+
+
 class AssessmentEvidence(BaseModel):
     """The exact inputs one release assessment was computed from.
 
@@ -1457,7 +1500,9 @@ class AssessmentEvidence(BaseModel):
     ``dependencies_removed`` are the code dependencies the head changed.
     ``exempted_unscanned_files`` are unscanned source files the policy
     accepts; ``shape_findings`` are out-of-shape Kubernetes objects that
-    concern a service in the release radius.
+    concern a service in the release radius. ``review`` is how the
+    project's dependency review shaped the assessment (None when the
+    project has no review answers).
     """
 
     pr_id: str = Field(min_length=1)
@@ -1485,6 +1530,7 @@ class AssessmentEvidence(BaseModel):
     dependencies_removed: List[DependencyChange] = Field(default_factory=list)
     exempted_unscanned_files: List[Exemption] = Field(default_factory=list)
     shape_findings: List[ShapeFinding] = Field(default_factory=list)
+    review: Optional[AssessmentReview] = None
 
 
 class ReleaseAssessment(BaseModel):
