@@ -13,6 +13,7 @@ from src.core.config_resolution import (
 from src.core.edge_resolution import resolve_endpoint, static_config_index
 from src.core.env_names import endpoint_in_value, endpoint_of_value
 from src.core.models import (
+    OpaqueReferenceKind,
     ConfigBinding,
     ConfigFramework,
     DependencyEdge,
@@ -528,7 +529,16 @@ class ScanTests(unittest.TestCase):
         assert customers.coverage is not None
         self.assertEqual(
             [(f.path, f.reason) for f in customers.coverage.unscanned],
-            [("src/customers/src/main/resources/application-broken.yml", UnscannedReason.PARSE_FAILED)],
+            [
+                ("src/customers/src/main/resources/application-broken.yml", UnscannedReason.PARSE_FAILED),
+                # spring.config.import from a config server: keys there are unknown.
+                ("src/customers/src/main/resources/application.yml", UnscannedReason.REFERENCES_NOT_UNDERSTOOD),
+            ],
+        )
+        (imported,) = customers.coverage.unscanned[1].sites
+        self.assertEqual(
+            (imported.kind, imported.detail),
+            (OpaqueReferenceKind.EXTERNAL_CONFIG_SOURCE, "spring.config.import"),
         )
         self.assertNotIn("Pass@word", result.items[0].model_dump_json())
 

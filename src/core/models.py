@@ -475,6 +475,14 @@ class OpaqueReferenceKind(str, Enum):
         keys in the service's configuration files, so its keys are unknown.
     PROJECT_REFERENCE_UNRESOLVED: a project reference that doesn't resolve
         to a project in the repository, so the code it pulls in is unread.
+    CLIENT_WITHOUT_ADDRESS: the service declares a network client library
+        (HTTP, gRPC, messaging, database, service registry, feature-flag
+        SDK) but the scan found no address it calls, so its dependencies
+        are configured somewhere the scanner doesn't read; ``detail`` names
+        the library.
+    EXTERNAL_CONFIG_SOURCE: configuration is imported from a source outside
+        the repository (Spring Cloud Config ``spring.config.import:
+        configserver:``), so keys served there are unknown.
     """
 
     DYNAMIC_CONFIG_KEY = "DYNAMIC_CONFIG_KEY"
@@ -482,6 +490,8 @@ class OpaqueReferenceKind(str, Enum):
     CLIENT_ADDRESS_EXPRESSION = "CLIENT_ADDRESS_EXPRESSION"
     UNBOUND_SECTION = "UNBOUND_SECTION"
     PROJECT_REFERENCE_UNRESOLVED = "PROJECT_REFERENCE_UNRESOLVED"
+    CLIENT_WITHOUT_ADDRESS = "CLIENT_WITHOUT_ADDRESS"
+    EXTERNAL_CONFIG_SOURCE = "EXTERNAL_CONFIG_SOURCE"
 
 
 class OpaqueReferenceSite(BaseModel, frozen=True):

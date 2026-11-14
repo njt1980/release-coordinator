@@ -21,6 +21,10 @@ Recognized, per language the scanner reads:
   ``ManagedChannelBuilder.forTarget/forAddress(...)``) whose argument is not
   a literal, a configuration or environment read with a literal key, or a
   variable the same file assigns from one (or a Spring ``@Value`` field).
+- Externalized configuration (Spring: ``spring.config.import`` from a
+  ``configserver:``, ``spring.cloud.config.uri``) in a framework
+  configuration file: keys served from there are unknown (see
+  ``external_config_sites``).
 - Bound sections (C#: ``GetSection("X")``, ``BindConfiguration("X")``,
   ``BindConfiguration(nameof(X))``;
   Java: ``@ConfigurationProperties("x")``) with no key under them in the
@@ -320,3 +324,28 @@ def unbound_section_sites(
         for section in sections
         if not section_has_keys(section, keys)
     ]
+
+
+# Spring Cloud Config: ``spring.config.import: configserver:http://...``
+# (YAML or properties, any profile document) or the properties form
+# ``spring.cloud.config.uri=...``.
+_SPRING_EXTERNAL_CONFIG: Final[re.Pattern[str]] = re.compile(
+    r"(?P<import>configserver:)|^\s*(?P<uri>spring\.cloud\.config\.uri)\s*[:=]", re.IGNORECASE
+)
+
+
+def external_config_sites(content: str) -> list[OpaqueReferenceSite]:
+    """Sites in a Spring configuration file that import configuration from
+    a config server: keys served there are unknown, so dependencies they
+    configure (a Eureka zone, a datasource) are invisible."""
+    sites: list[OpaqueReferenceSite] = []
+    for number, line in enumerate(content.splitlines(), start=1):
+        if line.lstrip().startswith(("#", "!")):
+            continue
+        match = _SPRING_EXTERNAL_CONFIG.search(line)
+        if match:
+            detail = "spring.config.import" if match.group("import") else "spring.cloud.config.uri"
+            sites.append(
+                OpaqueReferenceSite(line=number, kind=OpaqueReferenceKind.EXTERNAL_CONFIG_SOURCE, detail=detail)
+            )
+    return sites

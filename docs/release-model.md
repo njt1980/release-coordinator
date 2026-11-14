@@ -60,14 +60,17 @@ Discovery records what it could not see instead of hiding it in `SUCCESS`:
 
 - **Static coverage.** Every file in a service directory is accounted for:
   scanned, excluded by design (vendored dependencies, build output,
-  documentation, lock files), not source (images, Markdown), or
+  documentation, lock files, test code), not source (images, Markdown), or
   **unscanned**: source in a language the scanner can't read (Rust, Kotlin,
   C++...), a file that couldn't be read or parsed, or a file whose
   references were read but **not understood** (a dynamic configuration key
   or environment name, an HTTP/gRPC client address that isn't a literal or
   a keyed configuration read, a configuration section bound to an options
-  class with no keys in the configuration files, or an unresolved project
-  reference), each listed by line. Any unscanned file, in any
+  class with no keys in the configuration files, an unresolved project
+  reference, configuration imported from a config server, or a network
+  client library (HTTP, messaging, database, registry, feature-flag SDK)
+  declared by a service whose scan found no address at all), each listed
+  by line. Any unscanned file, in any
   service at the baseline or in a changed service at the pull request's
   head, makes the assessment `STATIC_COVERAGE_INCOMPLETE`: an unread call
   into a target would make its caller upstream, so every service counts,
