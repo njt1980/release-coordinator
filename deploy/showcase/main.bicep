@@ -41,6 +41,9 @@ param signinClientId string = ''
 @description('Comma-separated Azure DevOps organization URLs the server may read.')
 param adoOrgAllowlist string
 
+@description('Entra app role (value) that may record release decisions; others can view and answer the review. Empty: anyone signed in may decide.')
+param decisionRole string = 'Release.Coordinator'
+
 param tags object = {
   project: 'release-coordinator'
   purpose: 'showcase'
@@ -182,6 +185,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (deployApp) {
             // SMB refuses SQLite's byte-range locks; lock with a lock file.
             { name: 'RC_SQLITE_VFS', value: 'unix-dotfile' }
             { name: 'RC_TRUST_PRINCIPAL_HEADER', value: '1' }
+            { name: 'RC_DECISION_ROLE', value: decisionRole }
             { name: 'RC_DISABLE_RAW_WEBHOOK', value: '1' }
             { name: 'RC_ADO_ORG_ALLOWLIST', value: adoOrgAllowlist }
             { name: 'TELEMETRY_SOURCE', value: 'azure' }
