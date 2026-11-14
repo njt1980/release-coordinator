@@ -70,6 +70,15 @@ class ClassifyPathTests(unittest.TestCase):
             "/src/api/logo.png": FileClass.NOT_SOURCE,
             "/README.md": FileClass.NOT_SOURCE,
             "/src/api/.env.local": FileClass.SCANNED,
+            # Test code never runs in production.
+            "/src/api/test/integration/queue.test.cjs": FileClass.EXCLUDED,
+            "/tests/Basket.UnitTests/BasketTests.cs": FileClass.EXCLUDED,
+            "/src/Ordering.FunctionalTests/Api.cs": FileClass.EXCLUDED,
+            "/e2e-tests/cart.spec.ts": FileClass.EXCLUDED,
+            "/cmd/makeline/main_test.go": FileClass.EXCLUDED,
+            "/src/api/app/test_routes.py": FileClass.EXCLUDED,
+            "/src/web/cart.spec.js": FileClass.EXCLUDED,
+            "/src/contest/latest.go": FileClass.SCANNED,
         }
         for path, expected in cases.items():
             with self.subTest(path=path):

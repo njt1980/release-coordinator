@@ -119,6 +119,39 @@ class InferServiceBoundariesTests(unittest.TestCase):
             ],
         )
 
+    def test_test_and_tooling_directories_are_not_services(self) -> None:
+        self.assertEqual(
+            self._inferred(
+                [
+                    "/orders/Dockerfile",
+                    "/tests/package.json",
+                    "/e2e-tests/Dockerfile",
+                    "/docker/Dockerfile",  # a local Prometheus image
+                    "/.devcontainer/Dockerfile",
+                ]
+            ),
+            [("orders", "orders")],
+        )
+
+    def test_root_package_json_is_tooling_when_services_are_deeper(self) -> None:
+        self.assertEqual(
+            self._inferred(["/package.json", "/src/web/package.json", "/src/api/Dockerfile"]),
+            [("web", "src/web"), ("api", "src/api")],
+        )
+        # Alone, or with a Dockerfile, the root is a service.
+        self.assertEqual(self._inferred(["/package.json"]), [("repo-a", "")])
+        self.assertEqual(
+            self._inferred(["/package.json", "/Dockerfile", "/src/web/package.json"]),
+            [("repo-a", ""), ("web", "src/web")],
+        )
+
+    def test_a_src_directory_is_named_after_its_parent(self) -> None:
+        self.assertEqual(self._inferred(["/src/cart/src/Dockerfile"]), [])  # too deep for a marker
+        boundaries = devops_extractor._boundary_directory_name
+        self.assertEqual(boundaries(["src", "cartservice", "src"]), "cartservice")
+        self.assertEqual(boundaries(["src"]), "src")
+        self.assertIsNone(boundaries([]))
+
     def test_files_belong_to_the_deepest_boundary(self) -> None:
         boundaries = devops_extractor._infer_service_boundaries(
             ["/Dockerfile", "/payments/Dockerfile"], "repo-a"
@@ -128,6 +161,23 @@ class InferServiceBoundariesTests(unittest.TestCase):
         self.assertEqual(owner("/config.yaml", boundaries).name, "repo-a")  # type: ignore[union-attr]
         self.assertEqual(owner("/paymentsx/a.py", boundaries).name, "repo-a")  # type: ignore[union-attr]
         self.assertIsNone(owner("/a.py", boundaries[1:]))
+
+
+class CommentedReferenceTests(unittest.TestCase):
+    def test_whole_line_comments_name_no_dependency(self) -> None:
+        # eShop AuthenticationExtensions.cs: a commented-out identity URL.
+        source = (
+            '// "Identity": { "Url": "http://identity" }\n'
+            "# ORDERS_URL = http://orders\n"
+            " * see http://docs-svc for details\n"
+            'var api = "http://catalog-api"; // trailing comments stay\n'
+            "/* process.env.LEGACY_URL */\n"
+        )
+        references = devops_extractor._extract_references(source, "web", "/web/a.cs")
+        self.assertEqual([r.endpoint for r in references], ["http://catalog-api"])
+
+    def test_line_numbers_are_kept(self) -> None:
+        self.assertEqual(devops_extractor.strip_comment_lines("a\n// b\nc"), "a\n\nc")
 
 
 class NoiseEndpointTests(unittest.TestCase):

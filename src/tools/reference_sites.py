@@ -9,7 +9,8 @@ the file's service has incomplete coverage (``REFERENCES_NOT_UNDERSTOOD``).
 Recognized, per language the scanner reads:
 
 - Dynamic configuration keys (C#: ``configuration[name]``,
-  ``GetValue<T>(name)``, ``GetConnectionString(name)``, ``GetSection(name)``;
+  ``GetValue<T>(name)``, ``GetConnectionString(name)``, ``GetSection(name)``,
+  ``BindConfiguration(name)``, an Aspire client's ``AddRedisClient(name)``;
   Java: ``getProperty(name)``) and dynamic environment names
   (``os.getenv(name)``, ``process.env[name]``, ``os.Getenv(name)``,
   ``Environment.GetEnvironmentVariable(name)``, ``System.getenv(name)``,
@@ -20,7 +21,8 @@ Recognized, per language the scanner reads:
   ``ManagedChannelBuilder.forTarget/forAddress(...)``) whose argument is not
   a literal, a configuration or environment read with a literal key, or a
   variable the same file assigns from one (or a Spring ``@Value`` field).
-- Bound sections (C#: ``GetSection("X")``, ``BindConfiguration("X")``;
+- Bound sections (C#: ``GetSection("X")``, ``BindConfiguration("X")``,
+  ``BindConfiguration(nameof(X))``;
   Java: ``@ConfigurationProperties("x")``) with no key under them in the
   service's configuration files (see ``unbound_section_sites``).
 
@@ -49,7 +51,22 @@ _DOTNET_LISTEN_SECTIONS: Final[frozenset[str]] = frozenset(
 _CS_KEY_CALLS: Final[tuple[tuple[re.Pattern[str], OpaqueReferenceKind], ...]] = (
     (re.compile(r"\b\w*[Cc]onfig\w*\s*\["), OpaqueReferenceKind.DYNAMIC_CONFIG_KEY),
     (
-        re.compile(r"\.(?:GetValue<[^>()]+>|GetConnectionString|GetSection|GetRequiredSection)\("),
+        re.compile(r"\.(?:GetValue<[^>()]+>|GetConnectionString)\("),
+        OpaqueReferenceKind.DYNAMIC_CONFIG_KEY,
+    ),
+    # Section binds: ``nameof(Options)`` is a literal section (see _CS_SECTIONS).
+    (
+        re.compile(r"\.(?:GetSection|GetRequiredSection|BindConfiguration)\((?!\s*nameof\()"),
+        OpaqueReferenceKind.DYNAMIC_CONFIG_KEY,
+    ),
+    # .NET Aspire client integrations read ConnectionStrings:<name>; a name
+    # that isn't a literal hides the connection (a lambda is an options
+    # callback, as EF Core's AddDbContext<T>(o => ...), not a name).
+    (
+        re.compile(
+            r"\.Add(?:Keyed)?(?!Http)[A-Z]\w*?(?:Client|DbContext|DataSource|Producer|Consumer|"
+            r"DistributedCache|OutputCache)(?:<[^>()]*>)?\((?![^,)]*=>)"
+        ),
         OpaqueReferenceKind.DYNAMIC_CONFIG_KEY,
     ),
     (re.compile(r"\bEnvironment\.GetEnvironmentVariable\("), OpaqueReferenceKind.DYNAMIC_ENV_NAME),
@@ -103,7 +120,8 @@ _IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"^(?:this\.)?(?P<name>[A-Za-z_
 _NEW_URI: Final[re.Pattern[str]] = re.compile(r"^new\s*(?:Uri)?\(")
 
 _CS_SECTIONS: Final[re.Pattern[str]] = re.compile(
-    r"""\.(?:GetSection|GetRequiredSection|BindConfiguration)\(\s*@?"(?P<section>[^"]+)\""""
+    r"""\.(?:GetSection|GetRequiredSection|BindConfiguration)\(\s*"""
+    r"""(?:@?"(?P<section>[^"]+)"|nameof\(\s*(?:[\w.]+\.)?(?P<nameof>\w+)\s*\))"""
 )
 _SPRING_SECTIONS: Final[re.Pattern[str]] = re.compile(
     r"""@ConfigurationProperties\(\s*(?:(?:prefix|value)\s*=\s*)?"(?P<section>[^"]+)\""""
@@ -260,7 +278,7 @@ def bound_sections(content: str, path: str) -> list[BoundSection]:
         return []
     sections: list[BoundSection] = []
     for match in pattern.finditer(content):
-        section = match.group("section").strip()
+        section = (match.group("section") or match.groupdict().get("nameof") or "").strip()
         if not section or _in_comment(content, match.start()):
             continue
         if framework is ConfigFramework.DOTNET and section.split(":", 1)[0].lower() in _DOTNET_LISTEN_SECTIONS:
