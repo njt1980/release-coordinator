@@ -9,7 +9,8 @@ snapshot, and returns at once.
 only by its Azure DevOps ID, read (read-only) from Azure DevOps.
 """
 
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status
@@ -21,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 from src.coordinator.file_mapping import ChangedFileMapping, map_changed_files
 from src.coordinator.graph import app as coordinator_app
 from src.coordinator.project_policy import partition_exempt_files
+from src.coordinator.sequencing import ReleaseOrderFacts, order_facts
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
 from src.core.models import (
@@ -112,6 +114,8 @@ class PrAssessmentJob(BaseModel):
 
     ``tenant`` and ``project_id`` are the project it was assessed for
     (records archived before they were kept read as the defaults).
+    ``order`` is what the deployment order was computed from, so the
+    assessment can join a release train (None for older records).
     """
 
     job_id: str
@@ -123,6 +127,7 @@ class PrAssessmentJob(BaseModel):
     assessment: ReleaseAssessment | None = None
     evidence_report: str | None = None
     briefing: ReleaseBriefing | None = None
+    order: ReleaseOrderFacts | None = None
 
 
 class PrAssessmentSummary(BaseModel):
@@ -283,8 +288,23 @@ async def run_assessment_job(
                 briefing=build_briefing(assessment),
                 tenant=tenant,
                 project_id=project_id,
+                order=_order_facts(final_state),
             )
         )
+
+
+def _order_facts(final_state: Mapping[str, Any]) -> ReleaseOrderFacts | None:
+    """What the run's deployment order was computed from (None without one)."""
+    plan = final_state.get("deployment_plan")
+    if plan is None or not plan.services_to_deploy:
+        return None
+    return order_facts(
+        plan.change_type,
+        plan.services_to_deploy,
+        list(final_state.get("upstream_services", [])),
+        list(final_state.get("downstream_services", [])),
+        final_state.get("matched_edges", []),
+    )
 
 
 @router.post(

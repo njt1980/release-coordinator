@@ -224,6 +224,29 @@ removed. Every other variable is recorded by name only.
    block.
 7. **Verdict**: `approved` only when no blocking reason applies.
 
+### Several pull requests as one release (release train)
+
+Single-PR assessment is the default. When several pull requests (possibly
+in several repositories of one project) ship together, their completed
+assessments can be combined (`POST /api/v1/release-trains` with their job
+IDs, or "Release train" on the Assessments page). Nothing is re-assessed:
+
+- **Radius**: the union of the members' subgraphs; a service any member
+  changes is a target.
+- **Order**: one deployment order over that union from the same sort as a
+  single PR, using the dependency edges each member's order honoured. An
+  edge into a service a BREAKING member changes deploys its consumer first;
+  every other edge deploys its provider first. Conflicts show as a cycle.
+- **Verdict**: worst member wins. The train is blocked as well when its
+  members were assessed against different baselines (`BASELINE_MISMATCH`),
+  when a member predates kept ordering facts (`ORDER_FACTS_MISSING`), or
+  when the combined order has a cycle (`TRAIN_CYCLE`).
+- Breaking-change consumers that another member changes are listed
+  separately from those no member changes.
+
+Trains are kept in memory; recreate one from the same assessments after a
+restart. A decision is still recorded per pull request.
+
 ### Every run is logged
 
 Each onboarding and assessment writes a live, plain-language log: one line

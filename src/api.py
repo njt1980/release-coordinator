@@ -47,6 +47,7 @@ from src.decision_api import router as decision_router
 from src.inventory_api import assessment_router as assessment_graph_router
 from src.inventory_api import router as inventory_router
 from src.observability_api import router as observability_router
+from src.release_train_api import router as release_train_router
 from src.review_api import router as review_router
 from src.runs import router as runs_router
 from src.webhooks import router as webhooks_router
@@ -61,6 +62,7 @@ app.include_router(observability_router)
 app.include_router(decision_router)
 app.include_router(inventory_router)
 app.include_router(assessment_graph_router)
+app.include_router(release_train_router)
 
 BASELINE_STORE = default_store()
 RUN_LOGS = DEFAULT_RUN_LOGS

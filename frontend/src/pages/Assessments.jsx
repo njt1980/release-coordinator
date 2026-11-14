@@ -3,6 +3,7 @@ import DecisionPanel from "../components/DecisionPanel.jsx";
 import EgoGraph from "../components/EgoGraph.jsx";
 import IdentityAnswer from "../components/IdentityAnswer.jsx";
 import Nav from "../components/Nav.jsx";
+import ReleaseTrain from "../components/ReleaseTrain.jsx";
 import { ROUTES, href } from "../lib/router.js";
 import { openObservability } from "./Observability.jsx";
 
@@ -525,6 +526,8 @@ export default function Assessments() {
             </section>
           </div>
         )}
+
+        <ReleaseTrain items={items} />
       </main>
     </>
   );
