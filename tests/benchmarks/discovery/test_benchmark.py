@@ -149,6 +149,17 @@ class ScoreAppTests(unittest.TestCase):
         )
 
 
+    def test_an_unresolved_environment_read_flags_its_service(self) -> None:
+        # worker reads WORKER_API_URL, but its env sets it from a Secret
+        # (opaque): discovery reports that as a gap, so worker -> api is
+        # flagged, not silent.
+        scan = _scan(_service("api", [], incomplete=True), _service("worker", [], env_vars=["API_URL"]))
+        envs = {"worker": WorkloadEnv(opaque=["API_URL"])}
+        misses = score_app(_truth(), [("demo", scan)], envs).misses
+        self.assertEqual((misses.missed_flagged, misses.missed_silent), (2, 0))
+        self.assertEqual(misses.causes_flagged, 2)
+
+
 def _headline(silent: int = 5, precision: float | None = 0.8) -> Headline:
     return Headline(
         inventory_precision=precision,
