@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import DecisionPanel from "../components/DecisionPanel.jsx";
+import EgoGraph from "../components/EgoGraph.jsx";
 import Nav from "../components/Nav.jsx";
 import { ROUTES } from "../lib/router.js";
 
@@ -236,6 +237,16 @@ function Briefing({ jobId }) {
           </ol>
         </section>
       )}
+      <section aria-label="Dependency map">
+        <div className="flex flex-wrap items-center gap-2">
+          <h4 className="text-sm font-semibold text-slate-900">Dependency map</h4>
+          <OriginBadge origin="computed" />
+        </div>
+        <p className="mb-2 text-xs text-slate-500">
+          The changed services and two hops each way, in the baseline this assessment used.
+        </p>
+        <EgoGraph url={`${API}/pr-assessment/${encodeURIComponent(jobId)}/graph?depth=2`} centerLabel="Changed" />
+      </section>
       {briefing.deployment.length > 0 && (
         <section aria-label="Deployment order">
           <h4 className="text-sm font-semibold text-slate-900">Deployment order</h4>
