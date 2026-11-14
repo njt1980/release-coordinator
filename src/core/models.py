@@ -949,6 +949,13 @@ class DependencyEdge(BaseModel):
     ``telemetry_capability.wire_protocol``), ``unknown`` when the scheme
     doesn't say, None when no address scheme was seen (telemetry edges,
     bare host names).
+
+    ``evidence_files`` are the source service's repository-relative files
+    whose code or configuration references the target (every file, not
+    just the first), so a reviewer can check the evidence and a review
+    answer can be anchored to it. Empty when no file is the evidence
+    (telemetry, Kubernetes environment); None in snapshots written before
+    it was recorded.
     """
 
     source_service_id: str
@@ -961,6 +968,14 @@ class DependencyEdge(BaseModel):
     dependency_type: str | None = None
     direction_uncertain: bool = False
     protocol: str | None = None
+    evidence_files: List[str] | None = None
+
+    @field_validator("evidence_files")
+    @classmethod
+    def _relative_sorted_files(cls, files: List[str] | None) -> List[str] | None:
+        if files is None:
+            return None
+        return sorted({path.lstrip("/") for path in files if path.strip("/")})
 
     @model_validator(mode="after")
     def _mock_fixtures_carry_no_confidence(self) -> Self:
@@ -972,6 +987,15 @@ class DependencyEdge(BaseModel):
     def is_mock_fixture(self) -> bool:
         """Whether any of this edge's evidence comes from a mock fixture."""
         return MOCK_FIXTURE_PROVENANCE in self.provenance.split(LABEL_SEPARATOR)
+
+
+def merge_evidence_files(
+    first: List[str] | None, second: List[str] | None
+) -> List[str] | None:
+    """Union two edges' evidence files; None only when neither recorded any."""
+    if first is None and second is None:
+        return None
+    return sorted({*(first or []), *(second or [])})
 
 
 class KnowledgeGraph(BaseModel):

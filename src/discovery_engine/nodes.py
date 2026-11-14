@@ -27,6 +27,7 @@ from src.core.models import (
     UnresolvedEntityKind,
     baseline_problems,
     combine_statuses,
+    merge_evidence_files,
     unresolved_entity_id,
 )
 from src.core.edge_resolution import (
@@ -202,6 +203,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
                         last_observed_at=datetime.now(timezone.utc),
                         provenance=STATIC_CODE_PROVENANCE,
                         protocol=wire_protocol(reference.endpoint),
+                        evidence_files=reference.evidence_files,
                     )
                 )
                 edge_count += 1
@@ -562,6 +564,9 @@ def _merge_edge(existing_edge: DependencyEdge, edge: DependencyEdge) -> Dependen
         dependency_type=existing_edge.dependency_type or edge.dependency_type,
         direction_uncertain=existing_edge.direction_uncertain and edge.direction_uncertain,
         protocol=existing_edge.protocol or edge.protocol,
+        evidence_files=merge_evidence_files(
+            existing_edge.evidence_files, edge.evidence_files
+        ),
     )
 
 

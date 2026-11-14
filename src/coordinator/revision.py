@@ -164,7 +164,10 @@ def _is_static(edge: DependencyEdge) -> bool:
 def _without_static(edge: DependencyEdge) -> DependencyEdge | None:
     """Return the edge minus its code evidence, or None if that was all."""
     methods = [m for m in edge.discovery_methods if m is not DiscoveryMethod.STATIC_CODE]
-    return edge.model_copy(update={"discovery_methods": methods}) if methods else None
+    if not methods:
+        return None
+    files: list[str] | None = None if edge.evidence_files is None else []
+    return edge.model_copy(update={"discovery_methods": methods, "evidence_files": files})
 
 
 def head_topology(
@@ -190,7 +193,7 @@ def head_topology(
     unresolved: dict[str, UnresolvedEntity] = {
         entity.entity_id: entity for entity in graph.unresolved_entities
     }
-    head_edges: dict[str, set[str]] = {source: set() for source in roots.values()}
+    head_edges: dict[str, dict[str, set[str]]] = {source: {} for source in roots.values()}
     for scan in head_services:
         source = roots.get(scan.service.root)
         if source is None:
@@ -210,7 +213,7 @@ def head_topology(
                 defaults_used,
             )
             if target != source:
-                head_edges[source].add(target)
+                head_edges[source].setdefault(target, set()).update(reference.evidence_files)
 
     sources = set(head_edges)
     baseline_static = {
@@ -222,12 +225,18 @@ def head_topology(
     added = sorted(head_static - baseline_static)
     removed = sorted(baseline_static - head_static)
 
+    def head_files(source: str, target: str) -> list[str]:
+        return sorted(head_edges[source][target])
+
     edges: list[DependencyEdge] = []
     for edge in graph.edges:
-        if (edge.source_service_id, edge.target_service_id) in removed:
+        pair = (edge.source_service_id, edge.target_service_id)
+        if pair in removed:
             kept = _without_static(edge)
             if kept is not None:
                 edges.append(kept)
+        elif pair in head_static:
+            edges.append(edge.model_copy(update={"evidence_files": head_files(*pair)}))
         else:
             edges.append(edge)
     now = datetime.now(timezone.utc)
@@ -237,7 +246,10 @@ def head_topology(
         if position is not None:
             existing = edges[position]
             edges[position] = existing.model_copy(
-                update={"discovery_methods": [*existing.discovery_methods, DiscoveryMethod.STATIC_CODE]}
+                update={
+                    "discovery_methods": [*existing.discovery_methods, DiscoveryMethod.STATIC_CODE],
+                    "evidence_files": head_files(source, target),
+                }
             )
             continue
         edges.append(
@@ -248,6 +260,7 @@ def head_topology(
                 confidence_score=_STATIC_CONFIDENCE,
                 last_observed_at=now,
                 provenance=HEAD_SCAN_PROVENANCE,
+                evidence_files=head_files(source, target),
             )
         )
     used = {edge.target_service_id for edge in edges} | {edge.source_service_id for edge in edges}
