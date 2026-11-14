@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import DecisionPanel from "../components/DecisionPanel.jsx";
 import EgoGraph from "../components/EgoGraph.jsx";
+import IdentityAnswer from "../components/IdentityAnswer.jsx";
 import Nav from "../components/Nav.jsx";
 import { ROUTES, href } from "../lib/router.js";
 import { openObservability } from "./Observability.jsx";
@@ -133,6 +134,9 @@ function Group({ group, number, scope }) {
             ))}
           </ul>
         </div>
+      )}
+      {group.root_key.startsWith("identity:") && scope && (
+        <IdentityAnswer scope={scope} subjectKey={group.root_key} />
       )}
       {group.root_key === "info:observability" && scope && (
         <p className="mt-3 text-sm">
