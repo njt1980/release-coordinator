@@ -22,6 +22,8 @@ docs/research findings 04.
 
 from __future__ import annotations
 
+import re
+from enum import Enum
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -80,6 +82,44 @@ BEYLA: Final[TelemetryCapability] = TelemetryCapability(
         }
     ),
 )
+
+
+class TelemetryStack(str, Enum):
+    """Which instrumentation wrote a telemetry row, from its ``SDKVersion``.
+
+    APPINSIGHTS_CLASSIC: the Application Insights SDK 2.x (``rdddsc:2.22.0``,
+        ``aspnet5c:2.22.0``): Kubernetes facts only with its enricher.
+    AZURE_MONITOR_OTEL: Azure Monitor OpenTelemetry in the application (the
+        Distro or the exporter, ``dotnet…:otel1.12.0:ext1.4.0``): resource
+        attributes such as the namespace are not written to the row.
+    OTEL_COLLECTOR: an OpenTelemetry Collector's Azure Monitor exporter
+        (``otelc-…``), for example Beyla's: Kubernetes attributes when the
+        Collector adds them, server spans only if the Collector forwards them.
+    UNKNOWN: anything else.
+    """
+
+    APPINSIGHTS_CLASSIC = "appinsights_classic"
+    AZURE_MONITOR_OTEL = "azure_monitor_otel"
+    OTEL_COLLECTOR = "otel_collector"
+    UNKNOWN = "unknown"
+
+
+# Observed in the probe lab (findings 05) except the Distro labels dst/mot
+# and SDK 3.x (sh?), which come from the exporter's source.
+_OTEL_IN_APP: Final[re.Pattern[str]] = re.compile(r":(?:otel|ext|dst|mot|sh[a-z])\d")
+_CLASSIC: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]+:2\.\d")
+
+
+def telemetry_stack(sdk_version: str) -> TelemetryStack:
+    """Classify an Application Insights ``SDKVersion`` value."""
+    version = sdk_version.strip().lower()
+    if version.startswith("otelc"):
+        return TelemetryStack.OTEL_COLLECTOR
+    if _OTEL_IN_APP.search(version):
+        return TelemetryStack.AZURE_MONITOR_OTEL
+    if _CLASSIC.match(version):
+        return TelemetryStack.APPINSIGHTS_CLASSIC
+    return TelemetryStack.UNKNOWN
 
 
 def wire_protocol(address: str) -> str | None:

@@ -15,6 +15,8 @@ from src.core.env_names import (
 )
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from src.core.telemetry_capability import TelemetryStack
+
 
 T = TypeVar("T")
 
@@ -1512,6 +1514,77 @@ class LiveCoverage(BaseModel):
     sampled_sources: Dict[str, int] = Field(default_factory=dict)
 
 
+class TelemetryRoleProfile(BaseModel):
+    """What the telemetry holds for one role (service name) over the lookback.
+
+    ``role`` is the row's ``service.name`` or ``AppRoleName`` ("" for rows
+    without one) and ``namespace`` a Kubernetes namespace its rows carry
+    ("" when none do). Row counts are rows stored; ``represented_calls`` is
+    what they stand for (``sum(ItemCount)``), so ``max_item_count`` above 1
+    means the role is sampled. ``stacks`` classify ``sdk_versions`` (see
+    ``TelemetryStack``); ``components`` are Application Insights component
+    names its rows came from.
+    """
+
+    role: str
+    namespace: str = ""
+    request_rows: int = Field(ge=0)
+    dependency_rows: int = Field(ge=0)
+    represented_calls: int = Field(ge=0)
+    max_item_count: int = Field(ge=0)
+    rows_with_namespace: int = Field(ge=0)
+    stacks: List[TelemetryStack] = Field(default_factory=list)
+    sdk_versions: List[str] = Field(default_factory=list)
+    components: List[str] = Field(default_factory=list)
+    last_seen: Optional[datetime] = None
+
+    @property
+    def rows(self) -> int:
+        """Rows stored for the role."""
+        return self.request_rows + self.dependency_rows
+
+
+class ObservabilityGapKind(str, Enum):
+    """Why telemetry describes a service less well than it could.
+
+    NO_ROLE_NAME: rows without a service name: their calls can't be
+        attributed to any service.
+    ROLE_NOT_IN_INVENTORY: a telemetry role that matches no inventory
+        service (renamed, another application, or a name that differs from
+        the Kubernetes one).
+    SERVICE_WITHOUT_TELEMETRY: an inventory service with no rows in scope.
+    NO_NAMESPACE: the service's rows carry no Kubernetes namespace, so it is
+        matched by bare name.
+    NO_REQUEST_TELEMETRY: the service writes dependencies but no requests,
+        so calls to it can't be confirmed by request join, only by address.
+    SAMPLED: the service's telemetry is sampled; rare calls may be missing.
+    CONSUMER_NOT_TRACED: the service sends messages but no consumer's
+        processing of them is traced, so who consumes them isn't observed.
+    """
+
+    NO_ROLE_NAME = "no_role_name"
+    ROLE_NOT_IN_INVENTORY = "role_not_in_inventory"
+    SERVICE_WITHOUT_TELEMETRY = "service_without_telemetry"
+    NO_NAMESPACE = "no_namespace"
+    NO_REQUEST_TELEMETRY = "no_request_telemetry"
+    SAMPLED = "sampled"
+    CONSUMER_NOT_TRACED = "consumer_not_traced"
+
+
+class ObservabilityGap(BaseModel):
+    """One way the telemetry falls short for one subject.
+
+    ``subject`` is a service FQURI when the role resolved to one, otherwise
+    the telemetry role (``<namespace>/<role>`` or the bare role; ``""`` for
+    rows without a role name). ``stacks`` is the instrumentation seen.
+    """
+
+    kind: ObservabilityGapKind
+    subject: str
+    detail: str = Field(min_length=1)
+    stacks: List[TelemetryStack] = Field(default_factory=list)
+
+
 class TelemetryStatus(BaseModel):
     """Runtime evidence available for the services in a release radius.
 
@@ -1528,7 +1601,9 @@ class TelemetryStatus(BaseModel):
     observed in the radius (empty without a live query);
     ``baseline_runtime_edges`` the radius edges the baseline holds from
     telemetry. ``runtime_metrics`` is keyed by service FQURI.
-    ``coverage`` and ``dropped_records`` describe the live query.
+    ``coverage`` and ``dropped_records`` describe the live query;
+    ``observability_gaps`` how the telemetry falls short for radius services
+    (None when not probed).
     """
 
     source: Literal["knowledge_graph", "live", "mock"]
@@ -1539,6 +1614,7 @@ class TelemetryStatus(BaseModel):
     unbaselined_edges: List[ObservedEdge] = Field(default_factory=list)
     coverage: Optional[LiveCoverage] = None
     dropped_records: Dict[str, int] = Field(default_factory=dict)
+    observability_gaps: Optional[List[ObservabilityGap]] = None
 
 
 class RiskAssessment(BaseModel):
@@ -1778,6 +1854,8 @@ class AssessmentEvidence(BaseModel):
     unbaselined_edges: List[ObservedEdge] = Field(default_factory=list)
     # How the live query covered the radius (None without a real live query).
     live_coverage: Optional["LiveCoverage"] = None
+    # How the telemetry falls short for radius services (None when not probed).
+    observability_gaps: Optional[List[ObservabilityGap]] = None
     head_scanned: bool = False
     dependencies_added: List[DependencyChange] = Field(default_factory=list)
     dependencies_removed: List[DependencyChange] = Field(default_factory=list)

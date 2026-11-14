@@ -267,7 +267,8 @@ def _groups(issues: list[EvidenceIssue]) -> list[BriefingGroup]:
 
 
 def _context_groups(assessment: ReleaseAssessment) -> list[BriefingGroup]:
-    """Non-blocking context: what the policy accepted, out-of-shape objects."""
+    """Non-blocking context: what the policy accepted, the review, observability
+    gaps in the radius telemetry, out-of-shape objects."""
     evidence = assessment.evidence
     accepted = [
         f"{e.rule}: {e.reason}"
@@ -292,6 +293,25 @@ def _context_groups(assessment: ReleaseAssessment) -> list[BriefingGroup]:
             )
         )
     groups.extend(_review_groups(assessment))
+    if evidence.observability_gaps:
+        gaps = evidence.observability_gaps
+        groups.append(
+            BriefingGroup(
+                root_key="info:observability",
+                rank=BriefingRank.INFO,
+                title=f"{len(gaps)} observability gap(s) in the radius telemetry",
+                why_it_matters=(
+                    "Where the telemetry describes these services less well than it could; "
+                    "runtime evidence about them is weaker for it."
+                ),
+                what_to_check=[
+                    f"{short_name(gap.subject) if gap.subject else '(no service name)'}: "
+                    f"{gap.kind.value.replace('_', ' ')}. {gap.detail}"
+                    for gap in gaps[:_LISTED]
+                ],
+                services=sorted({gap.subject for gap in gaps if gap.subject}),
+            )
+        )
     if evidence.shape_findings:
         groups.append(
             BriefingGroup(

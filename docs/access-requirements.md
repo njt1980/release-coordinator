@@ -107,6 +107,17 @@ before falling back to the developer's `az login`.
 - Call counts are `sum(ItemCount)`, so sampled rows count for the calls they
   stand for. Dependencies to the Kubernetes API (the classic SDK's
   Kubernetes enricher) are dropped as `kubernetes_api` noise.
+- Observability gap report: `GET /api/v1/projects/{tenant}/{project}/observability`
+  probes the baseline's workspace(s) within the policy's scope and lists,
+  per telemetry role, the instrumentation stack (from `SDKVersion`: classic
+  SDK 2.x, Azure Monitor OpenTelemetry, OpenTelemetry Collector), rows vs
+  calls represented (sampling), and whether rows carry a namespace; then the
+  gaps: rows without a role name, roles matching no inventory service,
+  services without telemetry, no namespace, no request telemetry (callees
+  can't be confirmed by request join), sampling, and message sends whose
+  consumer isn't traced. Assessments add the radius services' gaps to the
+  briefing as context; they never change the verdict. Same read access, no
+  extra permission.
 - When a radius service is uncovered, assessments count the dropped rows by
   source name and say which uncovered service they look like
   (`LiveCoverage.unscoped_sources`); the rows still never count.
