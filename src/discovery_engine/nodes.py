@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 
 from src.core import config
 from src.core.models import (
+    IDENTITY_LINK_METADATA_KEY,
+    IDENTITY_SUGGESTIONS_METADATA_KEY,
+    IDENTITY_UNLINKED_METADATA_KEY,
     LABEL_SEPARATOR,
     REPOSITORY_METADATA_KEY,
     SERVICE_ROOT_METADATA_KEY,
@@ -33,7 +36,13 @@ from src.core.edge_resolution import (
     static_config_index,
     target_context,
 )
-from src.core.service_ids import IdentityContext, IdentityIndex
+from src.core.identity_links import link_identities
+from src.core.service_ids import (
+    ENV_REFERENCE_PREFIX,
+    IdentityContext,
+    IdentityIndex,
+    parse_env_var_reference,
+)
 from src.discovery_engine.state import DiscoveryGraphState
 from src.tools.baseline_store import BaselineScope, default_store
 from src.tools.devops_extractor import DevOpsExtractor
@@ -370,9 +379,67 @@ def _is_static(service: ServiceNode) -> bool:
     return REPOSITORY_METADATA_KEY in service.metadata
 
 
+def _link_by_name(
+    services: list[ServiceNode],
+    namespaced: IdentityIndex,
+    context: IdentityContext,
+) -> tuple[dict[str, ServiceIdentity], list[ServiceNode]]:
+    """Tie source-code services with no exact runtime match to a runtime name.
+
+    Only meaning-preserving canonical equality links (see
+    ``identity_links.link_identities``), within the namespace the source
+    service resolves to (declared, else the default namespace, else any).
+    Returns the linked identity by original service ID, and ``services``
+    with link evidence, or the unlinked flag and its suggestions, in the
+    metadata of source-code services. Nothing is flagged when no runtime
+    service was discovered (no Kubernetes source).
+    """
+    runtime = [s for s in services if not _is_static(s) and s.identity.namespace != UNKNOWN_LABEL]
+    if not runtime:
+        return {}, services
+    matched: set[str] = set()
+    unmatched: dict[str, ServiceIdentity] = {}
+    for service in services:
+        if not _is_static(service):
+            continue
+        identity = _service_identity(service, namespaced, context)
+        if identity is None:
+            continue
+        if namespaced.resolve(identity) is not None:
+            matched.add(identity.uri)
+        else:
+            unmatched[service.service_id] = identity
+    linked: dict[str, ServiceIdentity] = {}
+    flags: dict[str, dict[str, str]] = {}
+    for namespace in sorted({identity.namespace for identity in unmatched.values()}):
+        group = {sid: i for sid, i in unmatched.items() if i.namespace == namespace}
+        candidates = {
+            s.identity.service_name: s.identity
+            for s in runtime
+            if s.identity.uri not in matched and namespace in (UNKNOWN_LABEL, s.identity.namespace)
+        }
+        result = link_identities((i.service_name for i in group.values()), candidates)
+        by_source = {link.source_name: link for link in result.links}
+        for service_id, identity in group.items():
+            link = by_source.get(identity.service_name)
+            if link is not None:
+                linked[service_id] = candidates[link.runtime_name]
+                flags[service_id] = {IDENTITY_LINK_METADATA_KEY: link.describe()}
+            else:
+                flags[service_id] = {
+                    IDENTITY_UNLINKED_METADATA_KEY: "true",
+                    IDENTITY_SUGGESTIONS_METADATA_KEY: ",".join(result.unlinked.get(identity.service_name, [])),
+                }
+    updated = [
+        s.model_copy(update={"metadata": {**s.metadata, **flags[s.service_id]}}) if s.service_id in flags else s
+        for s in services
+    ]
+    return linked, updated
+
+
 def _canonicalize_services(
     services: list[ServiceNode], context: IdentityContext
-) -> tuple[list[ServiceNode], dict[str, UnresolvedEntity]]:
+) -> tuple[list[ServiceNode], dict[str, UnresolvedEntity], dict[str, str]]:
     """Resolve services to their merged identities and merge duplicates.
 
     A repository-derived service (``...:unknown:order-service``) and its
@@ -387,19 +454,26 @@ def _canonicalize_services(
     reconciliation can attribute their code edges to the entity. A
     Kubernetes service with the same identity stays registered.
 
+    A source-code service whose name differs from its runtime name only by
+    case or separators (``orderprocessor`` / ``order-processor``) merges
+    into it when the folded name is unique on both sides (see
+    ``_link_by_name``); one left unlinked is flagged in its metadata.
+
     Returns:
-        The merged services, and the ambiguous entity for each original
-        service ID of an ambiguous source-code service.
+        The merged services, the ambiguous entity for each original
+        service ID of an ambiguous source-code service, and the merged
+        service ID for each source-code service linked by name.
     """
     namespaced = IdentityIndex(
         service.identity
         for service in services
         if service.identity.namespace != UNKNOWN_LABEL
     )
+    linked, services = _link_by_name(services, namespaced, context)
     groups: dict[str, list[ServiceNode]] = {}
     ambiguous: dict[str, UnresolvedEntity] = {}
     for service in services:
-        identity = _service_identity(service, namespaced, context)
+        identity = linked.get(service.service_id) or _service_identity(service, namespaced, context)
         if identity is None:
             ambiguous[service.service_id] = _ambiguous_entity(service.service_id)
             continue
@@ -425,7 +499,26 @@ def _canonicalize_services(
                 }
             )
         merged.append(node)
-    return merged, ambiguous
+    renames = {original: identity.uri for original, identity in linked.items()}
+    return merged, ambiguous, renames
+
+
+def _rename_static_edge(edge: DependencyEdge, renames: dict[str, str], names: dict[str, str]) -> DependencyEdge:
+    """Point a code edge of a service linked by name at its merged identity.
+
+    Its source becomes the merged service ID and an ``env:<name>/VAR``
+    target names the merged service, so the variable resolves through the
+    runtime service's environment. Addresses in code are never renamed: a
+    host is what DNS resolves.
+    """
+    source = renames.get(edge.source_service_id)
+    if source is None:
+        return edge
+    target = edge.target_service_id
+    parsed = parse_env_var_reference(target)
+    if parsed is not None and parsed[0] in names:
+        target = f"{ENV_REFERENCE_PREFIX}{names[parsed[0]]}/{parsed[1]}"
+    return edge.model_copy(update={"source_service_id": source, "target_service_id": target})
 
 
 def _merge_labels(first: str, second: str) -> str:
@@ -488,6 +581,11 @@ def drop_reversed_sightings(
     ]
 
 
+def _merged_name(services: list[ServiceNode], service_id: str) -> str:
+    """The runtime name of the merged service ``service_id``."""
+    return next(s.identity.service_name for s in services if s.service_id == service_id)
+
+
 def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
     """Reconcile static, Kubernetes, and runtime evidence into one graph.
 
@@ -510,9 +608,13 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
     ``_canonicalize_services``) start from its AMBIGUOUS_SERVICE entity.
     """
     context = identity_context(state)
-    services, ambiguous = _canonicalize_services(
-        list(state.get("discovered_services", [])), context
-    )
+    discovered = list(state.get("discovered_services", []))
+    services, ambiguous, renames = _canonicalize_services(discovered, context)
+    linked_names = {
+        service.name: _merged_name(services, renames[service.service_id])
+        for service in discovered
+        if service.service_id in renames
+    }
     index = IdentityIndex(service.identity for service in services)
     environments = service_environment_index(
         list(state.get("service_environments", []))
@@ -525,7 +627,9 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
         entity.entity_id: entity for entity in ambiguous.values()
     }
     merged_edges: dict[tuple[str, str], DependencyEdge] = {}
-    static_edges = list(state.get("static_edges", []))
+    static_edges = [
+        _rename_static_edge(edge, renames, linked_names) for edge in state.get("static_edges", [])
+    ]
     edges = [
         *static_edges,
         *state.get("runtime_edges", []),

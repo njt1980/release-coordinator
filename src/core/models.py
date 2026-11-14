@@ -220,6 +220,11 @@ def is_fquri(value: str) -> bool:
 # ("" for the repository root). Used to map changed files to services.
 REPOSITORY_METADATA_KEY: Final[str] = "repository"
 SERVICE_ROOT_METADATA_KEY: Final[str] = "service_root"
+# How a source-code service was tied to its runtime counterpart (see
+# ``identity_links``), or that no runtime service matched it.
+IDENTITY_LINK_METADATA_KEY: Final[str] = "identity_link"
+IDENTITY_UNLINKED_METADATA_KEY: Final[str] = "identity_unlinked"
+IDENTITY_SUGGESTIONS_METADATA_KEY: Final[str] = "identity_suggestions"
 
 
 class ServiceNode(BaseModel):
@@ -1271,6 +1276,9 @@ class ReasonCode(str, Enum):
         scanner couldn't read (an unsupported language, a read failure), at
         the baseline or the pull request's head, or the baseline predates
         coverage accounting; a dependency they declare is invisible.
+    IDENTITY_UNLINKED: a service in the radius exists in source code but
+        matches no running service (by name, or by name up to case and
+        separators), so its runtime calls and callers are unknown.
 
     Every code except MODEL_REJECTED makes the assessment non-actionable: the
     evidence is insufficient to rely on the verdict, which is different from
@@ -1293,6 +1301,7 @@ class ReasonCode(str, Enum):
     REVISION_UNVERIFIED = "REVISION_UNVERIFIED"
     BASELINE_REVISION_MISMATCH = "BASELINE_REVISION_MISMATCH"
     STATIC_COVERAGE_INCOMPLETE = "STATIC_COVERAGE_INCOMPLETE"
+    IDENTITY_UNLINKED = "IDENTITY_UNLINKED"
 
     @property
     def limits_actionability(self) -> bool:
