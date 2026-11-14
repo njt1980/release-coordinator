@@ -14,6 +14,7 @@ from src.core.models import (
     EvidenceIssue,
     Exemption,
     KnowledgeGraph,
+    MessagingCheck,
     PullRequestPayload,
     RepositoryCoverage,
     ReleaseAssessment,
@@ -70,7 +71,9 @@ class ReleaseGraphState(TypedDict, total=False):
     ``assessment_review`` how they shaped it. ``contract_check`` is the
     contract compatibility evidence the plan's compatibility rests on;
     ``change_flags`` the pull request's advisory migration, configuration
-    and feature-flag changes.
+    and feature-flag changes; ``messaging_check`` the message channels the
+    release's services produce to or consume from (None for a baseline
+    predating channels).
     """
 
     trigger_event: Required[dict[str, object]]
@@ -105,6 +108,7 @@ class ReleaseGraphState(TypedDict, total=False):
     discovery_issues: list[EvidenceIssue]
     contract_check: ContractCheck
     change_flags: ChangeFlags
+    messaging_check: MessagingCheck | None
     deployment_plan: DeploymentPlan
     deployment_sequence: list[str]
     advisory_assessment: RiskAssessment | None

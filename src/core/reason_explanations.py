@@ -140,4 +140,19 @@ REASON_EXPLANATIONS: Final[dict[ReasonCode, tuple[str, str]]] = {
         "Confirm the flag's default and per-environment values are intended and that turning "
         "it off is a tested rollback path.",
     ),
+    ReasonCode.CHANNEL_CONSUMERS_UNKNOWN: (
+        "A changed service publishes to a message channel (queue, topic, exchange or "
+        "integration event) that no scanned service consumes, so whoever reads its messages "
+        "is missing from the release radius and its deployment order.",
+        "Find the consumer: add its repository to the scan, or declare the channel's "
+        "consumers external under messaging.external_consumers in the policy (with a "
+        "reason); messaging.unknown_consumers: advisory makes this a decision instead.",
+    ),
+    ReasonCode.CHANNEL_CONSUMERS_UNCONFIRMED: (
+        "A changed service publishes to a message channel no scanned service consumes; the "
+        "project policy makes this advisory (messaging.unknown_consumers: advisory), so a "
+        "person decides whether an unseen consumer can take the change.",
+        "Check who reads the channel and that they accept the new messages; declare known "
+        "external consumers under messaging.external_consumers.",
+    ),
 }

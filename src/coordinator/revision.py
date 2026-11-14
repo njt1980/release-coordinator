@@ -34,10 +34,12 @@ from src.core.models import (
     EvidenceIssue,
     KnowledgeGraph,
     ReasonCode,
+    ServiceChannelUse,
     ServiceStaticConfig,
     StaticDefaultUse,
     UnresolvedEntity,
 )
+from src.core.messaging import replace_service_uses
 from src.core.service_ids import IdentityContext, IdentityIndex
 from src.tools.devops_extractor import CommitComparison, ServiceScan
 
@@ -184,6 +186,7 @@ def head_topology(
     inventory and recorded container environments, with the changed
     services' configuration defaults read at the head. Edges with runtime or
     manifest evidence keep it even when the head no longer declares them.
+    The changed services' message channel uses are replaced by the head's.
     """
     index = IdentityIndex(service.identity for service in graph.services)
     environments = service_environment_index(list(graph.service_environments or []))
@@ -272,6 +275,20 @@ def head_topology(
             *defaults_used.values(),
         ]
     )
+    channels = (
+        None
+        if graph.channels is None
+        else replace_service_uses(
+            graph.channels,
+            roots.values(),
+            [
+                ServiceChannelUse(service_id=roots[scan.service.root], use=use)
+                for scan in head_services
+                if scan.service.root in roots
+                for use in scan.channel_uses
+            ],
+        )
+    )
     return HeadTopology(
         graph=graph.model_copy(
             update={
@@ -279,6 +296,7 @@ def head_topology(
                 "unresolved_entities": [e for e in unresolved.values() if e.entity_id in used],
                 "static_config": _head_configs(graph, head_services),
                 "static_defaults_used": defaults,
+                "channels": channels,
             }
         ),
         added=[DependencyChange(source_id=s, target_id=t) for s, t in added],

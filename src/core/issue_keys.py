@@ -35,3 +35,8 @@ def files_key(repository: str, paths: Iterable[str]) -> str:
 
 def identity_key(name: str) -> str:
     return f"identity:{name.lower()}"
+
+
+def channel_key(channel_id: str) -> str:
+    """Key for a message channel's finding: one question per channel."""
+    return channel_id

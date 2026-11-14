@@ -61,6 +61,7 @@ from src.coordinator.sequencing import DeploymentPlan, sequence_deployment
 from src.coordinator.state import ReleaseGraphState
 from src.core import config
 from src.core.issue_keys import identity_key, unresolved_key
+from src.core.messaging import channel_links, messaging_check, unknown_consumer_issues
 from src.core.models import (
     IDENTITY_SUGGESTIONS_METADATA_KEY,
     IDENTITY_UNLINKED_METADATA_KEY,
@@ -93,6 +94,7 @@ from src.core.service_ids import IdentityIndex, parse_env_var_reference
 from src.tools.baseline_store import BaselineScope, StoredBaseline, default_store
 from src.tools.policy_store import (
     LoadedPolicy,
+    MessagingPolicy,
     PolicyInvalidError,
     PolicyMissingError,
     ProjectPolicy,
@@ -230,6 +232,9 @@ class BlastRadius(BaseModel):
     walked in either direction. ``unresolved`` holds one entry per
     unresolved node reached. ``upstream_hops``/``downstream_hops`` give
     each of those services' shortest distance (in edges) from a target.
+    ``channels`` are the message channels whose links were walked (see
+    ``core.messaging``); a channel hop counts as one edge, but channel links
+    are never in ``matched_edges``.
     """
 
     upstream: list[str]
@@ -238,19 +243,25 @@ class BlastRadius(BaseModel):
     unresolved: list[UnresolvedReach]
     upstream_hops: dict[str, int] = {}
     downstream_hops: dict[str, int] = {}
+    channels: list[str] = []
 
 
 def _adjacency(
-    edges: list[DependencyEdge], direction: Direction
+    edges: list[DependencyEdge],
+    direction: Direction,
+    channel_pairs: list[tuple[str, str, str]] | None = None,
 ) -> dict[str, list[tuple[str, int]]]:
     """Map each node to ``(neighbour, edge index)`` pairs in one direction.
 
     ``downstream`` follows edges caller -> callee; ``upstream`` follows them
-    backwards, from callee to caller.
+    backwards, from callee to caller. ``channel_pairs`` (consumer, producer,
+    channel) are followed as consumer -> producer edges; their indexes come
+    after ``edges``'.
     """
     adjacency: dict[str, list[tuple[str, int]]] = {}
-    for position, edge in enumerate(edges):
-        source, target = edge.source_service_id, edge.target_service_id
+    pairs = [(e.source_service_id, e.target_service_id) for e in edges]
+    pairs += [(consumer, producer) for consumer, producer, _ in channel_pairs or []]
+    for position, (source, target) in enumerate(pairs):
         if direction == "upstream":
             source, target = target, source
         adjacency.setdefault(source, []).append((target, position))
@@ -309,9 +320,12 @@ def traverse_blast_radius(graph: KnowledgeGraph, targets: list[str]) -> BlastRad
     path to a target is upstream; every node a target has a path to is
     downstream. A node that is not a registered service (an
     ``UnresolvedEntity`` or any endpoint missing from the inventory) is left
-    out of both lists and reported as an issue instead.
+    out of both lists and reported as an issue instead. A consumer of a
+    message channel depends on the channel's producers (see
+    ``core.messaging``): a producer's consumers are upstream of it.
     """
     registered = {service.service_id for service in graph.services}
+    pairs = channel_links(graph.channels or [])
     entities = {e.entity_id: e for e in graph.unresolved_entities}
     walked: set[int] = set()
     radius: dict[Direction, list[str]] = {"upstream": [], "downstream": []}
@@ -320,7 +334,7 @@ def traverse_blast_radius(graph: KnowledgeGraph, targets: list[str]) -> BlastRad
     reported: set[str] = set()
     for direction in ("downstream", "upstream"):
         reached, edges, paths = _breadth_first(
-            targets, _adjacency(graph.edges, direction)
+            targets, _adjacency(graph.edges, direction, pairs)
         )
         walked.update(edges)
         for node in reached:
@@ -342,10 +356,12 @@ def traverse_blast_radius(graph: KnowledgeGraph, targets: list[str]) -> BlastRad
                         via=hops,
                     )
                 )
+    edge_count = len(graph.edges)
     return BlastRadius(
         upstream=radius["upstream"],
         downstream=radius["downstream"],
-        matched_edges=[graph.edges[position] for position in sorted(walked)],
+        matched_edges=[graph.edges[position] for position in sorted(walked) if position < edge_count],
+        channels=sorted({pairs[position - edge_count][2] for position in walked if position >= edge_count}),
         unresolved=unresolved,
         upstream_hops=distances["upstream"],
         downstream_hops=distances["downstream"],
@@ -828,7 +844,10 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
     between the baseline and the base that change the release (see
     ``RevisionLag``), source files the static scan couldn't read (see
     ``static_coverage_issues``), or a service in the radius known only from
-    source code (see ``identity_issues``). The radius is walked over ``assessed_graph`` (the
+    source code (see ``identity_issues``), or a changed service publishing to a
+    message channel no scanned service consumes (CHANNEL_CONSUMERS_UNKNOWN,
+    unless the policy's ``messaging`` section accepts or softens it; see
+    ``core.messaging``). The radius is walked over ``assessed_graph`` (the
     head's dependencies) when the head was scanned, the baseline otherwise, with
     the project's dependency review applied (``confirmed_map``); issues an
     answered question covers become context in ``assessment_review``.
@@ -883,6 +902,26 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         policy, baseline.graph, baseline.snapshot_id, state.get("head_coverage") or []
     )
     issues.extend(coverage_issues)
+    messaging = policy.messaging if policy is not None else MessagingPolicy()
+    external = messaging.external_reasons()
+    channels = messaging_check(
+        graph.channels,
+        targets,
+        [*radius.upstream, *radius.downstream],
+        messaging.unknown_consumers,
+        external,
+    )
+    issues.extend(unknown_consumer_issues(channels))
+    if channels is not None:
+        exempted.extend(
+            Exemption(
+                subject=reach.channel_id,
+                rule="messaging.external_consumers",
+                reason=reach.accepted,
+            )
+            for reach in channels.channels
+            if reach.accepted
+        )
     if baseline.demo_mode:
         issues.append(
             EvidenceIssue(
@@ -908,6 +947,7 @@ def calculate_static_radius_node(state: ReleaseGraphState) -> dict[str, object]:
         "assessment_review": review,
         "exempted_dependencies": exempted,
         "exempted_unscanned_files": unscanned_exempted,
+        "messaging_check": channels,
         "shape_findings": radius_shape_findings(
             baseline.graph, [*targets, *radius.upstream, *radius.downstream]
         ),
@@ -1299,7 +1339,10 @@ def assess_risk_and_sequence_node(state: ReleaseGraphState) -> dict[str, object]
             plan,
             advisory,
             advisory_disabled=disabled,
-            change_codes=flags.reason_codes if (flags := state.get("change_flags")) is not None else None,
+            change_codes=[
+                *(flags.reason_codes if (flags := state.get("change_flags")) is not None else []),
+                *(check.reason_codes if (check := state.get("messaging_check")) is not None else []),
+            ],
         ),
     }
 
@@ -1344,6 +1387,7 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         review=state.get("assessment_review"),
         contract_check=state.get("contract_check"),
         change_flags=state.get("change_flags"),
+        messaging=state.get("messaging_check"),
         advisory_redactions=dict(state.get("advisory_redactions") or {}),
         test_scope=suggested_test_scope(
             state.get("target_services", []),
