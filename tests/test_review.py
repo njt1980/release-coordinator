@@ -78,9 +78,9 @@ class AnswerValidationTests(unittest.TestCase):
 
     def test_reason_required_to_disagree_add_and_answer(self) -> None:
         with self.assertRaisesRegex(ValidationError, "requires a reason"):
-            _answer(verdict=ReviewVerdict.DISAGREE, reason="   ")
+            _answer(verdict=ReviewVerdict.DISAGREE, evidence_seen=("method:STATIC_CODE",), reason="   ")
         self.assertEqual(
-            _answer(verdict=ReviewVerdict.DISAGREE, reason=" dead code ").reason,
+            _answer(verdict=ReviewVerdict.DISAGREE, evidence_seen=("method:STATIC_CODE",), reason=" dead code ").reason,
             "dead code",
         )
         with self.assertRaisesRegex(ValidationError, "requires a reason"):
@@ -143,6 +143,12 @@ class AnswerValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             _anchor()
 
+    def test_disagree_records_the_evidence_seen(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "evidence_seen"):
+            _answer(verdict=ReviewVerdict.DISAGREE, reason="dead code")
+        with self.assertRaisesRegex(ValidationError, "only a dependency"):
+            _answer(subject=QUESTION, verdict=ReviewVerdict.NOTHING_HIDDEN, reason="x", evidence_seen=("a",))
+
     def test_subject_keys(self) -> None:
         with self.assertRaisesRegex(ValidationError, "edge key"):
             ReviewSubject(kind=ReviewSubjectKind.DEPENDENCY, key="env:x")
@@ -159,7 +165,7 @@ class CurrentAnswerTests(unittest.TestCase):
         agree = _answer()
         disagree = _answer(
             answer_id="a2",
-            verdict=ReviewVerdict.DISAGREE,
+            verdict=ReviewVerdict.DISAGREE, evidence_seen=("method:STATIC_CODE",),
             reason="removed in v2",
             answered_at=T0 + timedelta(hours=1),
         )
@@ -197,6 +203,10 @@ class FreshnessTests(unittest.TestCase):
         sibling = answer_freshness(answer, {"shop": NEW}, [_changes("checkout-tests/x.cs")])
         self.assertFalse(sibling.needs_rereview)
 
+    def test_repository_root_anchor_matches_everything(self) -> None:
+        answer = _answer(anchors=(_anchor("/"),))
+        self.assertTrue(answer_freshness(answer, {"shop": NEW}, [_changes("README.md")]).needs_rereview)
+
     def test_unprovable_states_need_rereview(self) -> None:
         cases = {
             "missing repository": ({}, []),
@@ -228,7 +238,7 @@ class ReviewStoreTests(unittest.TestCase):
     def test_round_trip_history_and_scoping(self) -> None:
         later = _answer(
             answer_id="a2",
-            verdict=ReviewVerdict.DISAGREE,
+            verdict=ReviewVerdict.DISAGREE, evidence_seen=("method:STATIC_CODE",),
             reason="gone",
             answered_at=T0 + timedelta(minutes=5),
         )
@@ -246,7 +256,7 @@ class ReviewStoreTests(unittest.TestCase):
     def test_duplicate_answer_id_rejected(self) -> None:
         self.store.append(self.scope, _answer())
         with self.assertRaises(DuplicateAnswerError):
-            self.store.append(self.scope, _answer(verdict=ReviewVerdict.DISAGREE, reason="x"))
+            self.store.append(self.scope, _answer(verdict=ReviewVerdict.DISAGREE, evidence_seen=("method:STATIC_CODE",), reason="x"))
 
     def test_corrupt_row_is_reported(self) -> None:
         self.store.append(self.scope, _answer())
