@@ -266,6 +266,70 @@ class DeployedWorkload(BaseModel):
     workload: str = Field(min_length=1)
     images: List[str] = Field(default_factory=list)
     pipeline: DeployingPipeline | None = None
+    # Names the workload declares for itself (identity only, never edges):
+    # its pod template's identity labels (``RUNTIME_IDENTITY_LABELS``) and
+    # the literal or label-derived ``OTEL_SERVICE_NAME`` of its containers.
+    identity_labels: Dict[str, str] = Field(default_factory=dict)
+    otel_service_names: List[str] = Field(default_factory=list)
+
+
+# Pod template labels that name the application a workload runs (identity
+# only; see ``identity_links``).
+RUNTIME_IDENTITY_LABELS: Final[tuple[str, ...]] = (
+    "app.kubernetes.io/name",
+    "app.kubernetes.io/component",
+    "app",
+)
+
+
+class IdentityDeclarationKind(str, Enum):
+    """Which build file names a source directory, and what it names.
+
+    COMPOSE_SERVICE / ASPIRE_RESOURCE: a service name (Docker Compose
+        service built from the directory; .NET Aspire AppHost resource).
+    COMPOSE_IMAGE / SKAFFOLD_ARTIFACT / PIPELINE_DOCKER_TASK: an image
+        repository built from the directory (Compose ``image``, a skaffold
+        artifact, an Azure Pipelines ``Docker@2`` task's ``repository``).
+    """
+
+    COMPOSE_SERVICE = "COMPOSE_SERVICE"
+    ASPIRE_RESOURCE = "ASPIRE_RESOURCE"
+    COMPOSE_IMAGE = "COMPOSE_IMAGE"
+    SKAFFOLD_ARTIFACT = "SKAFFOLD_ARTIFACT"
+    PIPELINE_DOCKER_TASK = "PIPELINE_DOCKER_TASK"
+
+    @property
+    def is_image(self) -> bool:
+        """Whether the declared value is an image repository, not a name."""
+        return self in (
+            IdentityDeclarationKind.COMPOSE_IMAGE,
+            IdentityDeclarationKind.SKAFFOLD_ARTIFACT,
+            IdentityDeclarationKind.PIPELINE_DOCKER_TASK,
+        )
+
+
+class IdentityDeclaration(BaseModel, frozen=True):
+    """A build file naming a source-code service (identity only, never edges).
+
+    ``value`` is a service name, or an image repository without registry
+    and tag (see ``kind``); ``file_path`` the repository-relative file
+    declaring it.
+    """
+
+    kind: IdentityDeclarationKind
+    value: str = Field(min_length=1)
+    file_path: str = Field(min_length=1)
+
+    def describe(self) -> str:
+        return f"{self.kind.value} {self.value} ({self.file_path})"
+
+
+def merge_identity_declarations(
+    first: List[IdentityDeclaration] | None, second: List[IdentityDeclaration] | None
+) -> List[IdentityDeclaration] | None:
+    """Union two nodes' identity declarations (sorted, unique); None if neither has any."""
+    merged = {*(first or []), *(second or [])}
+    return sorted(merged, key=lambda d: (d.kind.value, d.value, d.file_path)) or None
 
 
 def merge_deployed_workloads(
@@ -292,6 +356,9 @@ class ServiceNode(BaseModel):
     repository_url: Optional[str] = None
     metadata: Dict[str, str] = Field(default_factory=dict)
     deployed_workloads: List[DeployedWorkload] | None = None
+    # Build files naming this source-code service (see ``IdentityDeclaration``);
+    # None when none does or the snapshot predates them.
+    identity_declarations: List[IdentityDeclaration] | None = None
 
     @field_validator("service_id")
     @classmethod

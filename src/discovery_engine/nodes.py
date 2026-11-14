@@ -31,6 +31,7 @@ from src.core.models import (
     baseline_problems,
     combine_statuses,
     merge_deployed_workloads,
+    merge_identity_declarations,
     merge_evidence_files,
     merge_resolution,
     merge_target_details,
@@ -45,7 +46,7 @@ from src.core.edge_resolution import (
     static_config_index,
     target_context,
 )
-from src.core.identity_links import link_identities
+from src.core.identity_links import IdentityFacts, image_repository, link_identities
 from src.core.telemetry_capability import wire_protocol
 from src.core.telemetry_roles import role_allow_list
 from src.core.service_ids import (
@@ -210,6 +211,7 @@ def extract_static_code_baseline(state: DiscoveryGraphState) -> dict[str, object
                             REPOSITORY_METADATA_KEY: repo_name,
                             SERVICE_ROOT_METADATA_KEY: scan.service.root,
                         },
+                        identity_declarations=scan.identity_declarations or None,
                     )
                 )
             for reference in scan.references:
@@ -447,6 +449,51 @@ def _is_static(service: ServiceNode) -> bool:
     return REPOSITORY_METADATA_KEY in service.metadata
 
 
+def _source_facts(service: ServiceNode) -> IdentityFacts:
+    """Names and image repositories a source-code service's build files declare."""
+    declarations = service.identity_declarations or []
+    return IdentityFacts(
+        names=frozenset(d.value for d in declarations if not d.kind.is_image),
+        image_repositories=frozenset(d.value for d in declarations if d.kind.is_image),
+    )
+
+
+def _group_source_facts(
+    services: list[ServiceNode], group: dict[str, ServiceIdentity]
+) -> dict[str, IdentityFacts]:
+    """Source name -> facts of every source service in ``group`` with that name."""
+    facts: dict[str, IdentityFacts] = {}
+    for service in services:
+        if service.service_id not in group:
+            continue
+        name = group[service.service_id].service_name
+        own = _source_facts(service)
+        known = facts.get(name, IdentityFacts())
+        facts[name] = IdentityFacts(
+            names=known.names | own.names,
+            image_repositories=known.image_repositories | own.image_repositories,
+        )
+    return facts
+
+
+def _runtime_facts(service: ServiceNode) -> IdentityFacts:
+    """Names a runtime service's workloads declare, and their images' repositories."""
+    workloads = service.deployed_workloads or []
+    return IdentityFacts(
+        names=frozenset(
+            name
+            for workload in workloads
+            for name in [*workload.identity_labels.values(), *workload.otel_service_names]
+        ),
+        image_repositories=frozenset(
+            repository
+            for workload in workloads
+            for image in workload.images
+            if (repository := image_repository(image))
+        ),
+    )
+
+
 def _link_by_name(
     services: list[ServiceNode],
     namespaced: IdentityIndex,
@@ -486,7 +533,17 @@ def _link_by_name(
             for s in runtime
             if s.identity.uri not in matched and namespace in (UNKNOWN_LABEL, s.identity.namespace)
         }
-        result = link_identities((i.service_name for i in group.values()), candidates)
+        result = link_identities(
+            (i.service_name for i in group.values()),
+            candidates,
+            source_facts=_group_source_facts(services, group),
+            runtime_facts={
+                s.identity.service_name: _runtime_facts(s)
+                for s in runtime
+                if s.identity.service_name in candidates
+                and candidates[s.identity.service_name] == s.identity
+            },
+        )
         by_source = {link.source_name: link for link in result.links}
         for service_id, identity in group.items():
             link = by_source.get(identity.service_name)
@@ -566,6 +623,9 @@ def _canonicalize_services(
                     "metadata": {**service.metadata, **node.metadata},
                     "deployed_workloads": merge_deployed_workloads(
                         node.deployed_workloads, service.deployed_workloads
+                    ),
+                    "identity_declarations": merge_identity_declarations(
+                        node.identity_declarations, service.identity_declarations
                     ),
                 }
             )

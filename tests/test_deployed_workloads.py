@@ -108,11 +108,13 @@ class DeployedWorkloadTests(unittest.TestCase):
                         run_url="https://dev.azure.com/contoso/Shop/_build/results?buildId=1234",
                         job="Deploy",
                     ),
+                    identity_labels={"app": "orders"},
                 ),
                 DeployedWorkload(
                     workload="deployment/orders-canary",
                     images=["acr.io/orders:1.5.0-rc1"],
                     pipeline=DeployingPipeline(pipeline="orders-canary"),
+                    identity_labels={"app": "orders"},
                 ),
             ],
         )
@@ -120,7 +122,13 @@ class DeployedWorkloadTests(unittest.TestCase):
     def test_unexposed_workload_records_images_without_pipeline(self) -> None:
         self.assertEqual(
             self.services[_id("worker")].deployed_workloads,
-            [DeployedWorkload(workload="deployment/worker", images=["acr.io/worker@sha256:abc"])],
+            [
+                DeployedWorkload(
+                    workload="deployment/worker",
+                    images=["acr.io/worker@sha256:abc"],
+                    identity_labels={"app": "worker"},
+                )
+            ],
         )
 
     def test_service_without_workloads_records_nothing(self) -> None:

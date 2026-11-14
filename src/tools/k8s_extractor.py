@@ -1,6 +1,7 @@
 """Read-only client for extracting Kubernetes service metadata."""
 
 import logging
+import re
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Final, NamedTuple
@@ -16,6 +17,7 @@ from src.core.models import (
     DeployingPipeline,
     DiscoveryMethod,
     DiscoveryResult,
+    RUNTIME_IDENTITY_LABELS,
     ServiceEnvironment,
     ServiceNode,
     ShapeFinding,
@@ -454,22 +456,80 @@ def _container_images(spec: Any) -> set[str]:
     }
 
 
+_OTEL_SERVICE_NAME: Final[str] = "OTEL_SERVICE_NAME"
+_OTEL_RESOURCE_ATTRIBUTES: Final[str] = "OTEL_RESOURCE_ATTRIBUTES"
+_LABEL_FIELD_PATH: Final[re.Pattern[str]] = re.compile(r"^metadata\.labels\[['\"]([^'\"]+)['\"]\]$")
+
+
+def _identity_labels(labels: Mapping[str, str]) -> dict[str, str]:
+    """The pod template labels that name the application (identity only)."""
+    return {
+        key: str(labels[key]).strip()
+        for key in RUNTIME_IDENTITY_LABELS
+        if str(labels.get(key) or "").strip()
+    }
+
+
+def _otel_service_names(template: PodTemplate) -> set[str]:
+    """Each container's ``OTEL_SERVICE_NAME``: a literal, or a field
+    reference to one of the pod's labels; else ``service.name`` in a
+    literal ``OTEL_RESOURCE_ATTRIBUTES``. Unexpanded ``$(VAR)`` values are
+    skipped."""
+    names: set[str] = set()
+    for container in getattr(template.spec, "containers", None) or []:
+        found: str | None = None
+        attributes: str | None = None
+        for variable in getattr(container, "env", None) or []:
+            name = getattr(variable, "name", None)
+            if name == _OTEL_SERVICE_NAME:
+                value = getattr(variable, "value", None)
+                field_ref = getattr(getattr(variable, "value_from", None), "field_ref", None)
+                path = str(getattr(field_ref, "field_path", None) or "")
+                label = _LABEL_FIELD_PATH.match(path)
+                if value:
+                    found = str(value)
+                elif label:
+                    found = template.labels.get(label.group(1))
+            elif name == _OTEL_RESOURCE_ATTRIBUTES and getattr(variable, "value", None):
+                attributes = str(variable.value)
+        if not found and attributes:
+            for pair in attributes.split(","):
+                key, _, value = pair.partition("=")
+                if key.strip() == "service.name":
+                    found = value
+        if found and found.strip() and "$(" not in found:
+            names.add(found.strip())
+    return names
+
+
 def deployed_workloads(templates: Iterable[PodTemplate]) -> list[DeployedWorkload] | None:
-    """What each workload among ``templates`` runs: images and deploying pipeline.
+    """What each workload among ``templates`` runs: images, deploying pipeline
+    and the names it declares for itself (identity labels, OTel service name).
 
     A workload read from several pods (an unread controller) unions their
-    images; the first template carrying pipeline annotations names the run.
+    images and names; the first template carrying pipeline annotations
+    names the run, the first carrying identity labels its labels.
     """
     images: dict[str, set[str]] = {}
     pipelines: dict[str, DeployingPipeline] = {}
+    labels: dict[str, dict[str, str]] = {}
+    otel_names: dict[str, set[str]] = {}
     for template in templates:
         images.setdefault(template.workload, set()).update(_container_images(template.spec))
+        otel_names.setdefault(template.workload, set()).update(_otel_service_names(template))
+        identity = _identity_labels(template.labels)
+        if identity:
+            labels.setdefault(template.workload, identity)
         pipeline = _deploying_pipeline(template.annotations)
         if pipeline is not None:
             pipelines.setdefault(template.workload, pipeline)
     return [
         DeployedWorkload(
-            workload=workload, images=sorted(images[workload]), pipeline=pipelines.get(workload)
+            workload=workload,
+            images=sorted(images[workload]),
+            pipeline=pipelines.get(workload),
+            identity_labels=labels.get(workload, {}),
+            otel_service_names=sorted(otel_names[workload]),
         )
         for workload in sorted(images)
     ] or None
