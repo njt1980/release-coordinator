@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import EgoGraph from "../components/EgoGraph.jsx";
 import Nav from "../components/Nav.jsx";
+import RootCause from "../components/RootCause.jsx";
 import { ROUTES } from "../lib/router.js";
 
 const STORAGE_KEY = "rc-review-scope"; // shares the project scope with the Review page
@@ -202,6 +203,10 @@ export default function Inventory() {
                 <EgoGraph
                   url={`${base}/graph?service=${encodeURIComponent(selected)}&depth=2`}
                   centerLabel="This service"
+                />
+                <RootCause
+                  key={selected}
+                  url={`/api/v1/projects/${encodeURIComponent(scope.tenant)}/${encodeURIComponent(scope.projectId)}/rca?service=${encodeURIComponent(selected)}`}
                 />
               </section>
             )}
