@@ -167,6 +167,28 @@ class TelemetryExtractor:
         edges, self._dropped_records = normalize_edges(result.items)
         return result.model_copy(update={"items": edges})
 
+    def get_unscoped_sources(
+        self, days_back: int, cluster_filter: TelemetryClusterFilter | None
+    ) -> dict[str, int] | None:
+        """Count rows the cluster filter drops for lacking its attribute, by source.
+
+        A diagnostic only (see ``build_unscoped_query``): never raises, and
+        returns None when there is no filter, the source is the mock
+        fixture, or the query fails.
+        """
+        if cluster_filter is None or self._source != "azure" or self._client is None:
+            return None
+        try:
+            response = self._client.query_workspace(
+                self._workspace_id,
+                build_unscoped_query(days_back, cluster_filter),
+                timespan=timedelta(days=days_back),
+            )
+            return parse_unscoped_response(response)
+        except Exception as error:
+            logger.warning("Unscoped telemetry diagnostic failed: %s", error)
+            return None
+
     @property
     def dropped_records(self) -> dict[str, int]:
         """Rows the last query dropped as noise, counted per reason."""
@@ -277,6 +299,53 @@ class TelemetryExtractor:
                 f"Telemetry query failed: {error}"
             )
         return parse_dependency_response(response, self._runtime_metrics)
+
+
+# How many unscoped source names the diagnostic returns at most.
+_UNSCOPED_SOURCE_LIMIT = 50
+
+
+def build_unscoped_query(days_back: int, cluster_filter: TelemetryClusterFilter) -> str:
+    """Return the KQL counting dependency rows the cluster filter drops.
+
+    Rows without the filter's attribute (for example from an Application
+    Insights SDK whose exporter doesn't copy Kubernetes resource attributes)
+    are never this cluster's evidence; counting them by source name explains
+    why a radius service may look silent. Rows from another cluster are not
+    counted.
+    """
+    if days_back <= 0:
+        raise ValueError("days_back must be a positive integer")
+    return (
+        "AppDependencies\n"
+        f"| where TimeGenerated >= ago({days_back}d)\n"
+        f'| where isempty(tostring(Properties["{cluster_filter.attribute}"]))\n'
+        f'| extend SourceName = coalesce(tostring(Properties["{_SERVICE_NAME_PROPERTY}"]), AppRoleName)\n'
+        "| where isnotempty(SourceName)\n"
+        "| summarize Rows=count() by Source=SourceName\n"
+        f"| top {_UNSCOPED_SOURCE_LIMIT} by Rows desc\n"
+    )
+
+
+def parse_unscoped_response(response: LogsQueryResult | LogsQueryPartialResult) -> dict[str, int]:
+    """Read ``Source``/``Rows`` pairs from a diagnostic query response.
+
+    Raises:
+        ValueError: if the response isn't a complete result with those columns.
+    """
+    if getattr(response, "status", None) != LogsQueryStatus.SUCCESS:
+        raise ValueError(f"unscoped telemetry query status {getattr(response, 'status', None)!r}")
+    counts: dict[str, int] = {}
+    for table in list(getattr(response, "tables", None) or []):
+        columns = list(table.columns)
+        if "Source" not in columns or "Rows" not in columns:
+            raise ValueError(f"table {table.name!r} lacks Source/Rows columns")
+        source_index, rows_index = columns.index("Source"), columns.index("Rows")
+        for row in table.rows:
+            source = str(row[source_index] or "").strip()
+            if source:
+                counts[source] = counts.get(source, 0) + int(str(row[rows_index]))
+    return counts
 
 
 def build_dependency_query(

@@ -191,15 +191,30 @@ def _coverage_events(stage: str, records: list[RepositoryCoverage]) -> list[Even
         if service.unscanned
     ]
     unowned = [path for record in records for path in record.unowned_source_files]
+    libraries = [
+        f"{record.repository}/{library.root or '.'} -> {', '.join(library.consumers)}"
+        for record in records
+        for library in record.libraries
+    ]
     events: list[EventDraft] = []
+    if libraries:
+        events.append(
+            _event(
+                stage,
+                RunEventStatus.INFO,
+                f"{_plural(len(libraries), 'shared library', 'shared libraries')} read as part "
+                "of the services consuming them.",
+                libraries[:20],
+            )
+        )
     if gaps:
         events.append(
             _event(
                 stage,
                 RunEventStatus.WARNING,
                 f"{_plural(len(gaps), 'service has', 'services have')} source the scanner "
-                "can't read; releases are STATIC_COVERAGE_INCOMPLETE until reviewed "
-                "files are exempted.",
+                "can't read or understand; releases are STATIC_COVERAGE_INCOMPLETE until "
+                "reviewed files are exempted.",
                 gaps,
             )
         )

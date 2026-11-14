@@ -4,6 +4,7 @@ import ipaddress
 import logging
 import os
 import re
+from collections.abc import Collection
 from enum import Enum
 from typing import Any, Final, Self
 
@@ -23,11 +24,13 @@ from src.core.models import (
     ConfigBinding,
     ConfigFramework,
     DiscoveryResult,
+    OpaqueReferenceSite,
     PipelineVariables,
     RepositoryCoverage,
     ScannedRevision,
     ServiceCoverage,
     ServiceStaticConfig,
+    SharedLibrary,
     UnscannedFile,
     UnscannedReason,
     storable_pipeline_value,
@@ -39,6 +42,17 @@ from src.core.env_names import (
     is_loopback_endpoint,
 )
 from src.core.service_ids import env_var_reference, host_of, is_private_dns_host
+from src.tools.build_projects import (
+    BuildProject,
+    ProjectKind,
+    RepositoryLayout,
+    build_file_system,
+    build_layout,
+    dotnet_project_roots,
+    is_gradle_settings,
+    read_projects,
+    unresolved_sites,
+)
 from src.tools.config_readers import (
     ConfigFileKind,
     ConfigParseError,
@@ -50,10 +64,18 @@ from src.tools.config_readers import (
     env_default_bindings,
     feign_client_services,
     fill_placeholder_defaults,
+    flatten_dotnet_settings,
     merge_bindings,
     spring_code_bindings,
     spring_config_bindings,
+    spring_documents,
     storable_image_environment,
+)
+from src.tools.reference_sites import (
+    BoundSection,
+    bound_sections,
+    opaque_reference_sites,
+    unbound_section_sites,
 )
 from src.tools._timeout import (
     TIMEOUT_MESSAGE,
@@ -110,14 +132,24 @@ _URL_PATTERN = re.compile(
 )
 _EXCLUDED_DIRECTORIES = {
     ".git",
+    ".gradle",
     "bower_components",
     "build",
     "dist",
     "docs",
     "node_modules",
+    "obj",
     "target",
     "vendor",
 }
+# Build output only inside a .NET project directory (Express keeps real
+# source in bin/www).
+_DOTNET_OUTPUT_DIRECTORY: Final[str] = "bin"
+# Build definitions read for project structure (see build_projects), not
+# for references; the Kotlin DSL ones would otherwise be unsupported source.
+_BUILD_DEFINITION_FILENAMES: Final[frozenset[str]] = frozenset(
+    {"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"}
+)
 # Local development orchestration (Docker Compose): describes a whole stack
 # on one machine, so its URLs belong to other services, not the owner.
 _COMPOSE_FILE_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -205,7 +237,9 @@ class BoundarySource(str, Enum):
     """Where a service boundary came from.
 
     MANIFEST: declared in the repository's ``release-coord.yaml``.
-    MARKER: inferred from a Dockerfile, package.json or go.mod.
+    MARKER: inferred from a Dockerfile, package.json or go.mod at a shallow
+        depth, or a runnable (or containerized) build project at any depth
+        (see ``build_projects``).
     """
 
     MANIFEST = "MANIFEST"
@@ -242,6 +276,7 @@ class RepositoryScan(BaseModel):
     revision: ScannedRevision
     services: list[ServiceScan] = Field(default_factory=list)
     unowned_source_files: list[str] = Field(default_factory=list)
+    libraries: list[SharedLibrary] = Field(default_factory=list)
 
     def coverage(self) -> RepositoryCoverage:
         """Return the scan's coverage record, as a snapshot stores it."""
@@ -250,6 +285,7 @@ class RepositoryScan(BaseModel):
             commit_sha=self.revision.commit_sha,
             services=[scan.coverage for scan in self.services if scan.coverage],
             unowned_source_files=self.unowned_source_files,
+            libraries=self.libraries,
         )
 
     def static_config(self) -> list[ServiceStaticConfig]:
@@ -421,18 +457,37 @@ class FileClass(str, Enum):
     NOT_SOURCE = "NOT_SOURCE"
 
 
-def classify_path(path: str) -> FileClass:
-    """Classify a repository file for scanning and coverage accounting."""
-    segments = [segment.lower() for segment in _path_segments(path)]
+def _in_excluded_directory(directories: list[str], dotnet_roots: Collection[str]) -> bool:
+    """Whether a file under ``directories`` (original case) is excluded by
+    directory: an always-excluded name, or ``bin/`` of a .NET project."""
+    for position, directory in enumerate(directories):
+        name = directory.lower()
+        if name in _EXCLUDED_DIRECTORIES:
+            return True
+        if name == _DOTNET_OUTPUT_DIRECTORY and "/".join(directories[:position]) in dotnet_roots:
+            return True
+    return False
+
+
+def classify_path(path: str, dotnet_roots: Collection[str] = frozenset()) -> FileClass:
+    """Classify a repository file for scanning and coverage accounting.
+
+    ``dotnet_roots`` are the directories holding a ``*.csproj``, whose
+    ``bin/`` is build output.
+    """
+    original = _path_segments(path)
+    segments = [segment.lower() for segment in original]
     if not segments:
         return FileClass.NOT_SOURCE
     filename = segments[-1]
     if (
-        _EXCLUDED_DIRECTORIES.intersection(segments[:-1])
+        _in_excluded_directory(original[:-1], dotnet_roots)
         or filename in _EXCLUDED_FILENAMES
         or _COMPOSE_FILE_PATTERN.match(filename)
     ):
         return FileClass.EXCLUDED
+    if filename in _BUILD_DEFINITION_FILENAMES:
+        return FileClass.NOT_SOURCE
     if filename == ".env" or filename.startswith(".env.") or filename == "dockerfile":
         return FileClass.SCANNED
     suffix = os.path.splitext(filename)[1]
@@ -467,7 +522,9 @@ def _boundaries_from_manifest(manifest: ReleaseCoordManifest) -> list[ServiceBou
     ]
 
 
-def _marker_boundary_root(path: str) -> list[str] | None:
+def _marker_boundary_root(
+    path: str, dotnet_roots: Collection[str] = frozenset()
+) -> list[str] | None:
     """Return the directory a marker file makes a service boundary, or None.
 
     Boundaries are the repository root, its immediate subdirectories, and
@@ -478,7 +535,7 @@ def _marker_boundary_root(path: str) -> list[str] | None:
     if not segments or segments[-1].lower() not in _SERVICE_MARKER_FILENAMES:
         return None
     directory = segments[:-1]
-    if _EXCLUDED_DIRECTORIES.intersection(s.lower() for s in directory):
+    if _in_excluded_directory(directory, dotnet_roots):
         return None
     if len(directory) <= 1:
         return directory
@@ -487,18 +544,52 @@ def _marker_boundary_root(path: str) -> list[str] | None:
     return None
 
 
+def _service_project_roots(
+    file_paths: list[str], projects: list[BuildProject], dotnet_roots: Collection[str]
+) -> dict[str, list[str]]:
+    """Build-file path -> directory for projects that are services.
+
+    A project is a service when it is runnable, or when its directory has
+    a Dockerfile and it is a library (so it is packaged as an image). Test,
+    AppHost and aggregator projects never are. Any depth counts.
+    """
+    with_dockerfile = {
+        "/".join(_path_segments(path)[:-1])
+        for path in file_paths
+        if _path_segments(path) and _path_segments(path)[-1].lower() == "dockerfile"
+    }
+    found: dict[str, list[str]] = {}
+    for project in projects:
+        directory = _path_segments(project.root)
+        if _in_excluded_directory(directory, dotnet_roots):
+            continue
+        if project.kind is ProjectKind.SERVICE or (
+            project.kind is ProjectKind.LIBRARY and project.root in with_dockerfile
+        ):
+            found[project.file_path] = directory
+    return found
+
+
 def _infer_service_boundaries(
-    file_paths: list[str], repo_name: str
+    file_paths: list[str],
+    repo_name: str,
+    projects: list[BuildProject] | None = None,
 ) -> list[ServiceBoundary]:
     """Infer service boundaries from marker files, in discovery order.
 
-    A marker at the repository root names the service after the repository;
-    any other boundary is named after its directory. Directories whose name
-    cannot become a DNS label are skipped.
+    Markers are a Dockerfile, package.json or go.mod at a shallow depth
+    (see ``_marker_boundary_root``) and service build projects at any depth
+    (see ``_service_project_roots``). A marker at the repository root names
+    the service after the repository; any other boundary is named after its
+    directory. Directories whose name cannot become a DNS label are skipped.
     """
+    dotnet_roots = dotnet_project_roots(file_paths)
+    project_roots = _service_project_roots(file_paths, projects or [], dotnet_roots)
     boundaries: dict[str, ServiceBoundary] = {}
     for path in file_paths:
-        directory = _marker_boundary_root(path)
+        directory = _marker_boundary_root(path, dotnet_roots)
+        if directory is None:
+            directory = project_roots.get(path.lstrip("/"))
         if directory is None:
             continue
         root = "/".join(directory)
@@ -609,12 +700,18 @@ class FileRead(BaseModel):
 
     ``references`` are literal URLs and environment reads; ``bindings`` the
     configuration keys it reads or declares (see ``config_readers``);
-    ``image`` the ``ENV`` of a Dockerfile.
+    ``image`` the ``ENV`` of a Dockerfile. ``sites`` are references read
+    but not understood and ``sections`` configuration sections bound as a
+    whole (see ``reference_sites``); ``config_keys`` every key a framework
+    configuration file declares, by framework.
     """
 
     references: list[EndpointReference] = Field(default_factory=list)
     bindings: list[ConfigBinding] = Field(default_factory=list)
     image: ImageEnvironment | None = None
+    sites: list[OpaqueReferenceSite] = Field(default_factory=list)
+    sections: list[BoundSection] = Field(default_factory=list)
+    config_keys: dict[ConfigFramework, list[str]] = Field(default_factory=dict)
 
 
 def read_source_file(content: str, service_name: str, path: str) -> FileRead:
@@ -636,9 +733,21 @@ def read_source_file(content: str, service_name: str, path: str) -> FileRead:
     if kind is not None and kind.kind is ConfigFileKind.DOCKERFILE:
         return FileRead(image=dockerfile_environment(content))
     if kind is not None and kind.kind is ConfigFileKind.DOTNET_SETTINGS:
-        return FileRead(bindings=dotnet_settings_bindings(content, relative, kind.profile))
+        return FileRead(
+            bindings=dotnet_settings_bindings(content, relative, kind.profile),
+            config_keys={ConfigFramework.DOTNET: list(flatten_dotnet_settings(content))},
+        )
     if kind is not None and kind.kind is ConfigFileKind.SPRING_CONFIG:
-        return FileRead(bindings=spring_config_bindings(content, relative, kind.profile))
+        return FileRead(
+            bindings=spring_config_bindings(content, relative, kind.profile),
+            config_keys={
+                ConfigFramework.SPRING: [
+                    key
+                    for _, properties in spring_documents(content, relative, kind.profile)
+                    for key in properties
+                ]
+            },
+        )
     bindings = env_default_bindings(content, relative)
     suffix = os.path.splitext(path)[1].lower()
     references = _extract_references(content, service_name, path)
@@ -657,7 +766,12 @@ def read_source_file(content: str, service_name: str, path: str) -> FileRead:
         if reference.kind is not ReferenceKind.URL
         or endpoint_of_value(reference.endpoint) not in code_defaults
     ]
-    return FileRead(references=references, bindings=bindings)
+    return FileRead(
+        references=references,
+        bindings=bindings,
+        sites=opaque_reference_sites(content, path),
+        sections=bound_sections(content, path),
+    )
 
 
 def _default_is_dependency(template: str) -> bool:
@@ -1163,11 +1277,13 @@ class DevOpsExtractor:
         repo_name: str,
         file_paths: list[str],
         commit_sha: str,
+        projects: list[BuildProject],
     ) -> list[ServiceBoundary]:
         """Return the repository's service boundaries.
 
         ``release-coord.yaml`` at the repository root, when present, is
-        authoritative; otherwise boundaries are inferred from marker files.
+        authoritative; otherwise boundaries are inferred from marker files
+        and build projects.
 
         Raises:
             ValueError: if the manifest exists but is invalid.
@@ -1177,7 +1293,37 @@ class DevOpsExtractor:
                 git_client, repository.id, RELEASE_COORD_MANIFEST_PATH, project, commit_sha
             )
             return _boundaries_from_manifest(parse_release_coord_manifest(content))
-        return _infer_service_boundaries(file_paths, repo_name)
+        return _infer_service_boundaries(file_paths, repo_name, projects)
+
+    def _read_build_files(
+        self,
+        git_client: Any,
+        repository_id: str,
+        project: str,
+        commit_sha: str,
+        file_paths: list[str],
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Read every build and Gradle settings file outside excluded directories.
+
+        Returns the contents by listed path and the read errors by
+        repository-relative path.
+        """
+        dotnet_roots = dotnet_project_roots(file_paths)
+        contents: dict[str, str] = {}
+        failures: dict[str, str] = {}
+        for path in file_paths:
+            if build_file_system(path) is None and not is_gradle_settings(path):
+                continue
+            if classify_path(path, dotnet_roots) is FileClass.EXCLUDED:
+                continue
+            try:
+                contents[path] = self._read_item_content(
+                    git_client, repository_id, path, project, commit_sha
+                )
+            except Exception as error:
+                logger.warning("Cannot read build file %s: %s", path, error)
+                failures[path.lstrip("/")] = str(error)
+        return contents, failures
 
     def scan_repository(
         self,
@@ -1191,15 +1337,21 @@ class DevOpsExtractor:
         read, such as a pull request's head), and every file is listed and
         read at that commit, so the recorded revision is exactly what was
         scanned even if the branch moves meanwhile. With ``only_roots``,
-        only the services whose root is listed are returned and read.
+        only the services whose root is listed are returned and read; files
+        are still attributed over every boundary, exactly as a full scan.
 
         Service boundaries come from ``release-coord.yaml`` when the
-        repository has one, otherwise from directories (the root and its
-        immediate subdirectories) holding a Dockerfile, package.json or
-        go.mod. Each scannable file is attributed to the boundary with the
-        deepest enclosing root; files outside every boundary are not read.
-        References are internal, private-DNS and IP URLs plus endpoint-like
-        environment variables (see ``_extract_references``).
+        repository has one, otherwise from marker files and build projects
+        (see ``_infer_service_boundaries``). Build files (``*.csproj``,
+        ``pom.xml``, ``build.gradle``) decide ownership (see
+        ``build_projects.RepositoryLayout``): each file belongs to the
+        boundary with the deepest enclosing root, a shared library's files
+        to every service consuming it, and test projects, unconsumed
+        libraries and files outside every boundary to no service (they are
+        reported, not read). References are internal, private-DNS and IP
+        URLs plus endpoint-like environment variables (see
+        ``_extract_references``); references read but not understood
+        make a file ``REFERENCES_NOT_UNDERSTOOD``.
 
         Every service boundary is returned, even with no references: a
         service that calls nothing is still part of the inventory and can
@@ -1247,88 +1399,61 @@ class DevOpsExtractor:
                 for item in items
                 if not getattr(item, "is_folder", False)
             ]
+            build_contents, build_read_failures = self._read_build_files(
+                git_client, repository.id, project, commit_sha, file_paths
+            )
+            projects, build_parse_failures = read_projects(build_contents, file_paths)
             try:
                 boundaries = self._repository_boundaries(
-                    git_client, repository, project, repo_name, file_paths, commit_sha
+                    git_client, repository, project, repo_name, file_paths, commit_sha, projects
                 )
             except ValueError as error:
                 logger.warning("Invalid release-coord.yaml in %s: %s", repo_name, error)
                 return DiscoveryResult[RepositoryScan].failed(
                     f"{repo_name}: invalid release-coord.yaml: {error}"
                 )
-            if only_roots is not None:
-                boundaries = [b for b in boundaries if b.root in only_roots]
-
-            references: dict[str, dict[tuple[ReferenceKind, str], EndpointReference]] = {
-                boundary.root: {} for boundary in boundaries
+            layout = build_layout(projects, [b.root for b in boundaries])
+            selected = [
+                b for b in boundaries if only_roots is None or b.root in only_roots
+            ]
+            services = {
+                b.root: _ServiceAccumulator(b, layout.libraries_of(b.root)) for b in selected
             }
-            bindings: dict[str, list[ConfigBinding]] = {b.root: [] for b in boundaries}
-            images: dict[str, list[tuple[str, ImageEnvironment]]] = {b.root: [] for b in boundaries}
-            coverage = {
-                boundary.root: ServiceCoverage(service_name=boundary.name, root=boundary.root)
-                for boundary in boundaries
+            build_problems = {
+                **{path: UnscannedReason.PARSE_FAILED for path in build_parse_failures},
+                **{path: UnscannedReason.READ_FAILED for path in build_read_failures},
             }
-            unowned: list[str] = []
-            errors: list[str] = []
-            for path in file_paths:
-                if path == RELEASE_COORD_MANIFEST_PATH:
-                    continue
-                file_class = classify_path(path)
-                owner = _owning_boundary(path, boundaries)
-                if owner is None:
-                    if only_roots is None and file_class in _SOURCE_CLASSES:
-                        unowned.append(path.lstrip("/"))
-                    continue
-                if file_class is not FileClass.SCANNED:
-                    _count(coverage[owner.root], path, file_class)
-                    continue
-                try:
-                    content = self._read_item_content(
-                        git_client, repository.id, path, project, commit_sha
-                    )
-                except Exception as error:
-                    logger.warning("Cannot read %s in %s: %s", path, repo_name, error)
-                    errors.append(f"{repo_name}: cannot read {path}: {error}")
-                    coverage[owner.root].unscanned.append(
-                        UnscannedFile(path=path.lstrip("/"), reason=UnscannedReason.READ_FAILED)
-                    )
-                    continue
-                try:
-                    read = read_source_file(content, owner.name, path)
-                except ConfigParseError as error:
-                    logger.warning("Cannot parse %s in %s: %s", path, repo_name, error)
-                    coverage[owner.root].unscanned.append(
-                        UnscannedFile(path=path.lstrip("/"), reason=UnscannedReason.PARSE_FAILED)
-                    )
-                    continue
-                coverage[owner.root].files_scanned += 1
-                bindings[owner.root].extend(read.bindings)
-                if read.image is not None:
-                    images[owner.root].append((path.lstrip("/"), read.image))
-                for reference in read.references:
-                    references[owner.root].setdefault(
-                        (reference.kind, reference.endpoint), reference
-                    )
+            errors = [
+                f"{repo_name}: cannot read {path}: {error}"
+                for path, error in build_read_failures.items()
+            ]
+            unowned = self._read_owned_files(
+                git_client,
+                repository.id,
+                project,
+                repo_name,
+                commit_sha,
+                file_paths,
+                layout,
+                services,
+                build_contents,
+                build_problems,
+                errors,
+                list_unowned=only_roots is None,
+            )
+            for path, sites in unresolved_sites(projects).items():
+                for root in layout.owner(path).services:
+                    if root in services:
+                        services[root].add_sites(path, sites)
 
-            scans = []
-            for boundary in boundaries:
-                config = build_static_config(
-                    repo_name, boundary, commit_sha, bindings[boundary.root], images[boundary.root]
-                )
-                found = list(references[boundary.root].values())
-                found.extend(binding_references(boundary.name, config.bindings, found))
-                scans.append(
-                    ServiceScan(
-                        service=boundary,
-                        references=found,
-                        coverage=coverage[boundary.root],
-                        config=config,
-                    )
-                )
+            scans = [services[b.root].finish(repo_name, commit_sha) for b in selected]
             return DiscoveryResult[RepositoryScan].from_items(
                 [
                     RepositoryScan(
-                        revision=revision, services=scans, unowned_source_files=unowned
+                        revision=revision,
+                        services=scans,
+                        unowned_source_files=unowned,
+                        libraries=layout.shared_libraries() if only_roots is None else [],
                     )
                 ],
                 errors,
@@ -1338,3 +1463,134 @@ class DevOpsExtractor:
             return DiscoveryResult[RepositoryScan].failed(
                 f"{repo_name}: repository scan failed: {error}"
             )
+
+    def _read_owned_files(
+        self,
+        git_client: Any,
+        repository_id: str,
+        project: str,
+        repo_name: str,
+        commit_sha: str,
+        file_paths: list[str],
+        layout: RepositoryLayout,
+        services: dict[str, "_ServiceAccumulator"],
+        build_contents: dict[str, str],
+        build_problems: dict[str, UnscannedReason],
+        errors: list[str],
+        list_unowned: bool,
+    ) -> list[str]:
+        """Read each file into the services that own it; return unowned source files.
+
+        A file is read once, however many services own it (a shared
+        library's). ``errors`` receives read failures.
+        """
+        dotnet_roots = dotnet_project_roots(file_paths)
+        unowned: list[str] = []
+        for path in file_paths:
+            if path == RELEASE_COORD_MANIFEST_PATH:
+                continue
+            relative = path.lstrip("/")
+            file_class = classify_path(path, dotnet_roots)
+            ownership = layout.owner(path)
+            if ownership.excluded:
+                continue
+            if not ownership.services:
+                if list_unowned and (file_class in _SOURCE_CLASSES or relative in build_problems):
+                    unowned.append(relative)
+                continue
+            owners = [services[root] for root in ownership.services if root in services]
+            if not owners:
+                continue
+            problem = build_problems.get(relative)
+            if problem is not None:
+                for owner in owners:
+                    owner.unscanned(relative, problem)
+                continue
+            if file_class is not FileClass.SCANNED:
+                for owner in owners:
+                    _count(owner.coverage, path, file_class)
+                continue
+            try:
+                content = build_contents.get(path)
+                if content is None:
+                    content = self._read_item_content(
+                        git_client, repository_id, path, project, commit_sha
+                    )
+            except Exception as error:
+                logger.warning("Cannot read %s in %s: %s", path, repo_name, error)
+                errors.append(f"{repo_name}: cannot read {path}: {error}")
+                for owner in owners:
+                    owner.unscanned(relative, UnscannedReason.READ_FAILED)
+                continue
+            try:
+                read = read_source_file(content, owners[0].boundary.name, path)
+            except ConfigParseError as error:
+                logger.warning("Cannot parse %s in %s: %s", path, repo_name, error)
+                for owner in owners:
+                    owner.unscanned(relative, UnscannedReason.PARSE_FAILED)
+                continue
+            for owner in owners:
+                owner.add_read(path, read, from_library=ownership.library is not None)
+        return unowned
+
+
+class _ServiceAccumulator:
+    """What one service's files contribute while its repository is read."""
+
+    def __init__(self, boundary: ServiceBoundary, libraries: list[str]) -> None:
+        self.boundary = boundary
+        self.coverage = ServiceCoverage(
+            service_name=boundary.name, root=boundary.root, libraries=libraries
+        )
+        self.references: dict[tuple[ReferenceKind, str], EndpointReference] = {}
+        self.bindings: list[ConfigBinding] = []
+        self.images: list[tuple[str, ImageEnvironment]] = []
+        self.sites: dict[str, list[OpaqueReferenceSite]] = {}
+        self.sections: dict[str, list[BoundSection]] = {}
+        self.keys: dict[ConfigFramework, set[str]] = {}
+
+    def unscanned(self, path: str, reason: UnscannedReason) -> None:
+        """Record a file whose references are unknown."""
+        self.coverage.unscanned.append(UnscannedFile(path=path, reason=reason))
+
+    def add_sites(self, path: str, sites: list[OpaqueReferenceSite]) -> None:
+        """Record references in ``path`` that weren't understood."""
+        if sites:
+            self.sites.setdefault(path.lstrip("/"), []).extend(sites)
+
+    def add_read(self, path: str, read: FileRead, from_library: bool) -> None:
+        """Add one scanned file. A library's Dockerfile doesn't build this image."""
+        relative = path.lstrip("/")
+        self.coverage.files_scanned += 1
+        self.bindings.extend(read.bindings)
+        if read.image is not None and not from_library:
+            self.images.append((relative, read.image))
+        for reference in read.references:
+            if reference.service_name != self.boundary.name:
+                reference = reference.model_copy(update={"service_name": self.boundary.name})
+            self.references.setdefault((reference.kind, reference.endpoint), reference)
+        self.add_sites(relative, read.sites)
+        if read.sections:
+            self.sections.setdefault(relative, []).extend(read.sections)
+        for framework, keys in read.config_keys.items():
+            self.keys.setdefault(framework, set()).update(keys)
+
+    def finish(self, repository: str, commit_sha: str) -> ServiceScan:
+        """Return the service's scan, with bound sections checked against its keys."""
+        for path, sections in self.sections.items():
+            self.add_sites(path, unbound_section_sites(sections, self.keys))
+        for path, sites in self.sites.items():
+            unique = {(site.line, site.kind, site.detail): site for site in sites}
+            self.coverage.unscanned.append(
+                UnscannedFile(
+                    path=path,
+                    reason=UnscannedReason.REFERENCES_NOT_UNDERSTOOD,
+                    sites=[unique[key] for key in sorted(unique, key=lambda k: (k[0], k[1].value, k[2]))],
+                )
+            )
+        config = build_static_config(repository, self.boundary, commit_sha, self.bindings, self.images)
+        found = list(self.references.values())
+        found.extend(binding_references(self.boundary.name, config.bindings, found))
+        return ServiceScan(
+            service=self.boundary, references=found, coverage=self.coverage, config=config
+        )
