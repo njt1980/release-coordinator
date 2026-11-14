@@ -1,0 +1,212 @@
+"""Contract compatibility evidence for one pull request (plan step 2e).
+
+The deployment order rests on the declared change type (additive or
+breaking). This module checks it against the contract files the pull
+request changes: each changed ``.proto`` file is read at the base and the
+head and compared (``core.proto_contract``). The result
+(``ContractCheck``) decides whether the plan's compatibility is verified:
+
+1. A changed contract file that can't be read or understood: UNREADABLE.
+2. Any breaking difference: BREAKING (reason code CONTRACT_BREAKING).
+3. Under the policy's ``contract_scope: strict`` (the default) the change
+   is COMPATIBLE only when every changed file is a contract file;
+   otherwise CODE_CHANGED (or NO_CONTRACT when no contract file changed).
+4. Under ``contract_scope: interfaces`` a pull request that also changes
+   code is COMPATIBLE when each changed service serves a contract and every
+   caller of it compiles one of those contracts as a client (``.NET
+   <Protobuf GrpcServices>`` links recorded by the scanner); otherwise
+   NO_CONTRACT, naming the callers no contract covers.
+
+Only ``.proto`` files are contract files in v1; HTTP APIs (OpenAPI),
+message schemas and other contract languages are not read yet, so a
+change to a service called over them stays unverified.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from typing import Final
+
+from src.core.models import (
+    REPOSITORY_METADATA_KEY,
+    SERVICE_ROOT_METADATA_KEY,
+    ContractCheck,
+    ContractCheckStatus,
+    ContractLink,
+    ContractScope,
+    DependencyEdge,
+    KnowledgeGraph,
+    RepositoryCoverage,
+)
+from src.core.proto_contract import ContractFinding, ProtoFile, ProtoParseError, diff_protos, parse_proto
+
+CONTRACT_SUFFIXES: Final[tuple[str, ...]] = (".proto",)
+
+# Reads a repository file at a commit; None when it doesn't exist there.
+FileReader = Callable[[str, str], str | None]
+
+
+def is_contract_file(path: str) -> bool:
+    return path.lower().endswith(CONTRACT_SUFFIXES)
+
+
+def _short(service_id: str) -> str:
+    return service_id.rsplit(":", 1)[-1]
+
+
+def read_contract_diffs(
+    read: FileReader, paths: Iterable[str], base: str, head: str
+) -> tuple[list[ContractFinding], dict[str, str]]:
+    """Compare each contract file at ``base`` and ``head``.
+
+    Returns the findings and the files that couldn't be read or parsed
+    (path to why). A file absent at both commits is unreadable: the pull
+    request lists it, so something is wrong with the read.
+    """
+    findings: list[ContractFinding] = []
+    unreadable: dict[str, str] = {}
+    for path in paths:
+        versions: list[ProtoFile | None] = []
+        try:
+            for commit in (base, head):
+                text = read(path, commit)
+                versions.append(None if text is None else parse_proto(text))
+        except ProtoParseError as error:
+            unreadable[path] = f"not understood: {error}"
+            continue
+        except Exception as error:  # a failed read, as the source client raised it
+            unreadable[path] = f"couldn't be read: {error}"
+            continue
+        if versions[0] is None and versions[1] is None:
+            unreadable[path] = "found at neither the base nor the head"
+            continue
+        findings.extend(diff_protos(path, versions[0], versions[1]))
+    return findings, unreadable
+
+
+def contract_links(
+    graph: KnowledgeGraph, head_coverage: Iterable[RepositoryCoverage] = ()
+) -> dict[str, list[tuple[str, ContractLink]]]:
+    """Each registered service's contract links, as ``(repository, link)``.
+
+    The head's coverage (the pull request's changed services, scanned at
+    the head) replaces the baseline's for the same repository and root.
+    """
+    by_root: dict[tuple[str, str], list[ContractLink]] = {}
+    for coverage in [*(graph.static_coverage or []), *head_coverage]:
+        for service in coverage.services:
+            by_root[(coverage.repository.lower(), service.root)] = list(service.contracts)
+    links: dict[str, list[tuple[str, ContractLink]]] = {}
+    for node in graph.services:
+        repository = str(node.metadata.get(REPOSITORY_METADATA_KEY, "")).lower()
+        root = node.metadata.get(SERVICE_ROOT_METADATA_KEY)
+        if repository and root is not None and (repository, root) in by_root:
+            links[node.service_id] = [(repository, link) for link in by_root[(repository, root)]]
+    return links
+
+
+def contract_consumers(
+    links: dict[str, list[tuple[str, ContractLink]]], repository: str, paths: Iterable[str]
+) -> dict[str, list[str]]:
+    """For each contract file, the services compiling it as a client."""
+    wanted = {path.lstrip("/") for path in paths}
+    consumers: dict[str, set[str]] = {path: set() for path in wanted}
+    for service, service_links in links.items():
+        for link_repository, link in service_links:
+            if link_repository == repository.lower() and link.path in wanted and link.role.calls:
+                consumers[link.path].add(service)
+    return {path: sorted(services) for path, services in sorted(consumers.items())}
+
+
+def uncovered_callers(
+    links: dict[str, list[tuple[str, ContractLink]]],
+    targets: Iterable[str],
+    edges: Iterable[DependencyEdge],
+) -> list[str]:
+    """Callers of ``targets`` that reach them through no shared contract.
+
+    A changed service that serves no contract at all is listed too (as
+    itself), since nothing describes its interface.
+    """
+    served = {
+        target: {(repo, link.path) for repo, link in links.get(target, []) if link.role.serves}
+        for target in targets
+    }
+    uncovered: set[str] = {target for target, contracts in served.items() if not contracts}
+    for edge in edges:
+        caller, callee = edge.source_service_id, edge.target_service_id
+        if callee not in served or caller == callee:
+            continue
+        calls = {(repo, link.path) for repo, link in links.get(caller, []) if link.role.calls}
+        if not calls & served[callee]:
+            uncovered.add(caller)
+    return sorted(uncovered)
+
+
+def _describe(check: ContractCheck) -> str:
+    files = ", ".join(check.contract_files)
+    if check.status is ContractCheckStatus.UNREADABLE:
+        return "Contract files couldn't be checked: " + "; ".join(
+            f"{path} {why}" for path, why in check.unreadable.items()
+        )
+    if check.status is ContractCheckStatus.BREAKING:
+        broken = check.breaking_findings
+        return f"{len(broken)} breaking contract change(s) in {files}: " + " ".join(
+            finding.detail for finding in broken[:5]
+        ) + (" …" if len(broken) > 5 else "")
+    if check.status is ContractCheckStatus.CODE_CHANGED:
+        return (
+            f"The contract changes in {files} are compatible, but the pull request also changes "
+            f"{len(check.other_files)} other file(s), and the project's contract scope is strict."
+        )
+    if check.status is ContractCheckStatus.NO_CONTRACT:
+        if check.uncovered_callers:
+            names = ", ".join(_short(s) for s in check.uncovered_callers[:8])
+            return f"No shared contract covers these callers or changed services: {names}."
+        return "No contract file changed, so no contract evidence covers this change."
+    changes = len(check.findings)
+    if check.other_files:
+        return (
+            f"Every caller reaches the changed services through a contract, and the "
+            f"{changes} contract change(s) are compatible."
+        )
+    return f"Only contract files changed ({files}); all {changes} change(s) are compatible."
+
+
+def evaluate_contracts(
+    scope: ContractScope,
+    changed_files: Iterable[str],
+    findings: list[ContractFinding],
+    unreadable: dict[str, str],
+    consumers: dict[str, list[str]],
+    uncovered: list[str],
+) -> ContractCheck:
+    """Decide the contract check's status (see the module doc for the order)."""
+    files = [path.lstrip("/") for path in changed_files]
+    contract_files = [path for path in files if is_contract_file(path)]
+    other_files = [path for path in files if not is_contract_file(path)]
+    breaking = any(finding.breaking for finding in findings)
+    if unreadable:
+        status = ContractCheckStatus.UNREADABLE
+    elif breaking:
+        status = ContractCheckStatus.BREAKING
+    elif not other_files and contract_files:
+        status = ContractCheckStatus.COMPATIBLE
+    elif scope is ContractScope.STRICT:
+        status = ContractCheckStatus.CODE_CHANGED if contract_files else ContractCheckStatus.NO_CONTRACT
+    elif uncovered:
+        status = ContractCheckStatus.NO_CONTRACT
+    else:
+        status = ContractCheckStatus.COMPATIBLE
+    check = ContractCheck(
+        scope=scope,
+        status=status,
+        contract_files=contract_files,
+        other_files=other_files,
+        findings=findings,
+        unreadable=unreadable,
+        consumers=consumers,
+        uncovered_callers=uncovered if scope is ContractScope.INTERFACES and other_files else [],
+        detail="-",
+    )
+    return check.model_copy(update={"detail": _describe(check)})

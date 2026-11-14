@@ -35,6 +35,7 @@ from src.core.models import (
     ScannedRevision,
     ServiceCoverage,
     ServiceStaticConfig,
+    ContractLink,
     SharedLibrary,
     UnscannedFile,
     UnscannedReason,
@@ -1528,6 +1529,31 @@ class DevOpsExtractor:
             return DiscoveryResult[PullRequestDetails].failed(f"pull request {pr_id}: {error}")
         return DiscoveryResult[PullRequestDetails].success([details])
 
+    def read_file(self, repo_name: str, path: str, commit_sha: str) -> str | None:
+        """Read one repository file at ``commit_sha`` (read-only).
+
+        Returns None when the file doesn't exist at that commit (Azure
+        DevOps reports TF401174 / "could not be found"), so an added or
+        removed file is told apart from a failed read.
+
+        Raises:
+            LookupError: if the repository isn't in the project.
+            Exception: any other read failure, as the client raised it.
+        """
+        _, git_client, project = self._get_clients()
+        repository = self._find_repository(git_client, project, repo_name)
+        if repository is None:
+            raise LookupError(f"repository {repo_name} not found in project {project}")
+        try:
+            return self._read_item_content(
+                git_client, repository.id, "/" + path.lstrip("/"), project, commit_sha
+            )
+        except Exception as error:
+            message = str(error)
+            if "TF401174" in message or "could not be found" in message.lower():
+                return None
+            raise
+
     def compare_commits(
         self, repo_name: str, base: str, target: str
     ) -> DiscoveryResult[CommitComparison]:
@@ -1783,6 +1809,10 @@ class DevOpsExtractor:
                 for root in layout.owner(path).services:
                     if root in services:
                         services[root].add_sites(path, sites)
+            for build_project in projects:
+                for root in layout.owner(build_project.file_path).services:
+                    if root in services:
+                        services[root].add_contracts(build_project.contracts)
 
             scans = [services[b.root].finish(repo_name, commit_sha) for b in selected]
             self._flag_clients_without_address(
@@ -2061,6 +2091,14 @@ class _ServiceAccumulator:
     def unscanned(self, path: str, reason: UnscannedReason) -> None:
         """Record a file whose references are unknown."""
         self.coverage.unscanned.append(UnscannedFile(path=path, reason=reason))
+
+    def add_contracts(self, links: list[ContractLink]) -> None:
+        """Record contract files the service's build (or a library's) compiles."""
+        known = {(link.path, link.role) for link in self.coverage.contracts}
+        for link in links:
+            if (link.path, link.role) not in known:
+                self.coverage.contracts.append(link)
+                known.add((link.path, link.role))
 
     def add_sites(self, path: str, sites: list[OpaqueReferenceSite]) -> None:
         """Record references in ``path`` that weren't understood."""

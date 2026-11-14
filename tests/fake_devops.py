@@ -14,6 +14,7 @@ from typing import Any
 from collections.abc import Iterable
 
 from src.core.models import (
+    ContractLink,
     DiscoveryResult,
     RepositoryCoverage,
     ScannedRevision,
@@ -87,6 +88,8 @@ class FakeDevOps:
         missing_roots: set[str] | None = None,
         branch: list[str] | None = None,
         head_unscanned: dict[str, list[UnscannedFile]] | None = None,
+        files: dict[tuple[str, str], str] | None = None,
+        head_contracts: dict[str, list[ContractLink]] | None = None,
     ) -> None:
         self.history = [sha(c) for c in history]
         self.branch = [sha(c) for c in branch or []]
@@ -97,6 +100,9 @@ class FakeDevOps:
         self.fail_scan = fail_scan
         self.missing_roots = missing_roots or set()
         self.head_unscanned = head_unscanned or {}
+        self.head_contracts = head_contracts or {}
+        # (path, commit) -> content; a missing key is a file absent there.
+        self.files = {(path, sha(commit)): text for (path, commit), text in (files or {}).items()}
         self.scanned: list[tuple[ScannedRevision | None, set[str] | None]] = []
 
     def __call__(self, **_: Any) -> "FakeDevOps":
@@ -127,6 +133,9 @@ class FakeDevOps:
             ]
         )
 
+    def read_file(self, repo: str, path: str, commit: str) -> str | None:
+        return self.files.get((path, self._full(commit)))
+
     def _is_ancestor(self, base: str, target: str) -> bool:
         lines = [self.history, self.branch]
         if any(base in line and target in line and line.index(base) <= line.index(target) for line in lines):
@@ -153,6 +162,7 @@ class FakeDevOps:
                     root=root,
                     files_scanned=1,
                     unscanned=self.head_unscanned.get(root, []),
+                    contracts=self.head_contracts.get(root, []),
                 ),
             )
             for root in sorted(only_roots or set())

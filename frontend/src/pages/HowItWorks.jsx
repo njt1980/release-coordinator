@@ -32,7 +32,8 @@ const REASONS = [
   ["DISCOVERY_GAP", "An unresolved dependency in the release radius"],
   ["BASELINE_DRIFT", "Live telemetry shows an edge in the radius that the baseline lacks"],
   ["DEPENDENCY_CYCLE", "No safe deployment order exists"],
-  ["COMPATIBILITY_UNVERIFIED", "No evidence yet that the contract change is compatible"],
+  ["COMPATIBILITY_UNVERIFIED", "No contract evidence proves the change compatible (only .proto contracts are read; by default only contract-only pull requests can be verified)"],
+  ["CONTRACT_BREAKING", "A changed .proto contract breaks compatibility; the verdict stays actionable and a person decides"],
   ["DEMO_EVIDENCE, MODEL_REJECTED", "Mock data was used, or the risk model rejected the release"],
 ];
 

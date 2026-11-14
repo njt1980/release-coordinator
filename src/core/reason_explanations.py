@@ -67,9 +67,19 @@ REASON_EXPLANATIONS: Final[dict[ReasonCode, tuple[str, str]]] = {
         "Break the cycle or deploy the services together deliberately.",
     ),
     ReasonCode.COMPATIBILITY_UNVERIFIED: (
-        "There is no evidence the contract change is compatible; contract analysis "
-        "doesn't exist yet, so every release currently carries this.",
-        "None yet: contract analysis (gap G8) is on the roadmap.",
+        "No contract evidence proves the change compatible, so the deployment order rests on "
+        "the declared change type alone. Only .proto contracts are read; under the default "
+        "strict contract scope, only a pull request changing nothing but .proto files can be "
+        "verified.",
+        "Read the contract check in the briefing. Split contract changes into their own pull "
+        "request, or set contract_scope: interfaces in the policy so code changes count when "
+        "every caller reaches the service through a shared .proto contract.",
+    ),
+    ReasonCode.CONTRACT_BREAKING: (
+        "A changed .proto contract breaks compatibility: a service built against the old "
+        "version and one built against the new can't talk while a rolling deployment runs.",
+        "Make the change additive (new fields and RPCs, keep old ones and their numbers), or "
+        "plan a coordinated release and record your decision against the tool's verdict.",
     ),
     ReasonCode.DEMO_EVIDENCE: (
         "The evidence includes mock fixture data.",
