@@ -6,7 +6,9 @@ person's Approve / Decline / Further analysis on one completed assessment;
 each with its signature manifestation and whether the assessment is still
 the one that was signed. ``GET /api/v1/decisions/verify`` walks the whole
 hash chain, and ``GET /api/v1/decisions/signer`` says who a decision made
-now would be signed by.
+now would be signed by. ``GET /api/v1/webhooks/pr-assessment/{job_id}/record``
+exports the assessment with its decisions for archiving (JSON, or
+``?format=html`` for a print view; see ``orchestration.record_export``).
 
 The client says only what was decided and why. The server sets the signer,
 the time, the assessment hash and everything the decision is about, from
@@ -19,10 +21,11 @@ recorded as such: not an electronic signature.
 
 import re
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, Query, status
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field, ValidationError
 
 from src.core import config
@@ -36,7 +39,9 @@ from src.core.decision import (
     assessment_digest,
     clean_name,
 )
+from src.coordinator import nodes as coordinator_nodes
 from src.core.models import ReleaseAssessment
+from src.orchestration.record_export import ChainState, ExportedDecision, build_export, render_print_view
 from src.tools.baseline_store import BaselineScope
 from src.tools.decision_store import (
     ChainReport,
@@ -242,3 +247,57 @@ def verify_decisions() -> ChainReport:
         return DECISION_STORE.verify()
     except (DecisionStoreCorruptError, OSError) as error:
         raise _store_unavailable(error) from error
+
+
+def _baseline_readable(scope: BaselineScope, snapshot_id: str | None) -> bool:
+    if not snapshot_id:
+        return False
+    try:
+        coordinator_nodes.BASELINE_STORE.read(scope, snapshot_id)
+    except Exception:  # missing, unreadable or invalid: not available for review
+        return False
+    return True
+
+
+@router.get("/api/v1/webhooks/pr-assessment/{job_id}/record", response_model=None)
+def export_record(
+    job_id: str, format: Annotated[Literal["json", "html"], Query()] = "json"
+) -> Response:
+    """The assessment and its decisions as one archivable file (or a print view)."""
+    job, assessment = _job(job_id)
+    scope = BaselineScope(tenant=job.tenant, project_id=job.project_id)
+    try:
+        records = DECISION_STORE.records(scope, job_id)
+        chain = DECISION_STORE.verify()
+    except (DecisionStoreCorruptError, OSError) as error:
+        raise _store_unavailable(error) from error
+    export = build_export(
+        job_id=job_id,
+        tenant=job.tenant,
+        project_id=job.project_id,
+        assessment=assessment,
+        assessment_sha256=assessment_digest(assessment.model_dump(mode="json")),
+        decisions=[
+            ExportedDecision(
+                record=view.record,
+                meaning=view.meaning,
+                manifestation=view.manifestation,
+                assessment_unchanged=view.assessment_unchanged,
+                superseded=view.superseded,
+            )
+            for view in _views(records, assessment)
+        ],
+        chain=ChainState(
+            records=chain.records, last_hash=chain.last_hash, intact=chain.intact, problems=chain.problems
+        ),
+        baseline_snapshot_available=_baseline_readable(scope, assessment.evidence.baseline_snapshot_id),
+        exported_at=datetime.now(timezone.utc),
+    )
+    if format == "html":
+        return HTMLResponse(render_print_view(export))
+    safe_pr = re.sub(r"[^A-Za-z0-9._-]+", "-", assessment.evidence.pr_id)[:60]
+    return Response(
+        content=export.model_dump_json(indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="decision-record-{safe_pr}-{job_id[:12]}.json"'},
+    )

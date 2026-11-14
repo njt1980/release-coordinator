@@ -126,6 +126,19 @@ export default function DecisionPanel({ jobId, toolApproved }) {
           ))}
         </ol>
       )}
+      <p className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+        <a
+          href={`${API}/webhooks/pr-assessment/${jobId}/record?format=html`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-medium text-brand-700 hover:underline"
+        >
+          Print view of the record
+        </a>
+        <a href={`${API}/webhooks/pr-assessment/${jobId}/record`} className="font-medium text-brand-700 hover:underline">
+          Download the record (JSON)
+        </a>
+      </p>
 
       {signer && !signer.can_decide ? (
         <p className="mt-3 text-sm text-slate-600">{signer.why}</p>
