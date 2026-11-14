@@ -4,6 +4,8 @@ import ipaddress
 import logging
 import os
 import re
+import threading
+import time
 from collections.abc import Callable, Collection
 from enum import Enum
 from typing import Any, Final, Self
@@ -21,6 +23,7 @@ from msrest.authentication import BasicTokenAuthentication
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.core import config
+from src.tools.blob_cache import BlobCache, is_object_id
 from src.core.models import (
     ConfigBinding,
     ConfigFramework,
@@ -1253,6 +1256,31 @@ def _count(coverage: ServiceCoverage, path: str, file_class: FileClass) -> None:
         coverage.files_not_source += 1
 
 
+# Reconnect this long before an access token expires.
+_TOKEN_REFRESH_MARGIN_SECONDS: Final[int] = 300
+# Retries per request when Azure DevOps throttles (429) or is unavailable;
+# the wait honours its Retry-After header, otherwise backs off exponentially.
+_THROTTLE_RETRIES: Final[int] = 8
+_THROTTLE_MAX_BACKOFF_SECONDS: Final[int] = 60
+
+
+def configure_throttling_retries(connection: Connection) -> None:
+    """Make a connection retry throttled requests instead of failing them.
+
+    The SDK's retry policy (msrest) treats 429 as final, so a throttled scan
+    would fail. Azure DevOps answers 429 with ``Retry-After`` when an
+    identity exceeds its rate limit; urllib3 honours that header for the
+    statuses it retries.
+    """
+    policy = connection._config.retry_policy.policy  # SDK exposes no public setter
+    policy.total = policy.connect = policy.read = _THROTTLE_RETRIES
+    policy.status = _THROTTLE_RETRIES
+    policy.backoff_factor = 1.0
+    policy.backoff_max = _THROTTLE_MAX_BACKOFF_SECONDS
+    policy.respect_retry_after_header = True
+    policy.status_forcelist = set(policy.status_forcelist or ()) | {429, 503}
+
+
 class DevOpsExtractor:
     """Read-only client boundary for DevOps pipeline and repository data."""
 
@@ -1278,11 +1306,27 @@ class DevOpsExtractor:
         self._organization_url = org_url.strip()
         self._project = project.strip()
         self._repositories = list(repositories)
+        # One connection per thread (repositories may be scanned in
+        # parallel), reused until shortly before its token expires.
+        self._local = threading.local()
+        self._repository_lock = threading.Lock()
+        self._repositories_by_name: dict[str, Any] | None = None
+        # Git object id of every listed file, per (repository id, commit).
+        self._object_ids: dict[tuple[str, str], dict[str, str]] = {}
+        self._blob_cache = (
+            BlobCache(config.DATA_ROOT / config.ADO_BLOB_CACHE_DIR) if config.DATA_DIR_SET else None
+        )
 
     def _get_connection(self) -> Connection:
+        cached: tuple[Connection, float] | None = getattr(self._local, "connection", None)
+        if cached is not None and time.time() < cached[1] - _TOKEN_REFRESH_MARGIN_SECONDS:
+            return cached[0]
         access_token = self._credential.get_token(_AZURE_DEVOPS_SCOPE)
         credentials = BasicTokenAuthentication({"access_token": access_token.token})
-        return Connection(base_url=self._organization_url, creds=credentials)
+        connection = Connection(base_url=self._organization_url, creds=credentials)
+        configure_throttling_retries(connection)
+        self._local.connection = (connection, float(access_token.expires_on))
+        return connection
 
     def _get_clients(self) -> tuple[Any, Any, str]:
         connection = self._get_connection()
@@ -1318,15 +1362,50 @@ class DevOpsExtractor:
             logger.warning("Azure DevOps access verification failed: %s", error)
             return False, str(error)
 
-    @staticmethod
+    def _remember_object_ids(self, repository_id: str, commit_sha: str, items: list[Any]) -> None:
+        """Record the git object id of every listed file, for the blob cache."""
+        object_ids: dict[str, str] = {}
+        for item in items:
+            path, object_id = getattr(item, "path", None), getattr(item, "object_id", None)
+            if isinstance(path, str) and isinstance(object_id, str) and is_object_id(object_id):
+                object_ids[path] = object_id
+        self._object_ids[(repository_id, commit_sha)] = object_ids
+
     def _read_item_content(
+        self,
         git_client: Any,
         repository_id: str,
         path: str,
         project: str,
         commit_sha: str | None = None,
     ) -> str:
-        """Read one file, at ``commit_sha`` when given (else the default branch)."""
+        """Read one file, at ``commit_sha`` when given (else the default branch).
+
+        A file listed at that commit whose content is in the blob cache is
+        not fetched again.
+        """
+        object_id = (
+            self._object_ids.get((repository_id, commit_sha), {}).get(path)
+            if commit_sha is not None and self._blob_cache is not None
+            else None
+        )
+        if object_id is not None and self._blob_cache is not None:
+            cached = self._blob_cache.get(object_id)
+            if cached is not None:
+                return cached
+        content = self._fetch_item_content(git_client, repository_id, path, project, commit_sha)
+        if object_id is not None and self._blob_cache is not None:
+            self._blob_cache.put(object_id, content)
+        return content
+
+    @staticmethod
+    def _fetch_item_content(
+        git_client: Any,
+        repository_id: str,
+        path: str,
+        project: str,
+        commit_sha: str | None,
+    ) -> str:
         if commit_sha is None:
             content = git_client.get_item_content(repository_id, path, project=project)
         else:
@@ -1340,16 +1419,19 @@ class DevOpsExtractor:
             return bytes(content).decode("utf-8", errors="replace")
         return b"".join(content).decode("utf-8", errors="replace")
 
-    @staticmethod
-    def _find_repository(git_client: Any, project: str, repo_name: str) -> Any:
-        return next(
-            (
-                repository
-                for repository in git_client.get_repositories(project)
-                if repository.name == repo_name
-            ),
-            None,
-        )
+    def _find_repository(self, git_client: Any, project: str, repo_name: str) -> Any:
+        """Return the project's repository of that name, or None.
+
+        The project's repositories are listed once per extractor, not once
+        per lookup (every scan and pipeline read needs one).
+        """
+        with self._repository_lock:
+            if self._repositories_by_name is None:
+                self._repositories_by_name = {
+                    repository.name: repository
+                    for repository in git_client.get_repositories(project)
+                }
+            return self._repositories_by_name.get(repo_name)
 
     def read_pipeline_variables(
         self, repo_name: str, revision: ScannedRevision
@@ -1644,11 +1726,9 @@ class DevOpsExtractor:
                 recursion_level="Full",
                 version_descriptor=_commit_version(commit_sha),
             )
-            file_paths = [
-                getattr(item, "path", "")
-                for item in items
-                if not getattr(item, "is_folder", False)
-            ]
+            files = [item for item in items if not getattr(item, "is_folder", False)]
+            file_paths = [getattr(item, "path", "") for item in files]
+            self._remember_object_ids(repository.id, commit_sha, files)
             build_contents, build_read_failures = self._read_build_files(
                 git_client, repository.id, project, commit_sha, file_paths
             )

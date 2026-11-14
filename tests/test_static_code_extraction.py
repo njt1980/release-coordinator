@@ -576,8 +576,8 @@ ENV = ReferenceKind.ENV_VAR
 class StaticBaselineServiceRegistrationTests(unittest.TestCase):
     def test_edges_originate_from_microservices_not_repositories(self) -> None:
         with patch.object(discovery_nodes, "DevOpsExtractor") as devops_cls:
-            devops_cls.return_value.scan_repository.side_effect = [
-                _repository_result(
+            results = {
+                "repo-a": _repository_result(
                     _scan(
                         "store-front",
                         ("http://order-service:3000/order", URL),
@@ -591,8 +591,10 @@ class StaticBaselineServiceRegistrationTests(unittest.TestCase):
                     ),
                     _scan("ledger", source=BoundarySource.MANIFEST),
                 ),
-                DiscoveryResult[RepositoryScan].failed("repo-b: not found"),
-            ]
+                "repo-b": DiscoveryResult[RepositoryScan].failed("repo-b: not found"),
+            }
+            # Keyed by repository: repositories are scanned in parallel.
+            devops_cls.return_value.scan_repository.side_effect = lambda repo: results[repo]
             result = discovery_nodes.extract_static_code_baseline(_devops_state())
 
         services = result["discovered_services"]
@@ -689,7 +691,8 @@ class CommitComparisonTests(unittest.TestCase):
     def _extractor(self, git: MagicMock) -> Any:
         from src.tools.devops_extractor import DevOpsExtractor
 
-        extractor = DevOpsExtractor.__new__(DevOpsExtractor)
+        with patch.object(devops_extractor, "DefaultAzureCredential"):
+            extractor = DevOpsExtractor(org_url="https://dev.azure.com/org", project="Shop", repositories=[])
         extractor._get_clients = lambda: (MagicMock(), git, "Shop")  # type: ignore[method-assign]
         return extractor
 
