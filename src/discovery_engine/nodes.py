@@ -47,6 +47,7 @@ from src.core.edge_resolution import (
 )
 from src.core.identity_links import link_identities
 from src.core.telemetry_capability import wire_protocol
+from src.core.telemetry_roles import role_allow_list
 from src.core.service_ids import (
     ENV_REFERENCE_PREFIX,
     IdentityContext,
@@ -289,16 +290,25 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
     statuses: list[DiscoveryStatus] = []
     errors: list[str] = []
     service_count = 0
+    workload_names: set[str] = set()
+    pod_names: set[str] | None = set()
     for namespace in state["target_namespaces"]:
         result = extractor.get_namespace_topology(namespace, context)
         statuses.append(result.status)
         errors.extend(result.errors)
+        if not result.items:
+            pod_names = None
         for topology in result.items:
             discovered_services.extend(topology.services)
             service_environments.extend(topology.environments)
             manifest_edges.extend(topology.edges)
             kubernetes_shape.extend(topology.findings)
             service_count += len(topology.services)
+            workload_names.update(topology.workload_names)
+            if pod_names is not None and topology.pod_names is not None:
+                pod_names.update(topology.pod_names)
+            else:
+                pod_names = None
     report = DiscoveryStageReport(
         source=DiscoveryMethod.K8S_MANIFEST,
         status=combine_statuses(statuses),
@@ -311,6 +321,8 @@ def extract_k8s_topology(state: DiscoveryGraphState) -> dict[str, object]:
         "manifest_edges": manifest_edges,
         "kubernetes_shape": kubernetes_shape,
         "kubernetes_api_server": extractor.api_server,
+        "kubernetes_workload_names": sorted(workload_names),
+        "kubernetes_pod_names": sorted(pod_names) if pod_names is not None else None,
         "discovery_reports": _append_report(state, report),
     }
 
@@ -327,6 +339,12 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
     assessment. Without one, it is unfiltered and reads
     ``NO_POLICY_LOOKBACK_DAYS`` back. Rows dropped as noise are counted in
     the stage report.
+
+    A policy's opt-in ``telemetry_role_filter`` further keeps only rows whose
+    role name is in the inventory and/or whose role instance is a scanned
+    pod; it is a filter only and proves no cluster. A part that can't be
+    applied (no names, pods unread) is left out and makes the stage PARTIAL
+    with a note.
     """
     workspace_id = (state.get("workspace_id") or "").strip()
     if not workspace_id:
@@ -335,24 +353,45 @@ def extract_runtime_telemetry(state: DiscoveryGraphState) -> dict[str, object]:
     policy = _project_policy(state)
     scope = policy.telemetry_scope if policy else None
     additional = list(policy.telemetry_additional_workspaces) if policy else []
+    allow_list, filter_notes = (
+        role_allow_list(
+            policy.telemetry_role_filter,
+            _inventory_names(state),
+            state.get("kubernetes_pod_names"),
+        )
+        if policy and policy.telemetry_role_filter.enabled
+        else (None, [])
+    )
     extractor = TelemetryExtractor(workspace_id=workspace_id, additional_workspaces=additional)
     result = extractor.get_active_dependencies(
         days_back=policy.runtime_lookback_days if policy else NO_POLICY_LOOKBACK_DAYS,
         scope=scope,
+        roles=allow_list,
     )
+    status = result.status
+    if filter_notes and status is DiscoveryStatus.SUCCESS:
+        status = DiscoveryStatus.PARTIAL
     report = DiscoveryStageReport(
         source=DiscoveryMethod.RUNTIME_TELEMETRY,
-        status=result.status,
+        status=status,
         item_count=len(result.items),
-        errors=result.errors,
+        errors=[*result.errors, *filter_notes],
         dropped_records=extractor.dropped_records,
     )
     return {
         "runtime_edges": list(result.items),
         "telemetry_scope": scope,
+        "telemetry_role_filter": allow_list.applied if allow_list else None,
         "telemetry_additional_workspaces": additional,
         "discovery_reports": _append_report(state, report),
     }
+
+
+def _inventory_names(state: DiscoveryGraphState) -> list[str]:
+    """Names a role filter accepts as inventory: services, workloads, containers."""
+    names = {service.name for service in state.get("discovered_services", [])}
+    names.update(state.get("kubernetes_workload_names") or [])
+    return sorted(names)
 
 
 def _project_policy(state: DiscoveryGraphState) -> ProjectPolicy | None:
@@ -744,6 +783,7 @@ def scan_context(state: DiscoveryGraphState) -> ScanContext:
         telemetry_cluster=scope.cluster if (scope := state.get("telemetry_scope")) else None,
         telemetry_components=list(scope.components) if scope else [],
         telemetry_additional_workspaces=list(state.get("telemetry_additional_workspaces") or []),
+        telemetry_role_filter=state.get("telemetry_role_filter"),
     )
 
 

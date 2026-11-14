@@ -14,6 +14,7 @@ from src.core.models import (
     ServiceStaticConfig,
     TelemetryScope,
 )
+from src.core.telemetry_roles import TelemetryRoleFilter
 
 
 class DiscoveryGraphState(TypedDict):
@@ -33,6 +34,10 @@ class DiscoveryGraphState(TypedDict):
     filter, Application Insights components) the telemetry query applied;
     both prove the ``cluster`` label. ``telemetry_additional_workspaces``
     are the workspaces read with ``workspace_id``.
+    ``kubernetes_workload_names`` and ``kubernetes_pod_names`` are what the
+    manifest scan read (pod names None when some namespace's pods could not
+    be listed); ``telemetry_role_filter`` is the opt-in role filter the
+    telemetry query applied (see ``core.telemetry_roles``).
     ``static_coverage`` and ``pipeline_variables`` are recorded per scanned
     repository, ``kubernetes_shape`` per out-of-shape namespace object, and
     ``manifest_edges`` are dependencies the manifests declare (an
@@ -62,6 +67,9 @@ class DiscoveryGraphState(TypedDict):
     kubernetes_api_server: str
     telemetry_scope: TelemetryScope | None
     telemetry_additional_workspaces: list[str]
+    kubernetes_workload_names: list[str]
+    kubernetes_pod_names: list[str] | None
+    telemetry_role_filter: TelemetryRoleFilter | None
     static_coverage: list[RepositoryCoverage]
     pipeline_variables: list[PipelineVariables]
     kubernetes_shape: list[ShapeFinding]

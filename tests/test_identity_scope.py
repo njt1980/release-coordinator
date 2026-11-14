@@ -340,7 +340,7 @@ class DiscoveryScopeTests(unittest.TestCase):
 
         store.load.assert_called_once_with(BaselineScope(tenant="acme", project_id="shop"))
         telemetry_cls.return_value.get_active_dependencies.assert_called_once_with(
-            days_back=POLICY.runtime_lookback_days, scope=POLICY.telemetry_scope
+            days_back=POLICY.runtime_lookback_days, scope=POLICY.telemetry_scope, roles=None
         )
         self.assertEqual(result["telemetry_scope"], POLICY.telemetry_scope)
 

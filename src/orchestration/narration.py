@@ -22,6 +22,7 @@ from src.core.models import (
     ShapeFinding,
     StaticDefaultUse,
 )
+from src.core.telemetry_roles import NOT_A_CLUSTER_PROOF
 from src.orchestration.run_log import EventDraft
 
 _MESSAGE_LIMIT: Final[int] = 280
@@ -320,15 +321,17 @@ def _telemetry(before: State, update: State) -> list[EventDraft]:
     if report.status is not DiscoveryStatus.SUCCESS:
         return [_stage_problem(stage, report)]
     scope = update.get("telemetry_scope")
+    role_filter = update.get("telemetry_role_filter")
     dropped = [f"Dropped as noise: {count} × {reason}" for reason, count in sorted(report.dropped_records.items())]
     events = [
         _event(
             stage,
             RunEventStatus.PASSED if report.item_count else RunEventStatus.WARNING,
             f"Found {_plural(report.item_count, 'observed dependency', 'observed dependencies')}"
+            + (f" scoped to {scope.describe()}" if scope else "")
             + (
-                f" scoped to {scope.describe()}."
-                if scope
+                f", filtered to {role_filter.describe()} ({NOT_A_CLUSTER_PROOF})."
+                if role_filter
                 else "."
             ),
             dropped,
