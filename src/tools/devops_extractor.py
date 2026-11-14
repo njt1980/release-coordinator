@@ -4,7 +4,7 @@ import ipaddress
 import logging
 import os
 import re
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from enum import Enum
 from typing import Any, Final, Self
 
@@ -63,6 +63,7 @@ from src.tools.spring_cloud import (
     spring_settings,
     zuul_route_services,
 )
+from src.tools.devops_pull_requests import PullRequestDetails, read_pull_request
 from src.tools.proxy_configs import ProxyRead, is_envoy_config, proxy_upstreams, template_suffix
 from src.tools.config_readers import (
     ConfigFileKind,
@@ -1412,6 +1413,34 @@ class DevOpsExtractor:
             collected.opaque_sources.add(f"{label}: {yaml_filename} unreadable at the commit")
             return
         collect_yaml_variables(content, f"{label} ({yaml_filename.lstrip('/')})", collected)
+
+    def read_pull_request(self, pr_id: int) -> DiscoveryResult[PullRequestDetails]:
+        """Read pull request ``pr_id`` of this project for assessment (read-only).
+
+        See ``devops_pull_requests.read_pull_request``.
+
+        Returns:
+            SUCCESS with one ``PullRequestDetails``, or FAILED when it can't
+            be found or read, is abandoned, or has no iteration.
+        """
+        try:
+            _, git_client, project = self._get_clients()
+
+            def reader_for(repository_id: str) -> Callable[[str, str], str | None]:
+                def read(path: str, commit: str) -> str | None:
+                    try:
+                        return self._read_item_content(git_client, repository_id, "/" + path, project, commit)
+                    except Exception as error:  # absent at that commit
+                        logger.debug("No %s at %s: %s", path, commit[:12], error)
+                        return None
+
+                return read
+
+            details = read_pull_request(git_client, project, pr_id, reader_for)
+        except Exception as error:
+            logger.warning("Cannot read pull request %s: %s", pr_id, error)
+            return DiscoveryResult[PullRequestDetails].failed(f"pull request {pr_id}: {error}")
+        return DiscoveryResult[PullRequestDetails].success([details])
 
     def compare_commits(
         self, repo_name: str, base: str, target: str

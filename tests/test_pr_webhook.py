@@ -231,7 +231,9 @@ class PullRequestWebhookPayloadTests(unittest.TestCase):
             PullRequestWebhook.model_validate(fields)
 
 
-class PrAssessmentWebhookTests(unittest.TestCase):
+class BaselineFixture(unittest.TestCase):
+    """A temporary baseline and policy store for acme/shop (shared by PR intake tests)."""
+
     def setUp(self) -> None:
         jobs_patch = patch.dict(webhooks._assessment_jobs, clear=True)
         jobs_patch.start()
@@ -294,6 +296,8 @@ class PrAssessmentWebhookTests(unittest.TestCase):
         )
         return snapshot_id
 
+
+class PrAssessmentWebhookTests(BaselineFixture):
     def test_maps_files_and_schedules_coordinator_run(self) -> None:
         snapshot_id = self._write_baseline()
         tasks = BackgroundTasks()

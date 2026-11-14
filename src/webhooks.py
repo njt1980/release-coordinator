@@ -5,6 +5,8 @@ services using the project's newest complete discovery baseline, then
 schedules a release coordinator run for those services, pinned to that same
 snapshot, and returns at once.
 ``GET /api/v1/webhooks/pr-assessment/{job_id}`` reports the run's outcome.
+``POST /api/v1/webhooks/pr-intake`` does the same for a pull request named
+only by its Azure DevOps ID, read (read-only) from Azure DevOps.
 """
 
 from typing import Literal
@@ -28,6 +30,7 @@ from src.core.models import (
 from src.orchestration.briefing import ReleaseBriefing, build_briefing
 from src.orchestration.narration import narrate_assessment
 from src.orchestration.run_log import DEFAULT_RUN_LOGS, run_graph
+from src.tools.devops_extractor import DevOpsExtractor
 from src.tools.baseline_store import PATH_SEGMENT_PATTERN, BaselineScope, default_store
 from src.tools.policy_store import (
     PolicyInvalidError,
@@ -244,6 +247,14 @@ def pr_assessment_webhook(
     makes the verdict non-actionable. The assessment is pinned to the
     baseline snapshot the files were mapped against.
     """
+    return schedule_assessment(payload, background_tasks)
+
+
+def schedule_assessment(
+    payload: PullRequestWebhook, background_tasks: BackgroundTasks
+) -> PrAssessmentAccepted:
+    """Map a pull request's changed files and schedule its assessment
+    (see ``pr_assessment_webhook`` for the responses)."""
     scope = BaselineScope(tenant=payload.tenant, project_id=payload.project_id)
     baseline = BASELINE_STORE.latest(scope)
     if baseline is None:
@@ -297,6 +308,105 @@ def pr_assessment_webhook(
         files_by_service=mapping.files_by_service,
         unmapped_files=unmapped,
         exempted_files=exempted,
+    )
+
+
+class PrIntakeRequest(BaseModel):
+    """Assess a pull request by its Azure DevOps ID.
+
+    Everything else (repository, commits, changed files, diff) is read
+    from Azure DevOps through the project policy's ``source_control``.
+    ``change_type`` is the coordinator's call, as in the webhook.
+    """
+
+    pr_id: int = Field(gt=0)
+    change_type: ContractChange
+    tenant: str = Field(default=config.DEFAULT_TENANT, pattern=PATH_SEGMENT_PATTERN)
+    project_id: str = Field(default=config.DEFAULT_PROJECT_ID, pattern=PATH_SEGMENT_PATTERN)
+    workspace_id: str = ""
+
+
+class PrIntakeAccepted(PrAssessmentAccepted):
+    """A scheduled assessment of a pull request read from Azure DevOps.
+
+    ``skipped_files`` changed but are not in the diff the risk reasoner
+    reads (binary, oversized, or past the size limits; ``diff_truncated``).
+    """
+
+    repository: str
+    title: str = ""
+    base_sha: str
+    head_sha: str
+    diff_truncated: bool = False
+    skipped_files: list[str] = Field(default_factory=list)
+
+
+_EMPTY_DIFF = "(no text changes: every changed file is binary or too large to diff)"
+
+
+@router.post(
+    "/pr-intake",
+    response_model=PrIntakeAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def pr_intake(request: PrIntakeRequest, background_tasks: BackgroundTasks) -> PrIntakeAccepted:
+    """Read a pull request from Azure DevOps and schedule its assessment.
+
+    Read-only: the PR's latest iteration is read with the project's
+    source-control identity; nothing is written back. Responds 409 when the
+    project policy names no ``source_control``, 502 when the pull request
+    can't be read, 422 when it changes no file, and otherwise as
+    ``pr_assessment_webhook``.
+    """
+    scope = BaselineScope(tenant=request.tenant, project_id=request.project_id)
+    policy = _load_policy(scope)
+    if policy is None or policy.source_control is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"The project policy for {scope.tenant}/{scope.project_id} names no "
+                "source_control, so pull requests can't be read from Azure DevOps."
+            ),
+        )
+    source = policy.source_control
+    extractor = DevOpsExtractor(org_url=source.organization_url, project=source.project, repositories=[])
+    result = extractor.read_pull_request(request.pr_id)
+    if not result.items:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="; ".join(result.errors) or f"Pull request {request.pr_id} can't be read.",
+        )
+    details = result.items[0]
+    if not details.files:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Pull request {request.pr_id} changes no file.",
+        )
+    payload = PullRequestWebhook(
+        pr_id=str(details.pr_id),
+        base_sha=details.base_sha,
+        head_sha=details.head_sha,
+        repository=details.repository,
+        changed_files=details.changed_paths,
+        change_type=request.change_type,
+        diff=details.diff or _EMPTY_DIFF,
+        title=details.title,
+        description=details.description,
+        source_branch=details.source_branch,
+        target_branch=details.target_branch or "main",
+        tenant=request.tenant,
+        project_id=request.project_id,
+        workspace_id=request.workspace_id,
+    )
+    accepted = schedule_assessment(payload, background_tasks)
+    return PrIntakeAccepted(
+        **accepted.model_dump(),
+        repository=details.repository,
+        title=details.title,
+        base_sha=details.base_sha,
+        head_sha=details.head_sha,
+        diff_truncated=details.diff_truncated,
+        skipped_files=details.skipped_files,
     )
 
 
