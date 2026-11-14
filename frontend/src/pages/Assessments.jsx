@@ -197,6 +197,140 @@ function Briefing({ jobId }) {
   );
 }
 
+// Contract change kinds the coordinator chooses (they set the deployment order).
+const CHANGE_TYPES = [
+  { value: "additive", label: "Additive (compatible)" },
+  { value: "breaking", label: "Breaking (tightening)" },
+];
+
+function detailText(detail) {
+  if (!detail) return null;
+  if (typeof detail === "string") return detail;
+  if (detail.message) return detail.message;
+  return JSON.stringify(detail);
+}
+
+/** Assess a pull request named by its Azure DevOps ID (read-only intake). */
+function AssessPrForm({ onScheduled }) {
+  const [prId, setPrId] = useState("");
+  const [changeType, setChangeType] = useState("additive");
+  const [tenant, setTenant] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
+
+  const number = Number.parseInt(prId, 10);
+  const valid = /^\d+$/.test(prId.trim()) && number > 0;
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!valid || busy) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    const body = { pr_id: number, change_type: changeType };
+    if (tenant.trim()) body.tenant = tenant.trim();
+    if (projectId.trim()) body.project_id = projectId.trim();
+    try {
+      const response = await fetch(`${API}/pr-intake`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(detailText(data.detail) ?? `Request failed with status ${response.status}`);
+      const skipped = data.skipped_files?.length
+        ? ` ${data.skipped_files.length} changed file(s) are not in the diff the risk review reads.`
+        : "";
+      setNotice(`Assessing PR ${data.pr_id} in ${data.repository}: ${data.title || "untitled"}.${skipped}`);
+      setPrId("");
+      onScheduled(data.job_id);
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form
+      onSubmit={submit}
+      aria-label="Assess a pull request"
+      className="mb-8 rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200 sm:p-5"
+    >
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+        <label className="block sm:w-40">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Pull request #</span>
+          <input
+            inputMode="numeric"
+            value={prId}
+            onChange={(e) => setPrId(e.target.value)}
+            placeholder="1234"
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-200"
+          />
+        </label>
+        <label className="block sm:w-56">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Contract change</span>
+          <select
+            value={changeType}
+            onChange={(e) => setChangeType(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-200"
+          >
+            {CHANGE_TYPES.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="submit"
+          disabled={!valid || busy}
+          className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {busy ? "Reading the PR…" : valid ? `Assess PR #${number}` : "Assess PR"}
+        </button>
+      </div>
+      <details className="mt-3">
+        <summary className="cursor-pointer text-xs font-medium text-brand-600 hover:text-brand-700">
+          Project scope (defaults to the server's)
+        </summary>
+        <div className="mt-2 flex flex-col gap-3 sm:flex-row">
+          <input
+            aria-label="Tenant"
+            value={tenant}
+            onChange={(e) => setTenant(e.target.value)}
+            placeholder="tenant"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm sm:w-48"
+          />
+          <input
+            aria-label="Project"
+            value={projectId}
+            onChange={(e) => setProjectId(e.target.value)}
+            placeholder="project"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm sm:w-48"
+          />
+        </div>
+      </details>
+      <p className="mt-3 text-xs text-slate-500">
+        Read-only: the PR's latest iteration is read from Azure DevOps with the project's read identity.
+        Nothing is posted back.
+      </p>
+      {error && (
+        <p role="alert" className="mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700 [overflow-wrap:anywhere]">
+          {error}
+        </p>
+      )}
+      {notice && (
+        <p role="status" className="mt-3 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800 [overflow-wrap:anywhere]">
+          {notice}
+        </p>
+      )}
+    </form>
+  );
+}
+
 /** Pull request assessments, each as a release briefing for the coordinator. */
 export default function Assessments() {
   const [items, setItems] = useState(null);
@@ -242,6 +376,8 @@ export default function Assessments() {
           </p>
         </header>
 
+        <AssessPrForm onScheduled={setSelected} />
+
         {error && (
           <p role="alert" className="mb-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
             Could not load assessments: {error}
@@ -250,7 +386,7 @@ export default function Assessments() {
 
         {items && items.length === 0 ? (
           <p className="rounded-xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
-            No assessments yet in this session.
+            No assessments yet in this session. Enter a pull request number above to start one.
           </p>
         ) : (
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
@@ -283,7 +419,10 @@ export default function Assessments() {
               className="min-w-0 rounded-2xl bg-slate-50 p-6 shadow-sm ring-1 ring-slate-200 sm:p-8"
             >
               {selected ? (
-                <Briefing key={selected} jobId={selected} />
+                <Briefing
+                  key={`${selected}:${(items ?? []).find((i) => i.job_id === selected)?.status ?? ""}`}
+                  jobId={selected}
+                />
               ) : (
                 <p className="text-sm text-slate-500">Select a completed assessment to see its briefing.</p>
               )}
