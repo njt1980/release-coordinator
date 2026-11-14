@@ -372,7 +372,12 @@ def _review_groups(assessment: ReleaseAssessment) -> list[BriefingGroup]:
 def headline(assessment: ReleaseAssessment, decisions: int, fixes: int) -> str:
     """The fail-closed go/no-go line."""
     if assessment.approved:
-        return "Go (advisory): every check passed and the risk review approved."
+        regulated = (
+            " A regulated service is touched: decide whether regulatory review is needed."
+            if assessment.evidence.regulated_impact
+            else ""
+        )
+        return f"Go (advisory): every check passed and the risk review approved.{regulated}"
     if assessment.actionable:
         codes = ", ".join(code.value for code in assessment.reason_codes) or "risk review"
         return f"No-go: risk found ({codes})."
@@ -396,9 +401,41 @@ def _deployment(assessment: ReleaseAssessment) -> list[DeploymentStep]:
     ]
 
 
+def _regulatory_group(assessment: ReleaseAssessment) -> list[BriefingGroup]:
+    """A decision on whether a change to a regulated service needs regulatory review."""
+    impacts = assessment.evidence.regulated_impact
+    if not impacts:
+        return []
+    return [
+        BriefingGroup(
+            root_key="decision:regulatory",
+            rank=BriefingRank.DECISION,
+            title=(
+                f"Possible significant change to {len(impacts)} regulated service(s): "
+                "decide whether regulatory review is needed"
+            ),
+            why_it_matters=(
+                "The project policy marks these services as regulated. Whether this change is "
+                "significant (and needs regulatory assessment) is your organization's decision; "
+                "the platform only shows that the pull request touches them."
+            ),
+            what_to_check=[
+                f"{short_name(impact.service)}"
+                + (f" ({impact.classification})" if impact.classification else "")
+                + f": {'; '.join(impact.reasons)}"
+                for impact in impacts
+            ],
+            how_to_close=[
+                "Record the outcome of your regulatory assessment with your release decision.",
+            ],
+            services=[impact.service for impact in impacts],
+        )
+    ]
+
+
 def build_briefing(assessment: ReleaseAssessment) -> ReleaseBriefing:
     """Arrange ``assessment`` for the person deciding (see module doc)."""
-    groups = _groups(list(assessment.issues))
+    groups = [*_regulatory_group(assessment), *_groups(list(assessment.issues))]
     decisions = sum(1 for g in groups if g.rank is BriefingRank.DECISION)
     fixes = sum(1 for g in groups if g.rank is BriefingRank.FIX_EVIDENCE)
     return ReleaseBriefing(

@@ -13,6 +13,7 @@ from src.coordinator.coverage import radius_shape_findings, static_coverage_issu
 from src.coordinator.policy import decide_release, needs_model
 from src.coordinator.project_policy import (
     live_coverage,
+    regulated_impact,
     unobservable_protocols,
     with_unscoped_sources,
     live_runtime_state,
@@ -1196,6 +1197,12 @@ def assessment_evidence(state: ReleaseGraphState) -> AssessmentEvidence:
         exempted_unscanned_files=list(state.get("exempted_unscanned_files", [])),
         shape_findings=list(state.get("shape_findings", [])),
         review=state.get("assessment_review"),
+        regulated_impact=regulated_impact(
+            loaded.policy if loaded else None,
+            state.get("target_services", []),
+            changes.added if changes else [],
+            changes.removed if changes else [],
+        ),
     )
 
 

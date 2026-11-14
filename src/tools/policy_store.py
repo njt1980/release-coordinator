@@ -176,6 +176,27 @@ class SilentServiceExemption(_StrictModel):
         return f"{namespace}/{name}"
 
 
+class RegulatedService(_StrictModel):
+    """A service whose changes may need regulatory review.
+
+    ``service`` is ``<namespace>/<name>``; ``classification`` says why it is
+    regulated (for example ``IEC 62304 class B``, ``SaMD``), as the
+    manufacturer's own records state it. A pull request that changes such a
+    service, or adds or removes a dependency to or from it, is flagged in the
+    briefing as a possible significant change: whether it is one is the
+    manufacturer's regulatory decision, never the tool's.
+    """
+
+    service: str
+    classification: str = Field(default="", max_length=200)
+    note: str = Field(default="", max_length=1000)
+
+    @field_validator("service")
+    @classmethod
+    def _namespaced_name(cls, value: str) -> str:
+        return SilentServiceExemption._namespaced_name(value)
+
+
 class UnobservableProtocolExemption(_StrictModel):
     """A protocol the configured telemetry can't see, accepted for review.
 
@@ -341,6 +362,8 @@ class ProjectPolicy(_StrictModel):
     for live evidence to count. ``egress`` lists external destinations the
     project calls on purpose. ``source_control`` is where pull request
     revisions are verified; without it they can't be (REVISION_UNVERIFIED).
+    ``regulated_services`` are services whose changes are flagged for a
+    regulatory-review decision (see ``RegulatedService``).
     """
 
     policy_version: int = Field(ge=1)
@@ -370,6 +393,7 @@ class ProjectPolicy(_StrictModel):
     )
     egress: list[EgressRule] = Field(default_factory=list)
     source_control: SourceControl | None = None
+    regulated_services: list[RegulatedService] = Field(default_factory=list)
 
     @field_validator("kubernetes_api_server")
     @classmethod
@@ -450,6 +474,17 @@ class ProjectPolicy(_StrictModel):
     def unobservable_rule(self, protocol: str) -> UnobservableProtocolExemption | None:
         """The exemption entry for ``protocol``, active or not."""
         return next((rule for rule in self.exemptions.unobservable if rule.protocol == protocol), None)
+
+    @model_validator(mode="after")
+    def _regulated_services_are_unique(self) -> Self:
+        services = [entry.service for entry in self.regulated_services]
+        if len(set(services)) != len(services):
+            raise ValueError("regulated_services must list each service once")
+        return self
+
+    def regulated_service(self, service: str) -> RegulatedService | None:
+        """Return the regulated-service entry for ``<namespace>/<name>``, if any."""
+        return next((entry for entry in self.regulated_services if entry.service == service), None)
 
     def silent_service_rule(self, service: str) -> SilentServiceExemption | None:
         """Return the silent-service entry for ``<namespace>/<name>``, if any."""
