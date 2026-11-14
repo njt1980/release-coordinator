@@ -27,6 +27,9 @@ from typing import Final
 
 from src.core.issue_keys import channel_key
 from src.core.models import (
+    BrokerEntity,
+    BrokerInventory,
+    ChannelBroker,
     ChannelKind,
     ChannelReach,
     ChannelRole,
@@ -152,9 +155,49 @@ def _kind_label(reach: ChannelReach) -> str:
     return reach.kind.value.replace("_", " ")
 
 
-def unknown_consumer_issues(check: MessagingCheck | None) -> list[EvidenceIssue]:
+def _broker_key(broker: ChannelBroker, name: str) -> tuple[str, str]:
+    # Service Bus entity names are case-insensitive.
+    return broker.value, name.strip().lower()
+
+
+def broker_only_entities(
+    channels: Iterable[MessageChannel] | None, inventory: BrokerInventory | None
+) -> list[BrokerEntity]:
+    """Queues and topics a broker lists that no scanned service's code
+    declares: their producers and consumers are outside the scan (or use a
+    computed name). Advisory; never an edge or a radius member."""
+    if inventory is None:
+        return []
+    declared = {_broker_key(c.broker, c.name) for c in channels or []}
+    return [e for e in inventory.entities if _broker_key(e.broker, e.name) not in declared]
+
+
+def _broker_note(reach: ChannelReach, inventory: BrokerInventory | None) -> str:
+    """What the broker lists for a channel with unknown consumers."""
+    if inventory is None:
+        return ""
+    found = [e for e in inventory.entities if _broker_key(e.broker, e.name) == _broker_key(reach.broker, reach.name)]
+    if not found:
+        return ""
+    subscriptions = sorted({s for e in found for s in e.subscriptions})
+    if subscriptions:
+        return (
+            f" The broker lists subscription(s) {', '.join(subscriptions)} on it: readers exist "
+            "outside the scanned code."
+        )
+    if all(e.kind is ChannelKind.TOPIC for e in found):
+        return " The broker lists the topic with no subscription, so nothing reads it yet."
+    return " The broker lists it; who reads it isn't recorded there."
+
+
+def unknown_consumer_issues(
+    check: MessagingCheck | None, inventory: BrokerInventory | None = None
+) -> list[EvidenceIssue]:
     """CHANNEL_CONSUMERS_UNKNOWN per channel with unknown consumers, in
-    block mode only (advisory mode reports ``check.reason_codes``)."""
+    block mode only (advisory mode reports ``check.reason_codes``).
+    ``inventory`` (the broker's own list, when the policy names one) adds
+    what the broker says about the channel to the detail; it never closes
+    the issue."""
     if check is None or check.unknown_consumers is not UnknownConsumersMode.BLOCK:
         return []
     return [
@@ -164,6 +207,7 @@ def unknown_consumer_issues(check: MessagingCheck | None) -> list[EvidenceIssue]
                 f"{', '.join(reach.changed_producers)} publishes to {reach.broker.value} "
                 f"{_kind_label(reach)} {reach.name}, but no scanned service consumes it, so "
                 "whoever reads it is missing from the release radius."
+                + _broker_note(reach, inventory)
             ),
             subjects=[
                 *(IssueSubject(kind=IssueSubjectKind.SERVICE, id=s) for s in reach.changed_producers),

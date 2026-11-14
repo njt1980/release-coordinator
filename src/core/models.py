@@ -13,9 +13,10 @@ from src.core.env_names import (
     is_endpoint_variable,
     storable_endpoint_value,
 )
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.core.contract_findings import ContractFinding
+from src.core.operation_usage import OperationAttribution
 from src.core.telemetry_capability import TelemetryStack
 from src.core.telemetry_roles import TelemetryRoleFilter
 
@@ -271,6 +272,9 @@ class DeployedWorkload(BaseModel):
     # the literal or label-derived ``OTEL_SERVICE_NAME`` of its containers.
     identity_labels: Dict[str, str] = Field(default_factory=dict)
     otel_service_names: List[str] = Field(default_factory=list)
+    # OCI image provenance (``OCI_PROVENANCE_ANNOTATIONS``) the workload or
+    # its pod template is annotated with: identity only, never edges.
+    image_provenance: Dict[str, str] = Field(default_factory=dict)
 
 
 # Pod template labels that name the application a workload runs (identity
@@ -282,6 +286,15 @@ RUNTIME_IDENTITY_LABELS: Final[tuple[str, ...]] = (
 )
 
 
+# OCI image annotation keys (https://github.com/opencontainers/image-spec,
+# annotations.md) a workload may carry as Kubernetes annotations: the image's
+# human-readable title, its source repository URL and the source revision.
+OCI_TITLE: Final[str] = "org.opencontainers.image.title"
+OCI_SOURCE: Final[str] = "org.opencontainers.image.source"
+OCI_REVISION: Final[str] = "org.opencontainers.image.revision"
+OCI_PROVENANCE_ANNOTATIONS: Final[tuple[str, ...]] = (OCI_TITLE, OCI_SOURCE, OCI_REVISION)
+
+
 class IdentityDeclarationKind(str, Enum):
     """Which build file names a source directory, and what it names.
 
@@ -290,10 +303,13 @@ class IdentityDeclarationKind(str, Enum):
     COMPOSE_IMAGE / SKAFFOLD_ARTIFACT / PIPELINE_DOCKER_TASK: an image
         repository built from the directory (Compose ``image``, a skaffold
         artifact, an Azure Pipelines ``Docker@2`` task's ``repository``).
+    DOCKERFILE_OCI_TITLE: a name, the ``org.opencontainers.image.title``
+        label of a Dockerfile in the directory.
     """
 
     COMPOSE_SERVICE = "COMPOSE_SERVICE"
     ASPIRE_RESOURCE = "ASPIRE_RESOURCE"
+    DOCKERFILE_OCI_TITLE = "DOCKERFILE_OCI_TITLE"
     COMPOSE_IMAGE = "COMPOSE_IMAGE"
     SKAFFOLD_ARTIFACT = "SKAFFOLD_ARTIFACT"
     PIPELINE_DOCKER_TASK = "PIPELINE_DOCKER_TASK"
@@ -1458,6 +1474,39 @@ class MessageChannel(BaseModel):
     uses: List[ServiceChannelUse] = Field(default_factory=list)
 
 
+class ServiceBusNamespace(BaseModel):
+    """An Azure Service Bus namespace whose queues and topics discovery lists
+    (read-only management API; the identity needs Reader on it)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    subscription_id: str = Field(
+        pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    )
+    resource_group: str = Field(pattern=r"^[-\w._()]{1,90}$")
+    namespace: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9-]{4,48}[A-Za-z0-9]$")
+
+
+class BrokerEntity(BaseModel):
+    """A queue or topic a broker lists, read with read-only management APIs
+    (see ``tools.broker_inventory``). ``namespace`` is the broker namespace
+    it lives in, ``subscriptions`` a topic's subscription names (sorted)."""
+
+    broker: ChannelBroker
+    kind: ChannelKind
+    name: str = Field(min_length=1)
+    namespace: str = Field(min_length=1)
+    subscriptions: List[str] = Field(default_factory=list)
+
+
+class BrokerInventory(BaseModel):
+    """What the policy's brokers list, and the reads that failed (advisory:
+    a failed read never fails discovery)."""
+
+    entities: List[BrokerEntity] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+
+
 class KnowledgeGraph(BaseModel):
     """Shape of one persisted discovery baseline snapshot.
 
@@ -1482,6 +1531,8 @@ class KnowledgeGraph(BaseModel):
     written before it was. ``channels`` are the message channels (queues,
     topics, exchanges, message types) the code declares, with their
     producers and consumers; None in snapshots written before they were.
+    ``broker_inventory`` is what the policy's brokers list (queues, topics
+    and subscriptions); None when the policy names no broker.
     """
 
     services: List[ServiceNode]
@@ -1496,6 +1547,7 @@ class KnowledgeGraph(BaseModel):
     static_config: Optional[List[ServiceStaticConfig]] = None
     static_defaults_used: Optional[List[StaticDefaultUse]] = None
     channels: Optional[List[MessageChannel]] = None
+    broker_inventory: Optional[BrokerInventory] = None
 
     @model_validator(mode="after")
     def _services_match_scan(self) -> Self:
@@ -2188,7 +2240,9 @@ class ContractCheck(BaseModel):
     consuming its channel.
     ``uncovered_callers`` are, under INTERFACES, callers of a changed
     service that reach it through no shared contract. ``detail`` is the
-    sentence a person reads.
+    sentence a person reads. ``operation_attribution`` (advisory, from live
+    telemetry, see ``core.operation_usage``) says which callers were seen
+    using each broken OpenAPI operation; it never changes the status.
     """
 
     scope: ContractScope = ContractScope.STRICT
@@ -2202,6 +2256,7 @@ class ContractCheck(BaseModel):
     message_consumers: Dict[str, List[str]] = Field(default_factory=dict)
     uncovered_callers: List[str] = Field(default_factory=list)
     detail: str = Field(min_length=1)
+    operation_attribution: OperationAttribution | None = None
 
     @property
     def compatible(self) -> bool:

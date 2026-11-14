@@ -33,6 +33,8 @@ from src.core.models import (
     combine_statuses,
     merge_deployed_workloads,
     merge_identity_declarations,
+    OCI_SOURCE,
+    OCI_TITLE,
     merge_evidence_files,
     merge_resolution,
     merge_target_details,
@@ -47,8 +49,9 @@ from src.core.edge_resolution import (
     static_config_index,
     target_context,
 )
-from src.core.identity_links import IdentityFacts, image_repository, link_identities
+from src.core.identity_links import IdentityFacts, image_repository, link_identities, source_repository
 from src.core.messaging import build_channels
+from src.tools.broker_inventory import read_broker_inventory
 from src.core.telemetry_capability import wire_protocol
 from src.core.telemetry_roles import role_allow_list
 from src.core.service_ids import (
@@ -459,9 +462,11 @@ def _is_static(service: ServiceNode) -> bool:
 def _source_facts(service: ServiceNode) -> IdentityFacts:
     """Names and image repositories a source-code service's build files declare."""
     declarations = service.identity_declarations or []
+    repository = source_repository(str(service.metadata.get(REPOSITORY_METADATA_KEY, "")))
     return IdentityFacts(
         names=frozenset(d.value for d in declarations if not d.kind.is_image),
         image_repositories=frozenset(d.value for d in declarations if d.kind.is_image),
+        source_repositories=frozenset({repository} if repository else set()),
     )
 
 
@@ -479,18 +484,30 @@ def _group_source_facts(
         facts[name] = IdentityFacts(
             names=known.names | own.names,
             image_repositories=known.image_repositories | own.image_repositories,
+            source_repositories=known.source_repositories | own.source_repositories,
         )
     return facts
 
 
 def _runtime_facts(service: ServiceNode) -> IdentityFacts:
-    """Names a runtime service's workloads declare, and their images' repositories."""
+    """Names a runtime service's workloads declare, their images' repositories
+    and the source repositories their OCI provenance annotations name."""
     workloads = service.deployed_workloads or []
     return IdentityFacts(
         names=frozenset(
             name
             for workload in workloads
-            for name in [*workload.identity_labels.values(), *workload.otel_service_names]
+            for name in [
+                *workload.identity_labels.values(),
+                *workload.otel_service_names,
+                *([workload.image_provenance[OCI_TITLE]] if OCI_TITLE in workload.image_provenance else []),
+            ]
+        ),
+        source_repositories=frozenset(
+            repository
+            for workload in workloads
+            if OCI_SOURCE in workload.image_provenance
+            and (repository := source_repository(workload.image_provenance[OCI_SOURCE]))
         ),
         image_repositories=frozenset(
             repository
@@ -836,6 +853,8 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
         for item in state.get("channel_uses", [])
     ]
 
+    policy = _project_policy(state)
+    namespaces = policy.messaging.service_bus_namespaces if policy else []
     # Zombie service identification will be added here.
     return {
         "reconciled_graph": {
@@ -844,6 +863,8 @@ def reconcile_knowledge_graph(state: DiscoveryGraphState) -> dict[str, object]:
             "unresolved_entities": list(unresolved.values()),
             "static_defaults_used": list(defaults_used.values()),
             "channels": build_channels(channel_uses),
+            # Advisory broker context (read-only); None when the policy names none.
+            "broker_inventory": read_broker_inventory(namespaces) if namespaces else None,
         }
     }
 
@@ -915,6 +936,7 @@ def persist_to_graph_db(state: DiscoveryGraphState) -> dict[str, object]:
             "static_config": list(state.get("static_config", [])),
             "static_defaults_used": reconciled_graph.get("static_defaults_used", []),
             "channels": reconciled_graph.get("channels", []),
+            "broker_inventory": reconciled_graph.get("broker_inventory"),
         }
     )
     scope = BaselineScope(

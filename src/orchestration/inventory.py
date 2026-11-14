@@ -22,7 +22,9 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from src.core.messaging import broker_only_entities
 from src.core.models import (
+    BrokerEntity,
     REPOSITORY_METADATA_KEY,
     SERVICE_ROOT_METADATA_KEY,
     DependencyEdge,
@@ -71,6 +73,10 @@ class InventoryReport(BaseModel):
         "Derived from the dependency graph only; never used in a verdict."
     )
     rows: list[InventoryRow]
+    # Queues and topics the policy's brokers list that no scanned code
+    # declares (advisory; see core.messaging.broker_only_entities).
+    broker_only: list[BrokerEntity] = Field(default_factory=list)
+    broker_errors: list[str] = Field(default_factory=list)
 
 
 def _dependents(service_ids: set[str], edges: Iterable[DependencyEdge]) -> dict[str, int]:
@@ -162,7 +168,12 @@ def build_inventory(graph: KnowledgeGraph, snapshot_id: str) -> InventoryReport:
         )
     rows.sort(key=lambda row: (-row.dependents, -row.callers, row.namespace, row.name))
     ranked = [row.model_copy(update={"criticality_rank": position}) for position, row in enumerate(rows, 1)]
-    return InventoryReport(snapshot_id=snapshot_id, rows=ranked)
+    return InventoryReport(
+        snapshot_id=snapshot_id,
+        rows=ranked,
+        broker_only=broker_only_entities(graph.channels, graph.broker_inventory),
+        broker_errors=list(graph.broker_inventory.errors) if graph.broker_inventory else [],
+    )
 
 
 CSV_COLUMNS: tuple[str, ...] = tuple(InventoryRow.model_fields)
