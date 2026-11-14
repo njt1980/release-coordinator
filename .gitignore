@@ -37,6 +37,8 @@ baselines/
 reviews/
 # Release decision records (decisions/decisions.sqlite3)
 decisions/
+# Pull request poller state (pr-watch/{tenant}/{project_id}.json)
+pr-watch/
 
 # Local dev server pid files and logs (start-app skill)
 .run/

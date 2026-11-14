@@ -86,6 +86,13 @@ REVIEWS_DB_NAME: Final[str] = "reviews.sqlite3"
 DECISIONS_DIR: Final[str] = "decisions"
 DECISIONS_DB_NAME: Final[str] = "decisions.sqlite3"
 
+# Directory (relative to the data root) of the pull request poller's
+# per-project state, ``{tenant}/{project_id}.json`` (not checked in).
+PR_WATCH_DIR: Final[str] = "pr-watch"
+
+# How often the poller wakes to see which projects are due (seconds).
+PR_WATCH_TICK_SECONDS: Final[int] = 60
+
 # Upper bound on a policy's ``max_baseline_age_hours``: a project may demand
 # fresher baselines, never older ones.
 MAX_BASELINE_AGE_HOURS: Final[int] = 24

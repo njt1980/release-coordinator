@@ -1,6 +1,9 @@
 """FastAPI boundary that lets a frontend trigger the Day-Zero discovery engine."""
 
+import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime
 from typing import Literal, Self
@@ -52,9 +55,26 @@ from src.release_train_api import router as release_train_router
 from src.review_api import router as review_router
 from src.runs import router as runs_router
 from src.webhooks import router as webhooks_router
+from src import pr_watch_runner
 
 
-app = FastAPI(title="Release Coordinator API")
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Start the pull request poller only when a project policy turns it on."""
+    stop = asyncio.Event()
+    task: asyncio.Task[None] | None = None
+    if await run_in_threadpool(pr_watch_runner.polling_policies, pr_watch_runner.POLICY_STORE):
+        task = asyncio.create_task(pr_watch_runner.run_poller(stop))
+        logging.getLogger(__name__).info("Pull request poller started")
+    try:
+        yield
+    finally:
+        stop.set()
+        if task is not None:
+            await task
+
+
+app = FastAPI(title="Release Coordinator API", lifespan=_lifespan)
 app.include_router(webhooks_router)
 app.include_router(runs_router)
 app.include_router(assistant_router)

@@ -63,6 +63,8 @@ class PullRequestDetails(BaseModel):
 
     pr_id: int = Field(gt=0)
     repository: str = Field(min_length=1)
+    repository_id: str = ""
+    iteration_id: int = Field(default=0, ge=0)
     title: str = ""
     description: str = ""
     status: str = ""
@@ -236,6 +238,8 @@ def read_pull_request(git_client: Any, project: str, pr_id: int, reader_for: Rea
     return PullRequestDetails(
         pr_id=pr_id,
         repository=str(_get(repository, "name") or ""),
+        repository_id=repository_id,
+        iteration_id=int(_get(latest, "id") or 0),
         title=str(_get(pull_request, "title") or ""),
         description=str(_get(pull_request, "description") or ""),
         status=status,
@@ -248,3 +252,65 @@ def read_pull_request(git_client: Any, project: str, pr_id: int, reader_for: Rea
         diff_truncated=truncated,
         skipped_files=skipped,
     )
+
+
+class ActivePullRequest(BaseModel):
+    """An active pull request as a list shows it (enough to tell a new
+    iteration: a new source commit or a new target branch)."""
+
+    pr_id: int = Field(gt=0)
+    repository: str = Field(min_length=1)
+    repository_id: str = Field(min_length=1)
+    source_commit: str = Field(min_length=1)
+    target_branch: str = ""
+    title: str = ""
+    labels: list[str] = Field(default_factory=list)
+
+
+def _labels(pull_request: Any) -> list[str]:
+    names = [str(_get(label, "name") or "").strip() for label in _get(pull_request, "labels") or []]
+    return [name for name in names if name]
+
+
+def active_pull_requests(entries: list[Any], repository: str, repository_id: str) -> list[ActivePullRequest]:
+    """The active pull requests among listed ``entries`` of one repository
+    (entries without a source commit are left out)."""
+    found: list[ActivePullRequest] = []
+    for entry in entries:
+        pr_id = int(_get(entry, "pull_request_id", "pullRequestId") or 0)
+        commit = _commit(_get(entry, "last_merge_source_commit", "lastMergeSourceCommit"))
+        status = str(_get(entry, "status") or "active").lower()
+        if pr_id <= 0 or not commit or status != "active":
+            continue
+        found.append(
+            ActivePullRequest(
+                pr_id=pr_id,
+                repository=repository,
+                repository_id=repository_id,
+                source_commit=commit,
+                target_branch=_branch(_get(entry, "target_ref_name", "targetRefName")),
+                title=str(_get(entry, "title") or ""),
+                labels=_labels(entry),
+            )
+        )
+    return found
+
+
+def list_active_pull_requests(
+    git_client: Any, project: str, repository: Any, search_criteria: Any, page_size: int = 100
+) -> list[ActivePullRequest]:
+    """Every active pull request of one repository (``repository`` as the
+    client returns it; ``search_criteria`` selects status active)."""
+    repository_id = str(_get(repository, "id") or "")
+    name = str(_get(repository, "name") or "")
+    entries: list[Any] = []
+    skip = 0
+    while True:
+        page = list(
+            git_client.get_pull_requests(repository_id, search_criteria, project=project, skip=skip, top=page_size)
+            or []
+        )
+        entries.extend(page)
+        if len(page) < page_size:
+            return active_pull_requests(entries, name, repository_id)
+        skip += page_size

@@ -9,7 +9,7 @@ snapshot, and returns at once.
 only by its Azure DevOps ID, read (read-only) from Azure DevOps.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -31,10 +31,17 @@ from src.core.models import (
     PullRequestPayload,
     ReleaseAssessment,
 )
-from src.orchestration.briefing import ReleaseBriefing, build_briefing
+from src.orchestration.briefing import ReleaseBriefing, build_briefing, render_markdown
 from src.orchestration.narration import narrate_assessment
 from src.orchestration.run_log import DEFAULT_RUN_LOGS, run_graph
 from src.tools.devops_extractor import DevOpsExtractor
+from src.tools.devops_pr_feedback import (
+    AssessmentOutcome,
+    DevOpsPullRequestWriter,
+    FeedbackResult,
+    PullRequestTarget,
+    post_feedback,
+)
 from src.tools.assessment_archive import default_archive
 from src.tools.baseline_store import PATH_SEGMENT_PATTERN, BaselineScope, default_store
 from src.tools.policy_store import (
@@ -116,6 +123,9 @@ class PrAssessmentJob(BaseModel):
     (records archived before they were kept read as the defaults).
     ``order`` is what the deployment order was computed from, so the
     assessment can join a release train (None for older records).
+    ``source`` is the Azure DevOps pull request iteration it was read from
+    (None for webhook payloads), and ``ado_feedback`` what was written back
+    to it (None when the policy asks for nothing).
     """
 
     job_id: str
@@ -128,6 +138,8 @@ class PrAssessmentJob(BaseModel):
     evidence_report: str | None = None
     briefing: ReleaseBriefing | None = None
     order: ReleaseOrderFacts | None = None
+    source: PullRequestTarget | None = None
+    ado_feedback: FeedbackResult | None = None
 
 
 class PrAssessmentSummary(BaseModel):
@@ -239,17 +251,27 @@ def build_coordinator_state(
 
 
 async def run_assessment_job(
-    job_id: str, pr_id: str, state: ReleaseGraphState
+    job_id: str,
+    pr_id: str,
+    state: ReleaseGraphState,
+    source: PullRequestTarget | None = None,
 ) -> None:
     """Run the release coordinator for one job and record its outcome.
 
     The synchronous graph runs in the thread pool so status polls are
-    answered while the LLM call is in progress.
+    answered while the LLM call is in progress. For a pull request read
+    from Azure DevOps (``source``), the outcome is then written back to it
+    when the project policy asks for that (see ``publish_feedback``).
     """
     tenant = state.get("tenant") or config.DEFAULT_TENANT
     project_id = state.get("project_id") or config.DEFAULT_PROJECT_ID
     _assessment_jobs[job_id] = PrAssessmentJob(
-        job_id=job_id, pr_id=pr_id, status="running", tenant=tenant, project_id=project_id
+        job_id=job_id,
+        pr_id=pr_id,
+        status="running",
+        tenant=tenant,
+        project_id=project_id,
+        source=source,
     )
     try:
         final_state = await run_in_threadpool(
@@ -266,6 +288,7 @@ async def run_assessment_job(
                 error_message=message,
                 tenant=tenant,
                 project_id=project_id,
+                source=source,
             )
         )
         RUN_LOGS.finish(job_id, "failed", message)
@@ -289,8 +312,75 @@ async def run_assessment_job(
                 tenant=tenant,
                 project_id=project_id,
                 order=_order_facts(final_state),
+                source=source,
             )
         )
+    if source is not None:
+        await run_in_threadpool(publish_feedback, job_id)
+
+
+# Makes the git client feedback is written with, per organization URL
+# (replaced in tests).
+FeedbackClientFactory = Callable[[str], Any]
+
+
+def _writer_client(organization_url: str) -> Any:
+    return DevOpsPullRequestWriter(organization_url).git_client()
+
+
+FEEDBACK_CLIENT: FeedbackClientFactory = _writer_client
+
+
+def _outcome(record: PrAssessmentJob) -> AssessmentOutcome:
+    briefing = record.briefing
+    return AssessmentOutcome(
+        job_id=record.job_id,
+        failed=record.status == "failed",
+        approved=bool(record.assessment and record.assessment.approved),
+        actionable=bool(record.assessment and record.assessment.actionable),
+        headline=briefing.headline if briefing else "",
+        briefing_markdown=render_markdown(briefing) if briefing else "",
+    )
+
+
+def publish_feedback(job_id: str) -> FeedbackResult | None:
+    """Write a finished assessment back to its Azure DevOps pull request,
+    as far as the project policy's ``ado_connection`` asks (nothing by
+    default), and record what was written on the job.
+
+    The pull request must be in the policy's ``source_control`` project:
+    nothing is written anywhere else. Never raises.
+    """
+    record = _assessment_jobs.get(job_id)
+    if record is None or record.source is None or record.status not in ("completed", "failed"):
+        return None
+    policy = _load_policy(BaselineScope(tenant=record.tenant, project_id=record.project_id))
+    if policy is None or policy.source_control is None or not policy.ado_connection.writes:
+        return None
+    source, control = record.source, policy.source_control
+    if (source.organization_url.rstrip("/").lower(), source.project) != (
+        control.organization_url.lower(),
+        control.project,
+    ):
+        result = FeedbackResult(errors=["pull request is outside the policy's source_control project"])
+    else:
+        connection = policy.ado_connection
+        try:
+            client = FEEDBACK_CLIENT(control.organization_url)
+        except Exception as error:
+            logger.warning("No Azure DevOps client for feedback on %s: %s", job_id, error)
+            result = FeedbackResult(errors=[f"client: {error}"])
+        else:
+            result = post_feedback(
+                client,
+                source,
+                _outcome(record),
+                status=connection.status,
+                comment=connection.comment,
+                link_base_url=connection.link_base_url,
+            )
+    _finish(record.model_copy(update={"ado_feedback": result}))
+    return result
 
 
 def _order_facts(final_state: Mapping[str, Any]) -> ReleaseOrderFacts | None:
@@ -333,7 +423,9 @@ def pr_assessment_webhook(
 
 
 def schedule_assessment(
-    payload: PullRequestWebhook, background_tasks: BackgroundTasks
+    payload: PullRequestWebhook,
+    background_tasks: BackgroundTasks,
+    source: PullRequestTarget | None = None,
 ) -> PrAssessmentAccepted:
     """Map a pull request's changed files and schedule its assessment
     (see ``pr_assessment_webhook`` for the responses)."""
@@ -373,6 +465,7 @@ def schedule_assessment(
         status="queued",
         tenant=payload.tenant,
         project_id=payload.project_id,
+        source=source,
     )
     RUN_LOGS.start(
         job_id,
@@ -386,6 +479,7 @@ def schedule_assessment(
         job_id,
         payload.pr_id,
         build_coordinator_state(payload, baseline.snapshot_id, mapping),
+        source,
     )
     return PrAssessmentAccepted(
         job_id=job_id,
@@ -445,6 +539,14 @@ def pr_intake(request: PrIntakeRequest, background_tasks: BackgroundTasks) -> Pr
     can't be read, 422 when it changes no file, and otherwise as
     ``pr_assessment_webhook``.
     """
+    return intake_pull_request(request, background_tasks)
+
+
+def intake_pull_request(request: PrIntakeRequest, background_tasks: BackgroundTasks) -> PrIntakeAccepted:
+    """Schedule the assessment of a pull request read from Azure DevOps
+    (``pr_intake``; the poller calls it too). Raises HTTPException with the
+    responses ``pr_intake`` documents.
+    """
     scope = BaselineScope(tenant=request.tenant, project_id=request.project_id)
     policy = _load_policy(scope)
     if policy is None or policy.source_control is None:
@@ -455,8 +557,10 @@ def pr_intake(request: PrIntakeRequest, background_tasks: BackgroundTasks) -> Pr
                 "source_control, so pull requests can't be read from Azure DevOps."
             ),
         )
-    source = policy.source_control
-    extractor = DevOpsExtractor(org_url=source.organization_url, project=source.project, repositories=[])
+    source_control = policy.source_control
+    extractor = DevOpsExtractor(
+        org_url=source_control.organization_url, project=source_control.project, repositories=[]
+    )
     result = extractor.read_pull_request(request.pr_id)
     if not result.items:
         raise HTTPException(
@@ -485,7 +589,14 @@ def pr_intake(request: PrIntakeRequest, background_tasks: BackgroundTasks) -> Pr
         project_id=request.project_id,
         workspace_id=request.workspace_id,
     )
-    accepted = schedule_assessment(payload, background_tasks)
+    source = PullRequestTarget(
+        organization_url=source_control.organization_url,
+        project=source_control.project,
+        repository_id=details.repository_id or details.repository,
+        pr_id=details.pr_id,
+        iteration_id=details.iteration_id,
+    )
+    accepted = schedule_assessment(payload, background_tasks, source)
     return PrIntakeAccepted(
         **accepted.model_dump(),
         repository=details.repository,

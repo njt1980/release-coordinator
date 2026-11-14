@@ -15,6 +15,7 @@ import yaml
 from azure.devops.connection import Connection
 from azure.devops.released.git import (  # type: ignore[import-untyped]
     GitBaseVersionDescriptor,
+    GitPullRequestSearchCriteria,
     GitTargetVersionDescriptor,
     GitVersionDescriptor,
 )
@@ -80,7 +81,12 @@ from src.tools.spring_cloud import (
     spring_settings,
     zuul_route_services,
 )
-from src.tools.devops_pull_requests import PullRequestDetails, read_pull_request
+from src.tools.devops_pull_requests import (
+    ActivePullRequest,
+    PullRequestDetails,
+    list_active_pull_requests,
+    read_pull_request,
+)
 from src.tools.proxy_configs import ProxyRead, is_envoy_config, proxy_upstreams, template_suffix
 from src.tools.message_channels import channel_uses
 from src.tools.config_readers import (
@@ -1606,6 +1612,35 @@ class DevOpsExtractor:
             logger.warning("Cannot read pull request %s: %s", pr_id, error)
             return DiscoveryResult[PullRequestDetails].failed(f"pull request {pr_id}: {error}")
         return DiscoveryResult[PullRequestDetails].success([details])
+
+    def list_active_pull_requests(self, repo_names: list[str]) -> DiscoveryResult[ActivePullRequest]:
+        """The active pull requests of ``repo_names`` in this project (read-only).
+
+        Returns:
+            SUCCESS with every active pull request; PARTIAL when some
+            repositories are missing or can't be read (named in the
+            errors); FAILED when none can be.
+        """
+        found: list[ActivePullRequest] = []
+        errors: list[str] = []
+        try:
+            _, git_client, project = self._get_clients()
+        except Exception as error:
+            return DiscoveryResult[ActivePullRequest].failed(f"pull requests: {error}")
+        criteria = GitPullRequestSearchCriteria(status="active")
+        for name in repo_names:
+            try:
+                repository = self._find_repository(git_client, project, name)
+                if repository is None:
+                    errors.append(f"{name}: no such repository in {project}")
+                    continue
+                found.extend(list_active_pull_requests(git_client, project, repository, criteria))
+            except Exception as error:
+                logger.warning("Cannot list pull requests of %s: %s", name, error)
+                errors.append(f"{name}: {error}")
+        if errors and len(errors) == len(repo_names):
+            return DiscoveryResult[ActivePullRequest].failed("; ".join(errors))
+        return DiscoveryResult[ActivePullRequest].from_items(found, errors)
 
     def read_file(self, repo_name: str, path: str, commit_sha: str) -> str | None:
         """Read one repository file at ``commit_sha`` (read-only).

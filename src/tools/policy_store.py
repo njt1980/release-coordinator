@@ -32,6 +32,7 @@ from src.core.models import (
     UNKNOWN_LABEL,
     UNRESOLVED_ID_PREFIX,
     ChannelBroker,
+    ContractChange,
     ContractScope,
     DiscoveryMethod,
     TelemetryClusterFilter,
@@ -337,6 +338,61 @@ class SourceControl(_StrictModel):
         return value.rstrip("/")
 
 
+class AdoConnection(_StrictModel):
+    """How the server talks to the project's Azure DevOps pull requests.
+
+    Everything is off by default. ``poll`` lists the active pull requests
+    of ``repositories`` (read-only, with the source-control identity) every
+    ``interval_minutes`` and assesses each new iteration (a new source
+    commit or a new target branch) through PR intake. ``target_branches``
+    (empty: any) limits which pull requests are polled. ``change_type`` is
+    the deployment-order call made for polled pull requests; a pull request
+    label ``rc:breaking`` or ``rc:additive`` overrides it.
+
+    ``comment`` posts the release briefing as a closed (resolved) thread,
+    and ``status`` an advisory status (genre ``release-coordinator``) on the
+    assessed iteration, for every assessment of a pull request read from
+    Azure DevOps (polled or by intake). Both write to Azure DevOps and need
+    "Contribute to pull requests" for the identity. The status blocks
+    nothing unless someone adds a branch policy requiring it; don't.
+    ``link_base_url`` (optional) is the server's address; the status then
+    links to the assessment's print view.
+    """
+
+    poll: bool = False
+    interval_minutes: int = Field(default=10, ge=2, le=1440)
+    repositories: list[str] = Field(default_factory=list)
+    target_branches: list[str] = Field(default_factory=list)
+    change_type: ContractChange = ContractChange.ADDITIVE
+    comment: bool = False
+    status: bool = False
+    link_base_url: str = Field(default="", pattern=r"^(https://[^\s]+)?$")
+
+    @field_validator("repositories", "target_branches")
+    @classmethod
+    def _clean_names(cls, values: list[str]) -> list[str]:
+        cleaned = [value.strip() for value in values if value.strip()]
+        if len({value.lower() for value in cleaned}) != len(cleaned):
+            raise ValueError("names must be unique")
+        return cleaned
+
+    @field_validator("link_base_url")
+    @classmethod
+    def _strip_link_slash(cls, value: str) -> str:
+        return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def _poll_names_repositories(self) -> Self:
+        if self.poll and not self.repositories:
+            raise ValueError("ado_connection.poll needs at least one repository")
+        return self
+
+    @property
+    def writes(self) -> bool:
+        """Whether anything is written back to Azure DevOps."""
+        return self.comment or self.status
+
+
 class ExternalConsumers(_StrictModel):
     """A message channel whose consumers live outside the scanned code
     (another project, a vendor), so the scan can't find them.
@@ -457,6 +513,9 @@ class ProjectPolicy(_StrictModel):
     from, so it never satisfies the ``telemetry_cluster``/``telemetry_components``
     requirement (see ``core.telemetry_roles``). ``messaging`` decides how a
     message channel with unknown consumers counts (see ``MessagingPolicy``).
+    ``ado_connection`` opts into polling pull requests and writing the
+    briefing back to them (see ``AdoConnection``; off by default, and it
+    needs ``source_control``).
     """
 
     policy_version: int = Field(ge=1)
@@ -493,6 +552,7 @@ class ProjectPolicy(_StrictModel):
     telemetry_collector_source: CollectorSource = CollectorSource.OTEL_SDK
     telemetry_role_filter: TelemetryRoleFilter = Field(default_factory=TelemetryRoleFilter)
     messaging: MessagingPolicy = Field(default_factory=MessagingPolicy)
+    ado_connection: AdoConnection = Field(default_factory=AdoConnection)
 
     @field_validator("kubernetes_api_server")
     @classmethod
@@ -575,6 +635,13 @@ class ProjectPolicy(_StrictModel):
         return next((rule for rule in self.exemptions.unobservable if rule.protocol == protocol), None)
 
     @model_validator(mode="after")
+    def _ado_connection_has_source(self) -> Self:
+        connection = self.ado_connection
+        if (connection.poll or connection.writes) and self.source_control is None:
+            raise ValueError("ado_connection needs source_control")
+        return self
+
+    @model_validator(mode="after")
     def _regulated_services_are_unique(self) -> Self:
         services = [entry.service for entry in self.regulated_services]
         if len(set(services)) != len(services):
@@ -640,6 +707,20 @@ class PolicyStore:
     def policy_path(self, scope: BaselineScope) -> Path:
         """Return where ``scope``'s policy file lives."""
         return self._root / scope.tenant / f"{scope.project_id}{_POLICY_SUFFIX}"
+
+    def list_scopes(self) -> list[BaselineScope]:
+        """Every tenant/project that has a policy file, sorted."""
+        if not self._root.is_dir():
+            return []
+        scopes: list[BaselineScope] = []
+        for path in sorted(self._root.glob(f"*/*{_POLICY_SUFFIX}")):
+            try:
+                scopes.append(
+                    BaselineScope(tenant=path.parent.name, project_id=path.name[: -len(_POLICY_SUFFIX)])
+                )
+            except ValidationError:
+                continue
+        return scopes
 
     def load(self, scope: BaselineScope) -> LoadedPolicy:
         """Load and validate ``scope``'s policy.
